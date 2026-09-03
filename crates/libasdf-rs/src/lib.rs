@@ -24,6 +24,7 @@
 
 #![allow(non_camel_case_types)]
 
+pub mod block_ffi;
 pub mod error_ffi;
 pub mod file_ffi;
 pub mod ndarray_ffi;

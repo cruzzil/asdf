@@ -80,6 +80,23 @@ pub(crate) fn value_node(value: *mut AsdfValue) -> Option<NodeId> {
     Some(unsafe { &*value }.node)
 }
 
+/// The reader backing a file, for the block API.
+pub(crate) fn file_reader(file: *mut AsdfFile) -> Option<&'static Reader> {
+    if file.is_null() {
+        return None;
+    }
+    unsafe { &*file }.reader.as_ref()
+}
+
+/// The queued blocks of a file open for writing.
+pub(crate) fn file_blocks_mut(file: *mut AsdfFile) -> Option<&'static mut Vec<PendingBlock>> {
+    if file.is_null() {
+        return None;
+    }
+    let handle = unsafe { &mut *file };
+    (handle.mode == FileMode::Write).then_some(&mut handle.blocks)
+}
+
 /// The document a value belongs to.
 pub(crate) fn value_document(value: *mut AsdfValue) -> Option<&'static Document> {
     let file = value_file(value)?;
@@ -692,7 +709,13 @@ pub unsafe extern "C" fn asdf_block_count(file: *mut AsdfFile) -> usize {
         if file.is_null() {
             return 0;
         }
-        unsafe { &*file }.reader.as_ref().map_or(0, Reader::block_count)
+        let handle = unsafe { &*file };
+        // A file opened for writing has no reader; its blocks are the ones
+        // queued so far.
+        match &handle.reader {
+            Some(reader) => reader.block_count(),
+            None => handle.blocks.len(),
+        }
     })
 }
 
