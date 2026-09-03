@@ -633,6 +633,151 @@ int main(void) {{
     assert_eq!(out.trim(), "ok");
 }
 
+/// A third-party extension, registered before `main` by the real macro.
+///
+/// `ASDF_REGISTER_EXTENSION` generates a function marked
+/// `__attribute__((constructor))`, so the registration runs while the process
+/// is still starting — before `main`, and before anything in the library has
+/// initialised. This is the risk the plan called out, and it is the shape a
+/// real extension such as libasdf-gwcs takes, so it is tested with the actual
+/// macro rather than by calling the registration function directly.
+#[test]
+fn a_c_extension_registers_before_main() {
+    if !have_c_compiler() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    if shared_library().is_none() {
+        eprintln!("skipping: shared library not built");
+        return;
+    }
+
+    let src = r##"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <asdf.h>
+#include <asdf/extension.h>
+
+#define CHECK(cond, msg) \
+    do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); return 1; } } while (0)
+
+/* A minimal native type for the extension to deserialize into. */
+typedef struct {
+    char *label;
+} widget_t;
+
+#define WIDGET_TAG "tag:example.com:test/widget-1.0.0"
+
+/* Set by the constructor, read by main, to prove the ordering. */
+static int registered_before_main = 0;
+
+static asdf_value_err_t widget_deserialize(
+    asdf_value_t *value, const void *userdata, void **out) {
+    (void)userdata;
+    const char *text = NULL;
+    if (asdf_value_as_string0(value, &text) != ASDF_VALUE_OK)
+        return ASDF_VALUE_ERR_TYPE_MISMATCH;
+
+    widget_t *widget = calloc(1, sizeof(widget_t));
+    if (!widget)
+        return ASDF_VALUE_ERR_OOM;
+
+    /* strdup is POSIX rather than C11, so copy by hand under -std=c11. */
+    size_t len = strlen(text);
+    widget->label = malloc(len + 1);
+    if (!widget->label) {
+        free(widget);
+        return ASDF_VALUE_ERR_OOM;
+    }
+    memcpy(widget->label, text, len + 1);
+
+    *out = widget;
+    return ASDF_VALUE_OK;
+}
+
+static void widget_deinit(void *obj) {
+    widget_t *widget = obj;
+    if (widget) {
+        free(widget->label);
+        widget->label = NULL;
+    }
+}
+
+static asdf_version_t widget_version = {"1.0.0", 1, 0, 0, NULL};
+static asdf_software_t widget_software = {
+    "test-widget", &widget_version, "Nobody", "https://example.com"};
+
+static const asdf_extension_vtab_t widget_vtab = {
+    .serialize = NULL,
+    .deserialize = widget_deserialize,
+    .copy = NULL,
+    .deinit = widget_deinit,
+};
+
+/* The real macro: defines the accessors and a constructor that registers. */
+ASDF_REGISTER_EXTENSION(
+    widget, widget_t, &widget_software, &widget_vtab, NULL, WIDGET_TAG);
+
+/* Runs after the macro's constructor, and records what it saw. */
+__attribute__((constructor(65535))) static void observe(void) {
+    registered_before_main = (asdf_extension_get(NULL, WIDGET_TAG) != NULL);
+}
+
+static const char TREE[] =
+    "#ASDF 1.0.0\n"
+    "#ASDF_STANDARD 1.6.0\n"
+    "%YAML 1.1\n"
+    "%TAG ! tag:stsci.edu:asdf/\n"
+    "--- !core/asdf-1.1.0\n"
+    "thing: !<tag:example.com:test/widget-1.0.0> 'a labelled widget'\n"
+    "...\n";
+
+int main(void) {
+    /* The whole point: registration happened during process start-up. */
+    CHECK(registered_before_main, "extension was not registered before main");
+
+    const asdf_extension_t *found = asdf_extension_get(NULL, WIDGET_TAG);
+    CHECK(found != NULL, "extension not found after main");
+    CHECK(found->size == sizeof(widget_t), "extension size");
+    CHECK(found->software != NULL, "extension software");
+    CHECK(strcmp(found->software->name, "test-widget") == 0, "software name");
+
+    asdf_file_t *file = asdf_open((const void *)TREE, sizeof(TREE) - 1);
+    CHECK(file != NULL, "open failed");
+
+    /* The generated predicate and getter, both from the macro. */
+    CHECK(asdf_is_widget(file, "thing"), "asdf_is_widget");
+
+    widget_t *widget = NULL;
+    CHECK(asdf_get_widget(file, "thing", &widget) == ASDF_VALUE_OK, "asdf_get_widget");
+    CHECK(widget != NULL, "null widget");
+    CHECK(strcmp(widget->label, "a labelled widget") == 0, "widget label");
+
+    /* The generated copy, which deep-copies through the vtab (or shallow
+     * when no copy method is given, as here). */
+    widget_t *copy = asdf_widget_copy(file, widget);
+    CHECK(copy != NULL, "asdf_widget_copy");
+
+    /* And the generated destructor. A shallow copy shares the label, so
+     * only one of the two may free it. */
+    memset(copy, 0, sizeof(*copy));
+    asdf_widget_destroy(copy);
+    asdf_widget_destroy(widget);
+
+    /* A tag the extension does not claim must not match. */
+    CHECK(asdf_extension_get(NULL, "tag:example.com:test/widget-9.9.9") == NULL,
+          "unrelated tag matched");
+
+    asdf_close(file);
+    printf("ok\n");
+    return 0;
+}
+"##;
+    let out = compile_and_run("c_extension", src, true).unwrap();
+    assert_eq!(out.trim(), "ok");
+}
+
 /// Upstream's `tests/test-symbol-leakage.sh`, ported.
 ///
 /// The shared library must export nothing outside libasdf's own namespace.

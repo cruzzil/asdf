@@ -1096,6 +1096,25 @@ fn set_node(
     }
 }
 
+/// Attach an existing value's node at `path`.
+///
+/// Used by the extension layer, which builds a value through an extension's
+/// serializer and then places it in the tree.
+///
+/// # Safety
+/// `file` must be a file handle open for writing; `path` a valid
+/// NUL-terminated string or null; `value` a valid value handle.
+pub(crate) unsafe fn set_value_at(
+    file: *mut AsdfFile,
+    path: *const c_char,
+    value: *mut AsdfValue,
+) -> AsdfValueErr {
+    let Some(node) = crate::file_ffi::value_node(value) else {
+        return AsdfValueErr::Unknown;
+    };
+    set_node(file, path, |_| node)
+}
+
 /// Generate a scalar setter.
 macro_rules! scalar_setter {
     ($name:ident, $ty:ty) => {

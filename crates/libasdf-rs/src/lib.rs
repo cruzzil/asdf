@@ -26,6 +26,7 @@
 
 pub mod block_ffi;
 pub mod error_ffi;
+pub mod extension_ffi;
 pub mod file_ffi;
 pub mod ndarray_ffi;
 pub mod panic;
