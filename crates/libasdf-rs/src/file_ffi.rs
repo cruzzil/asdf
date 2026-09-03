@@ -56,6 +56,37 @@ pub struct AsdfValue {
     node: NodeId,
 }
 
+impl AsdfValue {
+    /// Build a handle for a node of `file`.
+    pub(crate) fn new(file: *mut AsdfFile, node: NodeId) -> Self {
+        Self { file, node }
+    }
+}
+
+/// The file a value belongs to.
+pub(crate) fn value_file(value: *mut AsdfValue) -> Option<*mut AsdfFile> {
+    if value.is_null() {
+        return None;
+    }
+    let file = unsafe { &*value }.file;
+    (!file.is_null()).then_some(file)
+}
+
+/// The node a value refers to.
+pub(crate) fn value_node(value: *mut AsdfValue) -> Option<NodeId> {
+    if value.is_null() {
+        return None;
+    }
+    Some(unsafe { &*value }.node)
+}
+
+/// The document a value belongs to.
+pub(crate) fn value_document(value: *mut AsdfValue) -> Option<&'static Document> {
+    let file = value_file(value)?;
+    // The C contract has the file outlive every value taken from it.
+    unsafe { &*file }.document()
+}
+
 impl AsdfFile {
     fn new(mode: FileMode) -> Self {
         Self {
@@ -88,7 +119,7 @@ impl AsdfFile {
     }
 
     /// Intern a string and return a pointer valid until the file is closed.
-    fn intern(&self, s: &str) -> *const c_char {
+    pub(crate) fn intern(&self, s: &str) -> *const c_char {
         let Ok(c) = CString::new(s) else {
             return std::ptr::null();
         };
