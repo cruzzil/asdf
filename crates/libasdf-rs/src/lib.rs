@@ -25,11 +25,15 @@
 #![allow(non_camel_case_types)]
 
 pub mod error_ffi;
+pub mod file_ffi;
 pub mod ndarray_ffi;
+pub mod types;
 pub mod panic;
 pub mod version_ffi;
 
 pub use error_ffi::LogLevel;
+pub use file_ffi::{AsdfFile, AsdfValue};
+pub use types::{AsdfValueErr, AsdfValueType, asdf_config_t};
 pub use version_ffi::asdf_version_t;
 
 /// The library's own version, exported as `libasdf_version`.

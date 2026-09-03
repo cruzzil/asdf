@@ -19,6 +19,13 @@ pub mod layout;
 pub mod reader;
 pub mod version;
 
+/// The ASDF YAML layer: document model, parser and emitter.
+///
+/// Re-exported so that crates layered on the engine -- the C ABI shim and the
+/// idiomatic API -- have a single dependency edge rather than needing to
+/// track `asdf-yaml`'s version themselves.
+pub use asdf_yaml as yaml;
+
 pub use error::{Error, ErrorCode, Result};
 pub use layout::{Layout, scan};
 pub use reader::{ChecksumStatus, Reader};

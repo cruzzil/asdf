@@ -309,6 +309,104 @@ int main(void) {
     assert_eq!(out.trim(), "ok");
 }
 
+/// A C program using the header's `_Generic` macros, not just its symbols.
+///
+/// `asdf_open` and the `ASDF_ERROR_*` family exist only as macros, and
+/// `asdf_open_file` / `_fp` / `_mem` only as `static inline` wrappers. They are
+/// part of the API a drop-in consumer compiles against, so they need a test
+/// that goes through them rather than calling the underlying symbols directly.
+#[test]
+fn c_caller_can_use_the_header_macros() {
+    if !have_c_compiler() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    if shared_library().is_none() {
+        eprintln!("skipping: shared library not built");
+        return;
+    }
+
+    let src = r##"
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
+#include <asdf.h>
+
+static const char TREE[] =
+    "#ASDF 1.0.0\n"
+    "#ASDF_STANDARD 1.6.0\n"
+    "%YAML 1.1\n"
+    "%TAG ! tag:stsci.edu:asdf/\n"
+    "--- !core/asdf-1.1.0\n"
+    "name: Dennis Richie\n"
+    "foo: 42\n"
+    "big: 5000000000\n"
+    "flag: true\n"
+    "nested:\n"
+    "  inner: deep\n"
+    "list: [a, b, c]\n"
+    "...\n";
+
+#define CHECK(cond, msg) \
+    do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); return 1; } } while (0)
+
+int main(void) {
+    /* asdf_open is a _Generic macro; this exercises its void* form. */
+    asdf_file_t *file = asdf_open((const void *)TREE, sizeof(TREE) - 1);
+    CHECK(file != NULL, "asdf_open returned NULL");
+
+    const char *name = NULL;
+    CHECK(asdf_get_string0(file, "name", &name) == ASDF_VALUE_OK, "get name");
+    CHECK(strcmp(name, "Dennis Richie") == 0, "name value");
+
+    int64_t foo = 0;
+    CHECK(asdf_get_int64(file, "foo", &foo) == ASDF_VALUE_OK, "get foo");
+    CHECK(foo == 42, "foo value");
+
+    /* A value too large for the requested type must overflow, not truncate. */
+    uint8_t small = 0;
+    CHECK(asdf_get_uint8(file, "big", &small) == ASDF_VALUE_ERR_OVERFLOW, "overflow");
+
+    bool flag = false;
+    CHECK(asdf_get_bool(file, "flag", &flag) == ASDF_VALUE_OK, "get flag");
+    CHECK(flag, "flag value");
+
+    const char *inner = NULL;
+    CHECK(asdf_get_string0(file, "nested/inner", &inner) == ASDF_VALUE_OK, "nested");
+    CHECK(strcmp(inner, "deep") == 0, "nested value");
+
+    const char *second = NULL;
+    CHECK(asdf_get_string0(file, "list/1", &second) == ASDF_VALUE_OK, "indexed");
+    CHECK(strcmp(second, "b") == 0, "indexed value");
+
+    /* A missing path is NOT_FOUND, distinct from a type mismatch. */
+    int64_t missing = 0;
+    CHECK(asdf_get_int64(file, "nope", &missing) == ASDF_VALUE_ERR_NOT_FOUND, "missing");
+
+    CHECK(asdf_is_mapping(file, "nested"), "nested is a mapping");
+    CHECK(asdf_is_sequence(file, "list"), "list is a sequence");
+    CHECK(asdf_is_string(file, "name"), "name is a string");
+
+    asdf_value_t *root = asdf_get_value(file, "");
+    CHECK(root != NULL, "get root value");
+    CHECK(asdf_value_get_type(root) == ASDF_VALUE_MAPPING, "root is a mapping");
+    const char *tag = asdf_value_tag(root);
+    CHECK(tag != NULL, "root has a tag");
+    CHECK(strcmp(tag, "tag:stsci.edu:asdf/core/asdf-1.1.0") == 0, "root tag");
+    asdf_value_destroy(root);
+
+    CHECK(asdf_error_code(file) == ASDF_ERR_NONE, "no error recorded");
+    CHECK(asdf_block_count(file) == 0, "no blocks");
+
+    asdf_close(file);
+    printf("ok\n");
+    return 0;
+}
+"##;
+    let out = compile_and_run("c_macros", src, true).unwrap();
+    assert_eq!(out.trim(), "ok");
+}
+
 /// Upstream's `tests/test-symbol-leakage.sh`, ported.
 ///
 /// The shared library must export nothing outside libasdf's own namespace.
