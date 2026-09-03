@@ -25,6 +25,7 @@
 #![allow(non_camel_case_types)]
 
 pub mod block_ffi;
+pub mod core_ext;
 pub mod error_ffi;
 pub mod extension_ffi;
 pub mod file_ffi;
