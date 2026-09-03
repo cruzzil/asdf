@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use asdf_core::layout::scan;
+use asdf_core::reader::Reader;
 use asdf_yaml::compare::{CompareOptions, Difference, Side};
 use asdf_yaml::{Document, parse_document};
 
@@ -52,7 +53,15 @@ fn reference_pairs(refs: &Path) -> Vec<(PathBuf, PathBuf)> {
     out
 }
 
-/// Read a file's tree as a document.
+/// Read a file's tree as a document, with block-backed arrays inlined.
+///
+/// This is the transformation the corpus README prescribes.
+fn load_inlined(path: &Path) -> Option<(Document, Vec<String>)> {
+    let reader = Reader::open(path).ok()?;
+    reader.tree_inlined().ok()?
+}
+
+/// Read a file's tree without transforming it.
 fn load_tree(path: &Path) -> Option<Document> {
     let buf = std::fs::read(path).ok()?;
     let layout = scan(&buf).ok()?;
@@ -176,4 +185,96 @@ fn reference_trees_match_their_expected_yaml() {
             unexplained.len()
         );
     }
+}
+
+/// Tier 1, in full: with block-backed arrays inlined, each reference file's
+/// tree must equal its expected `.yaml` at the value level.
+///
+/// This is the corpus README's procedure carried out end to end, and it
+/// exercises nearly the whole read path at once: layout scanning, the tree
+/// extent search, the YAML document model, tags, anchors and aliases, block
+/// location, all three decompressors, datatype parsing, byte-order handling,
+/// strides, and element decoding -- judged against files written by a
+/// different implementation.
+#[test]
+fn inlined_reference_trees_equal_their_expected_yaml() {
+    let Some(root) = standard_dir() else {
+        eprintln!("skipping: ASDF_STANDARD_DIR not found");
+        return;
+    };
+    let refs = root.join("reference_files");
+    let pairs = reference_pairs(&refs);
+    assert!(!pairs.is_empty());
+
+    // Features not yet implemented, with the reason. Each is a real gap, not
+    // a tolerated difference: when the feature lands the entry comes out.
+    let unsupported: &[(&str, &str)] = &[
+        // The array's data lives in another file, which needs external
+        // source resolution.
+        ("exploded.asdf", "external array sources (phase 9)"),
+        // Python tags each inline complex value !core/complex-1.0.0 and
+        // spells it `0j` rather than `(0.0+0.0j)`; both need the complex
+        // extension to reproduce.
+        ("complex.asdf", "the core/complex tag and its spelling (phase 9)"),
+    ];
+
+    let options = CompareOptions {
+        ignore_key_order: true,
+        compare_tags: true,
+        float_tolerance: Some(1e-12),
+        max_differences: 20,
+        ..Default::default()
+    };
+
+    let mut matched = 0;
+    let mut skipped = 0;
+    let mut failures: Vec<String> = Vec::new();
+
+    for (asdf_path, yaml_path) in &pairs {
+        let name = asdf_path.file_name().unwrap().to_string_lossy().into_owned();
+        let rel = asdf_path.strip_prefix(&refs).unwrap_or(asdf_path).display().to_string();
+
+        if unsupported.iter().any(|(n, _)| *n == name) {
+            skipped += 1;
+            continue;
+        }
+
+        let (Some((left, not_inlined)), Some(right)) =
+            (load_inlined(asdf_path), load_tree(yaml_path))
+        else {
+            failures.push(format!("{rel}: failed to load"));
+            continue;
+        };
+        if !not_inlined.is_empty() {
+            failures.push(format!("{rel}: arrays left un-inlined: {not_inlined:?}"));
+            continue;
+        }
+
+        let result = asdf_yaml::compare(&left, &right, options);
+        if result.is_equal() {
+            matched += 1;
+        } else {
+            let detail: Vec<String> = result
+                .differences
+                .iter()
+                .take(4)
+                .map(|d| d.to_string())
+                .collect();
+            failures.push(format!("{rel}:\n      {}", detail.join("\n      ")));
+        }
+    }
+
+    eprintln!(
+        "{matched} of {} reference pairs match exactly after inlining \
+         ({skipped} skipped for unimplemented features)",
+        pairs.len()
+    );
+
+    assert!(
+        failures.is_empty(),
+        "{} pair(s) differ:\n    {}",
+        failures.len(),
+        failures.iter().take(8).cloned().collect::<Vec<_>>().join("\n    ")
+    );
+    assert!(matched > 60, "expected most pairs to match, got {matched}");
 }

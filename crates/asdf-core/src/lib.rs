@@ -12,6 +12,7 @@
 
 pub mod block;
 pub mod compression;
+pub mod core;
 pub mod error;
 pub mod layout;
 pub mod reader;
