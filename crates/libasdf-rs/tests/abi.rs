@@ -407,6 +407,100 @@ int main(void) {
     assert_eq!(out.trim(), "ok");
 }
 
+/// libasdf's own README example, written in C against our headers.
+///
+/// Upstream documents this as the way to use the library: open a NULL file
+/// for writing, set some metadata, write it out, then read it back. It goes
+/// through `asdf_open`'s and `asdf_write_to`'s `_Generic` macros, so it is
+/// about as close to a real consumer as a test can get.
+#[test]
+fn the_upstream_readme_example_works() {
+    if !have_c_compiler() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    if shared_library().is_none() {
+        eprintln!("skipping: shared library not built");
+        return;
+    }
+
+    let src = r##"
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <asdf.h>
+
+#define CHECK(cond, msg) \
+    do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); return 1; } } while (0)
+
+int main(void) {
+    /* Open a "NULL" file for writing, as the README does. */
+    asdf_file_t *file = asdf_open(NULL);
+    CHECK(file != NULL, "asdf_open(NULL) returned NULL");
+
+    CHECK(asdf_set_string0(file, "name", "Dennis Richie") == ASDF_VALUE_OK, "set name");
+    CHECK(asdf_set_int64(file, "foo", 42) == ASDF_VALUE_OK, "set foo");
+
+    /* A nested path materialises its parent mapping. */
+    CHECK(asdf_set_uint64(file, "powers/squares", 1764) == ASDF_VALUE_OK, "set nested");
+    CHECK(asdf_set_bool(file, "flag", true) == ASDF_VALUE_OK, "set flag");
+    CHECK(asdf_set_double(file, "ratio", 1.5) == ASDF_VALUE_OK, "set ratio");
+    CHECK(asdf_set_null(file, "nothing") == ASDF_VALUE_OK, "set null");
+
+    /* asdf_write_to is a _Generic macro; this is its buffer form. */
+    void *buf = NULL;
+    size_t size = 0;
+    CHECK(asdf_write_to(file, &buf, &size) == 0, "write to memory");
+    CHECK(buf != NULL && size > 0, "empty output");
+
+    /* What we wrote must be a well-formed ASDF file. */
+    CHECK(memcmp(buf, "#ASDF ", 6) == 0, "missing ASDF header");
+    asdf_close(file);
+
+    /* Read it back through the same API. */
+    asdf_file_t *readback = asdf_open((const void *)buf, size);
+    CHECK(readback != NULL, "reopen failed");
+
+    const char *name = NULL;
+    CHECK(asdf_get_string0(readback, "name", &name) == ASDF_VALUE_OK, "get name");
+    CHECK(strcmp(name, "Dennis Richie") == 0, "name round trip");
+
+    int64_t foo = 0;
+    CHECK(asdf_get_int64(readback, "foo", &foo) == ASDF_VALUE_OK, "get foo");
+    CHECK(foo == 42, "foo round trip");
+
+    uint64_t squares = 0;
+    CHECK(asdf_get_uint64(readback, "powers/squares", &squares) == ASDF_VALUE_OK, "get nested");
+    CHECK(squares == 1764, "nested round trip");
+
+    bool flag = false;
+    CHECK(asdf_get_bool(readback, "flag", &flag) == ASDF_VALUE_OK, "get flag");
+    CHECK(flag, "flag round trip");
+
+    double ratio = 0.0;
+    CHECK(asdf_get_double(readback, "ratio", &ratio) == ASDF_VALUE_OK, "get ratio");
+    CHECK(ratio == 1.5, "ratio round trip");
+
+    CHECK(asdf_is_null(readback, "nothing"), "null round trip");
+
+    /* The root must carry the core/asdf tag a valid tree requires. */
+    asdf_value_t *root = asdf_get_value(readback, "");
+    CHECK(root != NULL, "root value");
+    const char *tag = asdf_value_tag(root);
+    CHECK(tag != NULL && strncmp(tag, "tag:stsci.edu:asdf/core/asdf-", 29) == 0, "root tag");
+    asdf_value_destroy(root);
+
+    asdf_close(readback);
+    free(buf);
+    printf("ok\n");
+    return 0;
+}
+"##;
+    let out = compile_and_run("readme_example", src, true).unwrap();
+    assert_eq!(out.trim(), "ok");
+}
+
 /// Upstream's `tests/test-symbol-leakage.sh`, ported.
 ///
 /// The shared library must export nothing outside libasdf's own namespace.

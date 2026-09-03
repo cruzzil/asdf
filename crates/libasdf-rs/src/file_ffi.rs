@@ -14,20 +14,36 @@
 use std::ffi::{CStr, CString, c_char, c_double, c_int, c_void};
 use std::sync::Mutex;
 
-use asdf_core::Reader;
-use asdf_core::yaml::{self as asdf_yaml, Document, NodeId, Resolved, ScalarStyle, Schema, resolve};
+use asdf_core::yaml::{self as asdf_yaml, Document, NodeId, Resolved, ScalarStyle, Schema, Tag, resolve};
+use asdf_core::{PendingBlock, Reader, Writer};
 
 use crate::error_ffi::ErrorState;
 use crate::panic::guard;
 use crate::types::{AsdfValueErr, AsdfValueType, asdf_config_t};
+
+/// How a file was opened.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FileMode {
+    /// Backed by an existing file or buffer.
+    ReadOnly,
+    /// Created empty for writing.
+    Write,
+}
 
 /// An open ASDF file. Opaque to C.
 #[derive(Debug)]
 pub struct AsdfFile {
     reader: Option<Reader>,
     document: Option<Document>,
+    mode: FileMode,
+    /// Blocks queued for writing.
+    blocks: Vec<PendingBlock>,
     error: ErrorState,
     /// C strings handed out to callers, kept alive until the file is closed.
+    ///
+    /// Buffers from `asdf_write_to_mem` are deliberately *not* tracked here:
+    /// that function allocates with `malloc` and the caller frees them, which
+    /// is the contract libasdf documents.
     interned: Mutex<Vec<CString>>,
 }
 
@@ -39,13 +55,34 @@ pub struct AsdfValue {
 }
 
 impl AsdfFile {
-    fn new() -> Self {
+    fn new(mode: FileMode) -> Self {
         Self {
             reader: None,
             document: None,
+            mode,
+            blocks: Vec::new(),
             error: ErrorState::default(),
             interned: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The tree, creating an empty one if the file does not have it yet.
+    ///
+    /// A file opened for writing starts with no tree; the first `asdf_set_*`
+    /// call brings one into being, as libasdf's own write example expects.
+    fn document_for_write(&mut self) -> Option<&mut Document> {
+        if self.mode != FileMode::Write {
+            return None;
+        }
+        if self.document.is_none() {
+            let mut doc = Document::new_asdf();
+            let root = doc.add(asdf_core::yaml::Node::mapping());
+            // Every ASDF tree's root carries the core/asdf tag.
+            doc.node_mut(root).tag = Some(Tag::parse(ASDF_ROOT_TAG));
+            doc.set_root(root);
+            self.document = Some(doc);
+        }
+        self.document.as_mut()
     }
 
     /// Intern a string and return a pointer valid until the file is closed.
@@ -64,9 +101,12 @@ impl AsdfFile {
     }
 }
 
+/// The tag every ASDF tree's root carries.
+const ASDF_ROOT_TAG: &str = "tag:stsci.edu:asdf/core/asdf-1.1.0";
+
 /// Build a file handle around a reader.
 fn open_reader(reader: Reader) -> *mut AsdfFile {
-    let mut file = AsdfFile::new();
+    let mut file = AsdfFile::new(FileMode::ReadOnly);
     match reader.tree() {
         Ok(doc) => file.document = doc,
         Err(e) => {
@@ -124,8 +164,10 @@ pub unsafe extern "C" fn asdf_open_mem_ex(
 ) -> *mut AsdfFile {
     guard("asdf_open_mem_ex", std::ptr::null_mut(), || {
         let _ = config;
+        // `asdf_open(NULL)` expands to `asdf_open_mem(NULL, 0)`, which is how
+        // the C API asks for a new, empty file to write into.
         if buf.is_null() || size == 0 {
-            return std::ptr::null_mut();
+            return Box::into_raw(Box::new(AsdfFile::new(FileMode::Write)));
         }
         let bytes = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
         match Reader::from_bytes(bytes) {
@@ -674,16 +716,106 @@ mod tests {
     #[test]
     fn rejects_bad_arguments_without_crashing() {
         assert!(unsafe {
-            asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut())
-        }
-        .is_null());
-        assert!(unsafe {
             asdf_open_file_ex(std::ptr::null(), std::ptr::null(), std::ptr::null_mut())
         }
         .is_null());
         // Closing null must be a no-op, as it is upstream.
         unsafe { asdf_close(std::ptr::null_mut()) };
         assert_eq!(unsafe { asdf_error_code(std::ptr::null_mut()) }, 0);
+    }
+
+    /// `asdf_open(NULL)` expands to `asdf_open_mem(NULL, 0)`, which the C API
+    /// defines as "give me a new, empty file to write into" -- not as an
+    /// error. libasdf's own write example opens a file that way.
+    #[test]
+    fn opening_a_null_buffer_creates_a_writable_file() {
+        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        assert!(!f.is_null());
+        let h = Handle(f);
+
+        let path = cpath("foo");
+        assert_eq!(unsafe { asdf_set_int64(h.0, path.as_ptr(), 42) }, AsdfValueErr::Ok);
+    }
+
+    #[test]
+    fn writing_to_a_read_only_file_is_refused() {
+        let h = open();
+        let path = cpath("foo");
+        assert_eq!(
+            unsafe { asdf_set_int64(h.0, path.as_ptr(), 1) },
+            AsdfValueErr::ReadOnly
+        );
+    }
+
+    #[test]
+    fn a_written_file_reads_back() {
+        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let h = Handle(f);
+
+        let name = cpath("name");
+        let value = CString::new("Dennis Richie").unwrap();
+        assert_eq!(
+            unsafe { asdf_set_string0(h.0, name.as_ptr(), value.as_ptr()) },
+            AsdfValueErr::Ok
+        );
+        let foo = cpath("foo");
+        assert_eq!(unsafe { asdf_set_int64(h.0, foo.as_ptr(), 42) }, AsdfValueErr::Ok);
+        // Intermediate mappings are materialised.
+        let nested = cpath("powers/squares");
+        assert_eq!(unsafe { asdf_set_uint64(h.0, nested.as_ptr(), 1764) }, AsdfValueErr::Ok);
+
+        let mut buf: *mut c_void = std::ptr::null_mut();
+        let mut size: usize = 0;
+        assert_eq!(unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) }, 0);
+        assert!(!buf.is_null() && size > 0);
+
+        // Read the bytes back through the same API.
+        let reopened = unsafe { asdf_open_mem_ex(buf, size, std::ptr::null_mut()) };
+        assert!(!reopened.is_null());
+        let r = Handle(reopened);
+
+        let mut out: *const c_char = std::ptr::null();
+        assert_eq!(
+            unsafe { asdf_get_string0(r.0, name.as_ptr(), &mut out) },
+            AsdfValueErr::Ok
+        );
+        assert_eq!(unsafe { CStr::from_ptr(out) }.to_str().unwrap(), "Dennis Richie");
+
+        let mut v: i64 = 0;
+        assert_eq!(unsafe { asdf_get_int64(r.0, foo.as_ptr(), &mut v) }, AsdfValueErr::Ok);
+        assert_eq!(v, 42);
+
+        let mut u: u64 = 0;
+        assert_eq!(unsafe { asdf_get_uint64(r.0, nested.as_ptr(), &mut u) }, AsdfValueErr::Ok);
+        assert_eq!(u, 1764);
+
+        unsafe { libc::free(buf) };
+    }
+
+    /// A string of digits must survive as a string, not become an integer.
+    #[test]
+    fn string_setters_preserve_stringness() {
+        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let h = Handle(f);
+
+        let key = cpath("version");
+        let value = CString::new("42").unwrap();
+        unsafe { asdf_set_string0(h.0, key.as_ptr(), value.as_ptr()) };
+
+        let mut buf: *mut c_void = std::ptr::null_mut();
+        let mut size: usize = 0;
+        unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) };
+        let reopened = unsafe { asdf_open_mem_ex(buf, size, std::ptr::null_mut()) };
+        let r = Handle(reopened);
+
+        let mut out: *const c_char = std::ptr::null();
+        assert_eq!(
+            unsafe { asdf_get_string0(r.0, key.as_ptr(), &mut out) },
+            AsdfValueErr::Ok,
+            "a quoted numeric string must read back as a string"
+        );
+        assert_eq!(unsafe { CStr::from_ptr(out) }.to_str().unwrap(), "42");
+        unsafe { libc::free(buf) };
     }
 
     #[test]
@@ -907,4 +1039,282 @@ mod tests {
         assert_eq!(unsafe { asdf_block_count(h.0) }, 0);
         assert_eq!(unsafe { asdf_block_count(std::ptr::null_mut()) }, 0);
     }
+}
+
+// ---- Writing --------------------------------------------------------
+
+/// Resolve a file handle for mutation.
+fn write_target(file: *mut AsdfFile) -> Option<&'static mut AsdfFile> {
+    if file.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *file })
+}
+
+/// Set a node at `path`, creating intermediate mappings as needed.
+fn set_node(file: *mut AsdfFile, path: *const c_char, make: impl FnOnce(&mut Document) -> NodeId) -> AsdfValueErr {
+    let Some(handle) = write_target(file) else {
+        return AsdfValueErr::Unknown;
+    };
+    if handle.mode != FileMode::Write {
+        // libasdf reports a write to a read-only file distinctly from a
+        // type problem, so a caller can tell the two apart.
+        return AsdfValueErr::ReadOnly;
+    }
+    let path = if path.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned()
+    };
+    let Some(doc) = handle.document_for_write() else {
+        return AsdfValueErr::Unknown;
+    };
+    let node = make(doc);
+    match doc.insert_at_str(&path, node) {
+        Ok(_) => AsdfValueErr::Ok,
+        Err(_) => AsdfValueErr::Unknown,
+    }
+}
+
+/// Generate a scalar setter.
+macro_rules! scalar_setter {
+    ($name:ident, $ty:ty) => {
+        /// Set the value at `path`.
+        ///
+        /// Intermediate mappings are created as needed, so setting
+        /// `powers/squares` in an empty tree also creates `powers`.
+        ///
+        /// # Safety
+        /// `file` must be a file handle opened for writing and `path` a valid
+        /// NUL-terminated string or null.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(
+            file: *mut AsdfFile,
+            path: *const c_char,
+            value: $ty,
+        ) -> AsdfValueErr {
+            guard(stringify!($name), AsdfValueErr::Unknown, || {
+                set_node(file, path, |doc| doc.add_scalar(value.to_string()))
+            })
+        }
+    };
+}
+
+scalar_setter!(asdf_set_int8, i8);
+scalar_setter!(asdf_set_int16, i16);
+scalar_setter!(asdf_set_int32, i32);
+scalar_setter!(asdf_set_int64, i64);
+scalar_setter!(asdf_set_uint8, u8);
+scalar_setter!(asdf_set_uint16, u16);
+scalar_setter!(asdf_set_uint32, u32);
+scalar_setter!(asdf_set_uint64, u64);
+
+/// Set a NUL-terminated string at `path`.
+///
+/// The value is written quoted, so a string of digits reads back as a string
+/// rather than as a number.
+///
+/// # Safety
+/// `file` must be a file handle opened for writing; `path` and `value` must
+/// be valid NUL-terminated strings or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_set_string0(
+    file: *mut AsdfFile,
+    path: *const c_char,
+    value: *const c_char,
+) -> AsdfValueErr {
+    guard("asdf_set_string0", AsdfValueErr::Unknown, || {
+        if value.is_null() {
+            return AsdfValueErr::Unknown;
+        }
+        let text = unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned();
+        set_node(file, path, |doc| {
+            // Plain style is fine for text that cannot be mistaken for
+            // another type; anything else is quoted so it stays a string.
+            let style = match asdf_yaml::resolve(&text, ScalarStyle::Plain, Schema::Libasdf) {
+                Resolved::String => ScalarStyle::Plain,
+                _ => ScalarStyle::SingleQuoted,
+            };
+            doc.add_scalar_styled(text, style)
+        })
+    })
+}
+
+/// Set a boolean at `path`.
+///
+/// # Safety
+/// See the integer setters.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_set_bool(
+    file: *mut AsdfFile,
+    path: *const c_char,
+    value: bool,
+) -> AsdfValueErr {
+    guard("asdf_set_bool", AsdfValueErr::Unknown, || {
+        set_node(file, path, |doc| {
+            doc.add_scalar(if value { "true" } else { "false" })
+        })
+    })
+}
+
+/// Set a null at `path`.
+///
+/// # Safety
+/// See the integer setters.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_set_null(
+    file: *mut AsdfFile,
+    path: *const c_char,
+) -> AsdfValueErr {
+    guard("asdf_set_null", AsdfValueErr::Unknown, || {
+        set_node(file, path, |doc| doc.add_scalar("null"))
+    })
+}
+
+/// Set a `double` at `path`.
+///
+/// # Safety
+/// See the integer setters.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_set_double(
+    file: *mut AsdfFile,
+    path: *const c_char,
+    value: c_double,
+) -> AsdfValueErr {
+    guard("asdf_set_double", AsdfValueErr::Unknown, || {
+        set_node(file, path, |doc| {
+            doc.add_scalar(asdf_core::core::elements::format_float(value))
+        })
+    })
+}
+
+/// Set a `float` at `path`.
+///
+/// # Safety
+/// See the integer setters.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_set_float(
+    file: *mut AsdfFile,
+    path: *const c_char,
+    value: f32,
+) -> AsdfValueErr {
+    guard("asdf_set_float", AsdfValueErr::Unknown, || {
+        set_node(file, path, |doc| {
+            doc.add_scalar(asdf_core::core::elements::format_float(f64::from(value)))
+        })
+    })
+}
+
+/// Assemble the file's bytes.
+fn serialize(handle: &AsdfFile) -> Result<Vec<u8>, asdf_core::Error> {
+    let mut writer = match &handle.document {
+        Some(doc) => Writer::from_document(doc.clone()),
+        None => Writer::new(),
+    };
+    for block in &handle.blocks {
+        writer.add_block(block.clone());
+    }
+    writer.to_bytes()
+}
+
+/// Write the file to a filesystem path.
+///
+/// # Safety
+/// `file` must be a valid file handle and `filename` a valid NUL-terminated
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_write_to_file(
+    file: *mut AsdfFile,
+    filename: *const c_char,
+) -> c_int {
+    guard("asdf_write_to_file", -1, || {
+        if file.is_null() || filename.is_null() {
+            return -1;
+        }
+        let handle = unsafe { &*file };
+        let path = unsafe { CStr::from_ptr(filename) }.to_string_lossy().into_owned();
+
+        match serialize(handle).and_then(|bytes| Ok(std::fs::write(&path, bytes)?)) {
+            Ok(()) => 0,
+            Err(e) => {
+                handle.error.set_error(&e);
+                -1
+            }
+        }
+    })
+}
+
+/// Write the file to an open `FILE *`.
+///
+/// # Safety
+/// `file` must be a valid file handle and `fp` a `FILE *` open for writing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_write_to_fp(file: *mut AsdfFile, fp: *mut c_void) -> c_int {
+    guard("asdf_write_to_fp", -1, || {
+        if file.is_null() || fp.is_null() {
+            return -1;
+        }
+        let handle = unsafe { &*file };
+        let bytes = match serialize(handle) {
+            Ok(b) => b,
+            Err(e) => {
+                handle.error.set_error(&e);
+                return -1;
+            }
+        };
+        let written = unsafe {
+            libc::fwrite(
+                bytes.as_ptr().cast::<c_void>(),
+                1,
+                bytes.len(),
+                fp.cast::<libc::FILE>(),
+            )
+        };
+        if written == bytes.len() { 0 } else { -1 }
+    })
+}
+
+/// Write the file into a freshly allocated buffer.
+///
+/// The buffer is allocated with `malloc`, so the caller frees it with
+/// `free`. This matches libasdf, whose callers own the result.
+///
+/// # Safety
+/// `file` must be a valid file handle; `buf` and `size` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_write_to_mem(
+    file: *mut AsdfFile,
+    buf: *mut *mut c_void,
+    size: *mut usize,
+) -> c_int {
+    guard("asdf_write_to_mem", -1, || {
+        if file.is_null() || buf.is_null() || size.is_null() {
+            return -1;
+        }
+        let handle = unsafe { &*file };
+        let bytes = match serialize(handle) {
+            Ok(b) => b,
+            Err(e) => {
+                handle.error.set_error(&e);
+                return -1;
+            }
+        };
+
+        // Allocated with malloc rather than Rust's allocator, since the C
+        // caller frees it with free().
+        let allocation = unsafe { libc::malloc(bytes.len().max(1)) };
+        if allocation.is_null() {
+            return -1;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                allocation.cast::<u8>(),
+                bytes.len(),
+            );
+            *buf = allocation;
+            *size = bytes.len();
+        }
+        0
+    })
 }
