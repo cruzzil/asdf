@@ -149,6 +149,20 @@ impl AsdfFile {
     fn document(&self) -> Option<&Document> {
         self.document.as_ref()
     }
+
+    /// The tree, for allocating nodes into.
+    ///
+    /// Unlike [`AsdfFile::document_for_write`] this does not require the file
+    /// to be open for writing: building a value is allowed on any file, and
+    /// it is *placing* one in the tree at a path that needs write mode. A
+    /// read-only file with no tree gets an empty one, so a caller can still
+    /// construct values against it.
+    pub(crate) fn document_for_values(&mut self) -> Option<&mut Document> {
+        if self.document.is_none() {
+            self.document = Some(Document::new_asdf());
+        }
+        self.document.as_mut()
+    }
 }
 
 /// The tag every ASDF tree's root carries.
