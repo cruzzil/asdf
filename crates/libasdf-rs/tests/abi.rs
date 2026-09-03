@@ -203,14 +203,46 @@ fn public_struct_layouts_match() {
 #include <asdf.h>
 #include <asdf/version.h>
 
+#define SHOW(type, field) printf(#type "." #field "=%zu\n", offsetof(type, field))
+#define SHOW_TYPE(type) \
+    printf(#type ".size=%zu\n", sizeof(type)); \
+    printf(#type ".align=%zu\n", _Alignof(type))
+
 int main(void) {
-    printf("asdf_version_t.size=%zu\n", sizeof(asdf_version_t));
-    printf("asdf_version_t.align=%zu\n", _Alignof(asdf_version_t));
-    printf("asdf_version_t.version=%zu\n", offsetof(asdf_version_t, version));
-    printf("asdf_version_t.major=%zu\n", offsetof(asdf_version_t, major));
-    printf("asdf_version_t.minor=%zu\n", offsetof(asdf_version_t, minor));
-    printf("asdf_version_t.patch=%zu\n", offsetof(asdf_version_t, patch));
-    printf("asdf_version_t.extra=%zu\n", offsetof(asdf_version_t, extra));
+    SHOW_TYPE(asdf_version_t);
+    SHOW(asdf_version_t, version);
+    SHOW(asdf_version_t, major);
+    SHOW(asdf_version_t, minor);
+    SHOW(asdf_version_t, patch);
+    SHOW(asdf_version_t, extra);
+
+    /* Non-opaque and read directly by callers, so every offset matters. */
+    SHOW_TYPE(asdf_ndarray_t);
+    SHOW(asdf_ndarray_t, source);
+    SHOW(asdf_ndarray_t, ndim);
+    SHOW(asdf_ndarray_t, shape);
+    SHOW(asdf_ndarray_t, datatype);
+    SHOW(asdf_ndarray_t, byteorder);
+    SHOW(asdf_ndarray_t, offset);
+    SHOW(asdf_ndarray_t, strides);
+
+    SHOW_TYPE(asdf_datatype_t);
+    SHOW(asdf_datatype_t, type);
+    SHOW(asdf_datatype_t, size);
+    SHOW(asdf_datatype_t, name);
+    SHOW(asdf_datatype_t, byteorder);
+    SHOW(asdf_datatype_t, ndim);
+    SHOW(asdf_datatype_t, shape);
+    SHOW(asdf_datatype_t, nfields);
+    SHOW(asdf_datatype_t, fields);
+
+    /* Public iterator heads that the implementation casts to and from. */
+    SHOW_TYPE(asdf_mapping_iter_t);
+    SHOW(asdf_mapping_iter_t, key);
+    SHOW(asdf_mapping_iter_t, value);
+    SHOW_TYPE(asdf_sequence_iter_t);
+    SHOW(asdf_sequence_iter_t, index);
+    SHOW(asdf_sequence_iter_t, value);
     return 0;
 }
 "#;
@@ -482,6 +514,122 @@ int main(void) {
 }
 "##;
     let out = compile_and_run("readme_example", src, true).unwrap();
+    assert_eq!(out.trim(), "ok");
+}
+
+/// Reading a real array from C, the way libasdf's README read example does.
+///
+/// Writes a file with the Rust API, then reads its array back through the C
+/// ndarray surface: `asdf_get_ndarray`, the public struct fields, the typed
+/// element accessors and `asdf_ndarray_read_all`.
+#[test]
+fn c_caller_can_read_an_ndarray() {
+    if !have_c_compiler() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    if shared_library().is_none() {
+        eprintln!("skipping: shared library not built");
+        return;
+    }
+
+    // Build the input with the engine directly. Going through the `asdf`
+    // crate would be more natural, but this package's own lib is also named
+    // `asdf` (so the cdylib links as libasdf.so), and depending on both makes
+    // the name ambiguous.
+    let squares: Vec<u64> = (0..100u64).map(|i| i * i).collect();
+    let tree = asdf_core::yaml::parse_document(
+        "%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n\
+         name: Dennis Richie\n\
+         powers:\n  squares: !core/ndarray-1.1.0\n    source: 0\n    \
+         datatype: uint64\n    byteorder: little\n    shape: [100]\n...\n",
+    )
+    .unwrap();
+    let mut writer = asdf_core::Writer::from_document(tree);
+    writer.add_block(asdf_core::PendingBlock::new(
+        squares.iter().flat_map(|v| v.to_le_bytes()).collect(),
+    ));
+    let bytes = writer.to_bytes().unwrap();
+
+    let out_dir = target_dir().join("abi-tests");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let input = out_dir.join("squares.asdf");
+    std::fs::write(&input, &bytes).unwrap();
+
+    let src = format!(
+        r##"
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <asdf.h>
+
+#define CHECK(cond, msg) \
+    do {{ if (!(cond)) {{ fprintf(stderr, "FAIL: %s\n", msg); return 1; }} }} while (0)
+
+int main(void) {{
+    asdf_file_t *file = asdf_open("{path}", "r");
+    CHECK(file != NULL, "open failed");
+
+    const char *name = NULL;
+    CHECK(asdf_get_string0(file, "name", &name) == ASDF_VALUE_OK, "get name");
+    CHECK(strcmp(name, "Dennis Richie") == 0, "name value");
+
+    CHECK(asdf_is_ndarray(file, "powers/squares"), "is_ndarray");
+
+    asdf_ndarray_t *squares = NULL;
+    CHECK(asdf_get_ndarray(file, "powers/squares", &squares) == ASDF_VALUE_OK, "get ndarray");
+    CHECK(squares != NULL, "null ndarray");
+
+    /* The public struct fields a caller reads directly. */
+    CHECK(squares->ndim == 1, "ndim");
+    CHECK(squares->shape != NULL, "shape pointer");
+    CHECK(squares->shape[0] == 100, "shape[0]");
+    CHECK(squares->datatype.type == ASDF_DATATYPE_UINT64, "datatype");
+    CHECK(asdf_ndarray_size(squares) == 100, "size");
+    CHECK(asdf_ndarray_nbytes(squares) == 800, "nbytes");
+
+    /* One element at a time. */
+    uint64_t index = 10;
+    asdf_ndarray_err_t err = ASDF_NDARRAY_OK;
+    uint64_t value = asdf_ndarray_read_uint64_at(squares, &index, &err);
+    CHECK(err == ASDF_NDARRAY_OK, "read_at error");
+    CHECK(value == 100, "read_at value");
+
+    /* Out of range must be reported, not guessed at. */
+    index = 1000;
+    (void)asdf_ndarray_read_uint64_at(squares, &index, &err);
+    CHECK(err == ASDF_NDARRAY_ERR_OUT_OF_BOUNDS, "out of bounds");
+
+    /* The whole array, as in the README's read example. */
+    uint64_t *data = NULL;
+    CHECK(asdf_ndarray_read_all(squares, ASDF_DATATYPE_UINT64, (void **)&data)
+              == ASDF_NDARRAY_OK, "read_all");
+    uint64_t sum = 0;
+    for (uint64_t i = 0; i < asdf_ndarray_size(squares); i++) {{
+        sum += data[i];
+    }}
+    /* Sum of i*i for i in 0..99 */
+    CHECK(sum == 328350, "sum of squares");
+
+    /* And converted to another type. */
+    double *as_double = NULL;
+    CHECK(asdf_ndarray_read_all(squares, ASDF_DATATYPE_FLOAT64, (void **)&as_double)
+              == ASDF_NDARRAY_OK, "read_all converted");
+    CHECK(as_double[10] == 100.0, "converted value");
+
+    free(as_double);
+    free(data);
+    asdf_ndarray_destroy(squares);
+    asdf_close(file);
+    printf("ok\n");
+    return 0;
+}}
+"##,
+        path = input.display()
+    );
+
+    let out = compile_and_run("c_ndarray", &src, true).unwrap();
     assert_eq!(out.trim(), "ok");
 }
 
