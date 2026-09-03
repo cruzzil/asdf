@@ -81,13 +81,10 @@ fn collect_anchors(doc: &Document) -> HashMap<NodeId, String> {
         if !targets.contains(&id) {
             continue;
         }
-        let name = doc
-            .get(id)
-            .and_then(|n| n.anchor.clone())
-            .unwrap_or_else(|| {
-                counter += 1;
-                format!("id{counter:03}")
-            });
+        let name = doc.get(id).and_then(|n| n.anchor.clone()).unwrap_or_else(|| {
+            counter += 1;
+            format!("id{counter:03}")
+        });
         out.insert(id, name);
     }
     out
@@ -114,8 +111,8 @@ fn plain_is_safe(text: &str) -> bool {
     let first = text.chars().next().unwrap_or(' ');
     if "-?:,[]{}#&*!|>'\"%@`".contains(first) {
         // `-`, `?` and `:` are only indicators when followed by a space.
-        let followed_by_space = text.len() == 1
-            || text[first.len_utf8()..].starts_with(char::is_whitespace);
+        let followed_by_space =
+            text.len() == 1 || text[first.len_utf8()..].starts_with(char::is_whitespace);
         if !matches!(first, '-' | '?' | ':') || followed_by_space {
             return false;
         }
@@ -345,12 +342,8 @@ impl Emitter<'_> {
                         self.out.push('\n');
                     }
                     for entry in entries {
-                        let key = self
-                            .doc
-                            .resolved(entry.key)
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_string();
+                        let key =
+                            self.doc.resolved(entry.key).as_str().unwrap_or_default().to_string();
                         let _ = write!(self.out, "{pad}");
                         // Keys are quoted on the same rules as any scalar.
                         write_scalar(&mut self.out, &key, ScalarStyle::Plain);
@@ -425,12 +418,7 @@ fn emit_root_body(emitter: &mut Emitter<'_>, root: NodeId) -> Result<(), EmitErr
     match data {
         NodeData::Mapping { entries, .. } if !entries.is_empty() => {
             for entry in entries {
-                let key = emitter
-                    .doc
-                    .resolved(entry.key)
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
+                let key = emitter.doc.resolved(entry.key).as_str().unwrap_or_default().to_string();
                 write_scalar(&mut emitter.out, &key, ScalarStyle::Plain);
                 emitter.out.push(':');
                 emitter.emit_value(entry.value, indent, true)?;
@@ -486,7 +474,10 @@ mod tests {
         let original = parse_document(source).unwrap();
         let (text, reparsed) = round_trip(source);
         let result = compare(&original, &reparsed, CompareOptions::default());
-        assert!(result.is_equal(), "round trip changed the document:\n{result}\n--- emitted ---\n{text}");
+        assert!(
+            result.is_equal(),
+            "round trip changed the document:\n{result}\n--- emitted ---\n{text}"
+        );
         text
     }
 
@@ -542,9 +533,7 @@ mod tests {
 
     #[test]
     fn nests_mappings_and_sequences() {
-        let text = assert_round_trips(
-            "a:\n  b:\n    c: 1\nlist:\n  - x: 1\n  - x: 2\n",
-        );
+        let text = assert_round_trips("a:\n  b:\n    c: 1\nlist:\n  - x: 1\n  - x: 2\n");
         assert!(text.contains("a:\n"), "{text}");
         assert!(text.contains("  b:\n"), "{text}");
         assert!(text.contains("    c: 1\n"), "{text}");
@@ -568,7 +557,11 @@ mod tests {
         source.push_str("]\n");
 
         let text = assert_round_trips(&source);
-        assert!(text.contains("\n  - 0\n"), "long sequence should break:\n{}", &text[..200.min(text.len())]);
+        assert!(
+            text.contains("\n  - 0\n"),
+            "long sequence should break:\n{}",
+            &text[..200.min(text.len())]
+        );
     }
 
     #[test]

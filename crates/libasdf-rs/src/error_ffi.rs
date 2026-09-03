@@ -21,23 +21,23 @@ use asdf_core::ErrorCode;
 /// The parameter counts are part of the documented contract for
 /// `ASDF_ERROR_COMMON`, so these strings must keep their conversions exactly.
 const ERROR_FORMATS: &[Option<&CStr>] = &[
-    None,                                                              // NONE
-    Some(c"unknown parser state"),                                     // UNKNOWN_STATE
-    Some(c"failed to initialize stream"),                              // STREAM_INIT_FAILED
-    Some(c"cannot write to a read-only stream or file"),               // STREAM_READ_ONLY
-    Some(c"invalid ASDF header"),                                      // INVALID_ASDF_HEADER
-    Some(c"unexpected end of file"),                                   // UNEXPECTED_EOF
-    Some(c"invalid block header"),                                     // INVALID_BLOCK_HEADER
-    Some(c"block magic mismatch"),                                     // BLOCK_MAGIC_MISMATCH
-    Some(c"YAML parser initialization failed"),                        // YAML_PARSER_INIT_FAILED
-    Some(c"YAML parsing failed"),                                      // YAML_PARSE_FAILED
-    Some(c"out of memory"),                                            // OUT_OF_MEMORY
-    None,                                                              // SYSTEM (from strerror)
-    Some(c"invalid argument for %s: %s"),                              // INVALID_ARGUMENT
-    Some(c"unknown compression type: %s"),                             // UNKNOWN_COMPRESSION
-    Some(c"compression error: %s"),                                    // COMPRESSION_FAILED
-    Some(c"no serializer registered for the %s extension"),            // EXTENSION_NOT_FOUND
-    Some(c"over limit: %s"),                                           // OVER_LIMIT
+    None,                                                   // NONE
+    Some(c"unknown parser state"),                          // UNKNOWN_STATE
+    Some(c"failed to initialize stream"),                   // STREAM_INIT_FAILED
+    Some(c"cannot write to a read-only stream or file"),    // STREAM_READ_ONLY
+    Some(c"invalid ASDF header"),                           // INVALID_ASDF_HEADER
+    Some(c"unexpected end of file"),                        // UNEXPECTED_EOF
+    Some(c"invalid block header"),                          // INVALID_BLOCK_HEADER
+    Some(c"block magic mismatch"),                          // BLOCK_MAGIC_MISMATCH
+    Some(c"YAML parser initialization failed"),             // YAML_PARSER_INIT_FAILED
+    Some(c"YAML parsing failed"),                           // YAML_PARSE_FAILED
+    Some(c"out of memory"),                                 // OUT_OF_MEMORY
+    None,                                                   // SYSTEM (from strerror)
+    Some(c"invalid argument for %s: %s"),                   // INVALID_ARGUMENT
+    Some(c"unknown compression type: %s"),                  // UNKNOWN_COMPRESSION
+    Some(c"compression error: %s"),                         // COMPRESSION_FAILED
+    Some(c"no serializer registered for the %s extension"), // EXTENSION_NOT_FOUND
+    Some(c"over limit: %s"),                                // OVER_LIMIT
 ];
 
 /// The severity each error code is logged at, matching upstream.
@@ -411,14 +411,8 @@ mod tests {
     #[test]
     fn log_levels_match_upstream() {
         assert_eq!(error_log_level(ErrorCode::OutOfMemory as i32), LogLevel::Fatal);
-        assert_eq!(
-            error_log_level(ErrorCode::YamlParserInitFailed as i32),
-            LogLevel::Fatal
-        );
-        assert_eq!(
-            error_log_level(ErrorCode::ExtensionNotFound as i32),
-            LogLevel::Warn
-        );
+        assert_eq!(error_log_level(ErrorCode::YamlParserInitFailed as i32), LogLevel::Fatal);
+        assert_eq!(error_log_level(ErrorCode::ExtensionNotFound as i32), LogLevel::Warn);
         assert_eq!(error_log_level(ErrorCode::UnexpectedEof as i32), LogLevel::Error);
     }
 

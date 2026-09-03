@@ -106,9 +106,7 @@ fn parse_component(s: &str) -> Result<(Component, &str), PathError> {
     match chars.peek() {
         // Bracketed: always a sequence index.
         Some((_, '[')) => {
-            let close = s.find(']').ok_or_else(|| {
-                PathError::UnterminatedBracket(s.to_string())
-            })?;
+            let close = s.find(']').ok_or_else(|| PathError::UnterminatedBracket(s.to_string()))?;
             let body = &s[1..close];
             let index = body
                 .trim()
@@ -120,10 +118,8 @@ fn parse_component(s: &str) -> Result<(Component, &str), PathError> {
         // Quoted: always a mapping key, with no escaping inside.
         Some((_, quote @ ('\'' | '"'))) => {
             let quote = *quote;
-            let close = s[1..]
-                .find(quote)
-                .ok_or_else(|| PathError::UnterminatedQuote(s.to_string()))?
-                + 1;
+            let close =
+                s[1..].find(quote).ok_or_else(|| PathError::UnterminatedQuote(s.to_string()))? + 1;
             let key = s[1..close].to_string();
             Ok((Component::Key(key), &s[close + 1..]))
         }
@@ -228,10 +224,7 @@ mod tests {
     #[test]
     fn parses_simple_paths() {
         let p = Path::parse("a/b").unwrap();
-        assert_eq!(
-            p.components(),
-            [Component::Bare("a".into()), Component::Bare("b".into())]
-        );
+        assert_eq!(p.components(), [Component::Bare("a".into()), Component::Bare("b".into())]);
         // A leading slash is optional.
         assert_eq!(Path::parse("/a/b").unwrap(), p);
     }
@@ -346,14 +339,8 @@ mod tests {
             Path::parse("'unterminated"),
             Err(PathError::UnterminatedQuote("'unterminated".into()))
         );
-        assert_eq!(
-            Path::parse("[1"),
-            Err(PathError::UnterminatedBracket("[1".into()))
-        );
-        assert_eq!(
-            Path::parse("[abc]"),
-            Err(PathError::NonIntegerIndex("abc".into()))
-        );
+        assert_eq!(Path::parse("[1"), Err(PathError::UnterminatedBracket("[1".into())));
+        assert_eq!(Path::parse("[abc]"), Err(PathError::NonIntegerIndex("abc".into())));
         assert_eq!(Path::parse("a\\"), Err(PathError::DanglingEscape));
     }
 
@@ -446,9 +433,7 @@ impl Document {
             Component::Key(key) => Ok(self.mapping_set(parent, key, value)),
             Component::Index(index) => Ok(self.sequence_set(parent, *index, value)),
             Component::Bare(text) => {
-                if is_sequence
-                    && let Ok(index) = text.parse::<i64>()
-                {
+                if is_sequence && let Ok(index) = text.parse::<i64>() {
                     return Ok(self.sequence_set(parent, index, value));
                 }
                 Ok(self.mapping_set(parent, text, value))
@@ -663,8 +648,11 @@ mod insert_tests {
         let text = emit(&doc).unwrap();
         let back = reparse(&text).unwrap();
         assert_eq!(
-            back.lookup_str("powers/squares")
-                .map(|id| back.resolved(id).as_str().unwrap().to_string()),
+            back.lookup_str("powers/squares").map(|id| back
+                .resolved(id)
+                .as_str()
+                .unwrap()
+                .to_string()),
             Some("1764".to_string())
         );
     }

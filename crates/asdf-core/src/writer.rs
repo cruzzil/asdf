@@ -249,25 +249,18 @@ mod tests {
 
     #[test]
     fn writes_a_readable_file() {
-        let doc = tree(
-            "%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\nfoo: 42\n...\n",
-        );
+        let doc =
+            tree("%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\nfoo: 42\n...\n");
         let writer = Writer::from_document(doc);
         let bytes = writer.to_bytes().unwrap();
 
         let reader = Reader::from_bytes(bytes).unwrap();
         assert_eq!(reader.layout().format_version.triple(), (1, 0, 0));
-        assert_eq!(
-            reader.layout().standard_version.as_ref().unwrap().triple(),
-            (1, 6, 0)
-        );
+        assert_eq!(reader.layout().standard_version.as_ref().unwrap().triple(), (1, 6, 0));
 
         let read_back = reader.tree().unwrap().unwrap();
         let root = read_back.root().unwrap();
-        assert_eq!(
-            read_back.tag_of(root).unwrap().full(),
-            "tag:stsci.edu:asdf/core/asdf-1.1.0"
-        );
+        assert_eq!(read_back.tag_of(root).unwrap().full(), "tag:stsci.edu:asdf/core/asdf-1.1.0");
         let foo = read_back.mapping_get(root, "foo").unwrap();
         assert_eq!(read_back.node(foo).as_str(), Some("42"));
     }

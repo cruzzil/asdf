@@ -23,9 +23,9 @@ use asdf_yaml::compare::{CompareOptions, Difference, Side};
 use asdf_yaml::{Document, parse_document};
 
 fn standard_dir() -> Option<PathBuf> {
-    let path = std::env::var_os("ASDF_STANDARD_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("code/asdf-standard")))?;
+    let path = std::env::var_os("ASDF_STANDARD_DIR").map(PathBuf::from).or_else(|| {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("code/asdf-standard"))
+    })?;
     path.is_dir().then_some(path)
 }
 
@@ -126,11 +126,7 @@ fn reference_trees_match_their_expected_yaml() {
     let mut equal = 0;
 
     for (asdf_path, yaml_path) in &pairs {
-        let name = asdf_path
-            .strip_prefix(&refs)
-            .unwrap_or(asdf_path)
-            .display()
-            .to_string();
+        let name = asdf_path.strip_prefix(&refs).unwrap_or(asdf_path).display().to_string();
 
         let (Some(left), Some(right)) = (load_tree(asdf_path), load_tree(yaml_path)) else {
             unexplained.entry(name).or_default().push("failed to load".into());
@@ -254,12 +250,8 @@ fn inlined_reference_trees_equal_their_expected_yaml() {
         if result.is_equal() {
             matched += 1;
         } else {
-            let detail: Vec<String> = result
-                .differences
-                .iter()
-                .take(4)
-                .map(|d| d.to_string())
-                .collect();
+            let detail: Vec<String> =
+                result.differences.iter().take(4).map(|d| d.to_string()).collect();
             failures.push(format!("{rel}:\n      {}", detail.join("\n      ")));
         }
     }

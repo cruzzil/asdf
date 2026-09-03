@@ -95,9 +95,7 @@ pub fn available() -> Vec<Compression> {
 const MAX_EXPANSION_RATIO: usize = 4096;
 
 fn check_expected_size(compressed_len: usize, expected: usize) -> Result<()> {
-    let ceiling = compressed_len
-        .saturating_mul(MAX_EXPANSION_RATIO)
-        .max(1 << 20);
+    let ceiling = compressed_len.saturating_mul(MAX_EXPANSION_RATIO).max(1 << 20);
     if expected > ceiling {
         return Err(err!(
             CompressionFailed,
@@ -125,8 +123,7 @@ mod zlib {
     #[cfg(feature = "zlib")]
     pub fn compress(data: &[u8]) -> Result<Vec<u8>> {
         use std::io::Write;
-        let mut enc =
-            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(data)
             .and_then(|()| enc.finish())
             .map_err(|e| err!(CompressionFailed, "zlib compression failed: {e}"))
@@ -216,12 +213,9 @@ pub mod lz4 {
                     "lz4 stream truncated in a chunk length at offset {pos}"
                 ));
             }
-            let framed_len = u32::from_be_bytes([
-                data[pos],
-                data[pos + 1],
-                data[pos + 2],
-                data[pos + 3],
-            ]) as usize;
+            let framed_len =
+                u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
             pos += 4;
 
             if framed_len < 4 || pos + framed_len > data.len() {
@@ -296,12 +290,7 @@ mod tests {
 
     #[test]
     fn names_round_trip() {
-        for c in [
-            Compression::None,
-            Compression::Zlib,
-            Compression::Bzp2,
-            Compression::Lz4,
-        ] {
+        for c in [Compression::None, Compression::Zlib, Compression::Bzp2, Compression::Lz4] {
             assert_eq!(Compression::from_name(c.name()).unwrap(), c);
             // Every identifier must fit the header's four-byte field.
             assert!(c.name().len() <= 4, "{:?} name too long", c);
@@ -319,9 +308,8 @@ mod tests {
         for data in [counter_payload(), compressible_payload()] {
             for c in available() {
                 let packed = c.compress(&data).unwrap_or_else(|e| panic!("{:?}: {e}", c));
-                let unpacked = c
-                    .decompress(&packed, data.len())
-                    .unwrap_or_else(|e| panic!("{:?}: {e}", c));
+                let unpacked =
+                    c.decompress(&packed, data.len()).unwrap_or_else(|e| panic!("{:?}: {e}", c));
                 assert_eq!(unpacked, data, "{:?} did not round trip", c);
             }
         }
@@ -360,10 +348,7 @@ mod tests {
     fn none_is_a_passthrough() {
         let data = b"unchanged".to_vec();
         assert_eq!(Compression::None.compress(&data).unwrap(), data);
-        assert_eq!(
-            Compression::None.decompress(&data, data.len()).unwrap(),
-            data
-        );
+        assert_eq!(Compression::None.decompress(&data, data.len()).unwrap(), data);
     }
 
     #[cfg(feature = "lz4")]
@@ -375,8 +360,7 @@ mod tests {
         let packed = lz4::compress(&data).unwrap();
 
         assert!(packed.len() > lz4::CHUNK_HEADER_SIZE);
-        let framed_len =
-            u32::from_be_bytes([packed[0], packed[1], packed[2], packed[3]]) as usize;
+        let framed_len = u32::from_be_bytes([packed[0], packed[1], packed[2], packed[3]]) as usize;
         assert_eq!(
             framed_len,
             packed.len() - 4,

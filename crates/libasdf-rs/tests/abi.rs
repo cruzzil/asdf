@@ -16,19 +16,12 @@ use std::process::Command;
 fn target_dir() -> PathBuf {
     // The test binary lives at <target>/<profile>/deps/<name>-<hash>.
     let exe = std::env::current_exe().expect("current exe");
-    exe.parent()
-        .and_then(Path::parent)
-        .expect("target/<profile>")
-        .to_path_buf()
+    exe.parent().and_then(Path::parent).expect("target/<profile>").to_path_buf()
 }
 
 /// The include directories build.rs exported.
 fn include_dirs() -> Vec<PathBuf> {
-    env!("ASDF_INCLUDE_DIRS")
-        .split(':')
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .collect()
+    env!("ASDF_INCLUDE_DIRS").split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect()
 }
 
 fn shared_library() -> Option<PathBuf> {
@@ -47,10 +40,7 @@ fn c_compiler() -> String {
 }
 
 fn have_c_compiler() -> bool {
-    Command::new(c_compiler())
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
+    Command::new(c_compiler()).arg("--version").output().is_ok_and(|o| o.status.success())
 }
 
 /// Compile and run a C program against the vendored headers.
@@ -81,10 +71,7 @@ fn compile_and_run(name: &str, source: &str, link: bool) -> Result<String, Strin
 
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(format!(
-            "compiling {name} failed:\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+        return Err(format!("compiling {name} failed:\n{}", String::from_utf8_lossy(&out.stderr)));
     }
 
     let run = Command::new(&bin).output().map_err(|e| e.to_string())?;
@@ -242,10 +229,7 @@ int main(void) {
 
     assert_eq!(got["asdf_version_t.size"], size_of::<asdf_version_t>());
     assert_eq!(got["asdf_version_t.align"], align_of::<asdf_version_t>());
-    assert_eq!(
-        got["asdf_version_t.version"],
-        offset_of!(asdf_version_t, version)
-    );
+    assert_eq!(got["asdf_version_t.version"], offset_of!(asdf_version_t, version));
     assert_eq!(got["asdf_version_t.major"], offset_of!(asdf_version_t, major));
     assert_eq!(got["asdf_version_t.minor"], offset_of!(asdf_version_t, minor));
     assert_eq!(got["asdf_version_t.patch"], offset_of!(asdf_version_t, patch));
@@ -587,9 +571,6 @@ fn shim_entry_points_are_exported() {
     }
 
     for sym in required {
-        assert!(
-            text.contains(sym),
-            "{sym} is missing from the shared library's dynamic symbols"
-        );
+        assert!(text.contains(sym), "{sym} is missing from the shared library's dynamic symbols");
     }
 }

@@ -166,8 +166,7 @@ fn scan_text_section(buf: &[u8], out: &mut Layout) -> Result<usize> {
                 out.standard_version = Some(Version::parse(s.trim()));
             }
         } else {
-            out.comments
-                .push(String::from_utf8_lossy(&line[1..]).into_owned());
+            out.comments.push(String::from_utf8_lossy(&line[1..]).into_owned());
         }
         pos = next;
     }
@@ -223,9 +222,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// The same search, from the end.
@@ -233,9 +230,7 @@ fn rfind_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .rposition(|w| w == needle)
+    haystack.windows(needle.len()).rposition(|w| w == needle)
 }
 
 /// Walk the blocks from `pos`, following each header's allocated size.
@@ -345,10 +340,8 @@ fn scan_block_index(buf: &[u8], out: &mut Layout) {
         return;
     }
     if offsets.len() != out.blocks.len() {
-        out.index_rejection = Some(IndexRejection::CountMismatch {
-            listed: offsets.len(),
-            found: out.blocks.len(),
-        });
+        out.index_rejection =
+            Some(IndexRejection::CountMismatch { listed: offsets.len(), found: out.blocks.len() });
         return;
     }
     if let (Some(first_listed), Some(first_block)) = (offsets.first(), out.blocks.first())
@@ -361,10 +354,7 @@ fn scan_block_index(buf: &[u8], out: &mut Layout) {
         return;
     }
     for off in &offsets {
-        let ok = usize::try_from(*off)
-            .ok()
-            .and_then(|o| buf.get(o..))
-            .is_some_and(is_block_magic);
+        let ok = usize::try_from(*off).ok().and_then(|o| buf.get(o..)).is_some_and(is_block_magic);
         if !ok {
             out.index_rejection = Some(IndexRejection::NotBlockMagic { offset: *off });
             return;
@@ -411,9 +401,9 @@ pub fn write_block_index(offsets: &[u64]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block::header::BLOCK_HEADER_FULL_SIZE;
     use crate::block::header::FLAG_STREAMED;
     use crate::error::ErrorCode;
-    use crate::block::header::BLOCK_HEADER_FULL_SIZE;
 
     /// Build a minimal but well-formed ASDF file.
     fn build(tree: Option<&str>, block_payloads: &[&[u8]], with_index: bool) -> Vec<u8> {
@@ -548,10 +538,7 @@ mod tests {
 
         let l = scan(&buf).unwrap();
         assert!(!l.used_block_index());
-        assert!(matches!(
-            l.index_rejection,
-            Some(IndexRejection::FirstOffsetMismatch { .. })
-        ));
+        assert!(matches!(l.index_rejection, Some(IndexRejection::FirstOffsetMismatch { .. })));
         // ...but the blocks are still found by skipping along.
         assert_eq!(l.blocks.len(), 1);
     }
@@ -567,10 +554,7 @@ mod tests {
     #[test]
     fn rejects_an_index_with_the_wrong_count() {
         let mut buf = build(Some("x: 1"), &[b"aaaa", b"bbbb"], false);
-        let first = buf
-            .windows(4)
-            .position(|w| w == BLOCK_MAGIC)
-            .unwrap() as u64;
+        let first = buf.windows(4).position(|w| w == BLOCK_MAGIC).unwrap() as u64;
         buf.extend_from_slice(&write_block_index(&[first]));
         let l = scan(&buf).unwrap();
         assert!(matches!(

@@ -370,29 +370,29 @@ fn resolve_int_yaml11(text: &str) -> Option<Resolved> {
         return None;
     }
 
-    let (digits, radix) = if let Some(h) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X"))
-    {
-        (h.to_string(), 16)
-    } else if let Some(o) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) {
-        (o.to_string(), 8)
-    } else if let Some(b) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
-        (b.to_string(), 2)
-    } else if body.contains(':') {
-        // Sexagesimal, e.g. 190:20:30
-        let mut acc: i128 = 0;
-        for part in body.split(':') {
-            if part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()) {
-                return None;
+    let (digits, radix) =
+        if let Some(h) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+            (h.to_string(), 16)
+        } else if let Some(o) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) {
+            (o.to_string(), 8)
+        } else if let Some(b) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
+            (b.to_string(), 2)
+        } else if body.contains(':') {
+            // Sexagesimal, e.g. 190:20:30
+            let mut acc: i128 = 0;
+            for part in body.split(':') {
+                if part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()) {
+                    return None;
+                }
+                acc = acc.checked_mul(60)?.checked_add(part.parse::<i128>().ok()?)?;
             }
-            acc = acc.checked_mul(60)?.checked_add(part.parse::<i128>().ok()?)?;
-        }
-        let v = if neg { -acc } else { acc };
-        return finish_int_yaml11(v);
-    } else if body.len() > 1 && body.starts_with('0') {
-        (body[1..].to_string(), 8)
-    } else {
-        (body.clone(), 10)
-    };
+            let v = if neg { -acc } else { acc };
+            return finish_int_yaml11(v);
+        } else if body.len() > 1 && body.starts_with('0') {
+            (body[1..].to_string(), 8)
+        } else {
+            (body.clone(), 10)
+        };
 
     if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
         return None;
@@ -486,10 +486,7 @@ mod tests {
         assert_eq!(lib("1"), Resolved::Uint(1, ValueType::Uint8));
         assert_eq!(lib("0"), Resolved::Uint(0, ValueType::Uint8));
         // ...but an explicit tag short-circuits that.
-        assert_eq!(
-            resolve_tagged("1", "bool", Schema::Libasdf),
-            Some(Resolved::Bool(true))
-        );
+        assert_eq!(resolve_tagged("1", "bool", Schema::Libasdf), Some(Resolved::Bool(true)));
     }
 
     #[test]

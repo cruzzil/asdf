@@ -86,9 +86,9 @@ fn decode_one(datatype: &Datatype, bytes: &[u8], array_order: ByteOrder) -> Resu
 
     let order = effective_order(datatype.byteorder, array_order);
     let width = datatype.item_size() as usize;
-    let raw = bytes
-        .get(..width)
-        .ok_or_else(|| err!(UnexpectedEof, "element needs {width} bytes, {} available", bytes.len()))?;
+    let raw = bytes.get(..width).ok_or_else(|| {
+        err!(UnexpectedEof, "element needs {width} bytes, {} available", bytes.len())
+    })?;
 
     Ok(match datatype.scalar {
         ScalarType::Bool8 => Element::Bool(raw[0] != 0),
@@ -140,7 +140,11 @@ fn decode_one(datatype: &Datatype, bytes: &[u8], array_order: ByteOrder) -> Resu
         }
 
         ScalarType::Unknown | ScalarType::Structured => {
-            return Err(err!(InvalidArgument, "cannot decode a {} element", datatype.scalar.name()));
+            return Err(err!(
+                InvalidArgument,
+                "cannot decode a {} element",
+                datatype.scalar.name()
+            ));
         }
     })
 }
@@ -187,9 +191,9 @@ pub fn decode_all(nd: &Ndarray, shape: &[u64], bytes: &[u8]) -> Result<Vec<Eleme
         let pos = usize::try_from(pos)
             .map_err(|_| err!(InvalidArgument, "strides address a negative offset"))?;
 
-        let slice = bytes
-            .get(pos..)
-            .ok_or_else(|| err!(UnexpectedEof, "element at byte {pos} is past the end of the block"))?;
+        let slice = bytes.get(pos..).ok_or_else(|| {
+            err!(UnexpectedEof, "element at byte {pos} is past the end of the block")
+        })?;
         out.push(decode_one(&nd.datatype, slice, nd.byteorder)?);
 
         // Odometer step, last dimension fastest.
@@ -238,8 +242,7 @@ fn element_to_node(doc: &mut Document, element: &Element) -> NodeId {
             doc.add_scalar(format!("({}{}{}j)", format_float(*re), sign, format_float(im.abs())))
         }
         Element::Record(fields) => {
-            let items: Vec<NodeId> =
-                fields.iter().map(|f| element_to_node(doc, f)).collect();
+            let items: Vec<NodeId> = fields.iter().map(|f| element_to_node(doc, f)).collect();
             doc.add_sequence(items)
         }
     }
@@ -380,7 +383,8 @@ mod tests {
     #[test]
     fn byte_order_actually_changes_the_value() {
         let bytes = [0x01u8, 0x00];
-        let le = ndarray("a:\n  source: 0\n  shape: [1]\n  datatype: uint16\n  byteorder: little\n");
+        let le =
+            ndarray("a:\n  source: 0\n  shape: [1]\n  datatype: uint16\n  byteorder: little\n");
         let be = ndarray("a:\n  source: 0\n  shape: [1]\n  datatype: uint16\n  byteorder: big\n");
         assert_eq!(decode_all(&le, &[1], &bytes).unwrap(), vec![Element::Uint(1)]);
         assert_eq!(decode_all(&be, &[1], &bytes).unwrap(), vec![Element::Uint(256)]);
@@ -388,7 +392,8 @@ mod tests {
 
     #[test]
     fn decodes_floats_of_every_width() {
-        let nd = ndarray("a:\n  source: 0\n  shape: [2]\n  datatype: float64\n  byteorder: little\n");
+        let nd =
+            ndarray("a:\n  source: 0\n  shape: [2]\n  datatype: float64\n  byteorder: little\n");
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&1.5f64.to_le_bytes());
         bytes.extend_from_slice(&(-0.25f64).to_le_bytes());
@@ -397,13 +402,15 @@ mod tests {
             vec![Element::Float(1.5), Element::Float(-0.25)]
         );
 
-        let nd = ndarray("a:\n  source: 0\n  shape: [1]\n  datatype: float32\n  byteorder: little\n");
+        let nd =
+            ndarray("a:\n  source: 0\n  shape: [1]\n  datatype: float32\n  byteorder: little\n");
         assert_eq!(
             decode_all(&nd, &[1], &2.5f32.to_le_bytes()).unwrap(),
             vec![Element::Float(2.5)]
         );
 
-        let nd = ndarray("a:\n  source: 0\n  shape: [1]\n  datatype: float16\n  byteorder: little\n");
+        let nd =
+            ndarray("a:\n  source: 0\n  shape: [1]\n  datatype: float16\n  byteorder: little\n");
         let h = half::f16::from_f32(0.5);
         assert_eq!(
             decode_all(&nd, &[1], &h.to_bits().to_le_bytes()).unwrap(),
@@ -420,7 +427,9 @@ mod tests {
         );
 
         // Fixed-length ASCII is NUL-padded and trimmed on the way out.
-        let nd = ndarray("a:\n  source: 0\n  shape: [2]\n  datatype: ['ascii', 4]\n  byteorder: little\n");
+        let nd = ndarray(
+            "a:\n  source: 0\n  shape: [2]\n  datatype: ['ascii', 4]\n  byteorder: little\n",
+        );
         let bytes = b"M31\0Cas\0";
         assert_eq!(
             decode_all(&nd, &[2], bytes).unwrap(),
@@ -430,7 +439,9 @@ mod tests {
 
     #[test]
     fn decodes_ucs4_text() {
-        let nd = ndarray("a:\n  source: 0\n  shape: [1]\n  datatype: ['ucs4', 3]\n  byteorder: little\n");
+        let nd = ndarray(
+            "a:\n  source: 0\n  shape: [1]\n  datatype: ['ucs4', 3]\n  byteorder: little\n",
+        );
         let mut bytes = Vec::new();
         for cp in ['a' as u32, 0x00E9 /* é */, 0] {
             bytes.extend_from_slice(&cp.to_le_bytes());

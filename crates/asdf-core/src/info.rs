@@ -116,7 +116,7 @@ fn write_field(out: &mut String, align: Align, text: &str) {
             let _ = write!(out, "{:left$}{text}{:right$}", "", "", left = left, right = right);
         }
     }
-    let _ = write!(out, "{ANSI_DIM}│{ANSI_RESET}\n");
+    let _ = writeln!(out, "{ANSI_DIM}│{ANSI_RESET}");
 }
 
 /// A single-line, column-limited preview of a scalar.
@@ -249,20 +249,8 @@ fn write_node(
                 if leaf {
                     state.active[depth] = false;
                 }
-                let key = doc
-                    .resolved(entry.key)
-                    .as_str()
-                    .unwrap_or("<complex key>")
-                    .to_string();
-                write_node(
-                    out,
-                    doc,
-                    entry.value,
-                    &NodeIndex::Key(&key),
-                    depth + 1,
-                    leaf,
-                    state,
-                );
+                let key = doc.resolved(entry.key).as_str().unwrap_or("<complex key>").to_string();
+                write_node(out, doc, entry.value, &NodeIndex::Key(&key), depth + 1, leaf, state);
             }
         }
         NodeData::Sequence { items, .. } => {
@@ -273,15 +261,7 @@ fn write_node(
                 if leaf {
                     state.active[depth] = false;
                 }
-                write_node(
-                    out,
-                    doc,
-                    *item,
-                    &NodeIndex::Index(position),
-                    depth + 1,
-                    leaf,
-                    state,
-                );
+                write_node(out, doc, *item, &NodeIndex::Index(position), depth + 1, leaf, state);
             }
         }
         _ => {}
@@ -302,11 +282,7 @@ fn write_block(out: &mut String, reader: &Reader, index: usize, verify: bool) {
     // Upstream prints this with `%.*s` over the four-byte field, and printf
     // stops at the first NUL -- so an uncompressed block shows `""` rather
     // than four padding bytes.
-    write_field(
-        out,
-        Align::Left,
-        &format!("compression: \"{}\"", header.compression_name()),
-    );
+    write_field(out, Align::Left, &format!("compression: \"{}\"", header.compression_name()));
     write_border(out, Border::Middle);
 
     write_field(out, Align::Left, &format!("allocated_size: {}", header.allocated_size));

@@ -27,8 +27,8 @@
 pub mod error_ffi;
 pub mod file_ffi;
 pub mod ndarray_ffi;
-pub mod types;
 pub mod panic;
+pub mod types;
 pub mod version_ffi;
 
 pub use error_ffi::LogLevel;

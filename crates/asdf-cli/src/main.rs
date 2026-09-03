@@ -153,15 +153,9 @@ fn cmd_dd(args: &[String]) -> Result<ExitCode, String> {
     let reader = Reader::open(input).map_err(|e| format!("{input}: {e}"))?;
 
     let data = if raw {
-        reader
-            .block_raw(index)
-            .map(|d| d.to_vec())
-            .map_err(|e| format!("{input}: {e}"))?
+        reader.block_raw(index).map(|d| d.to_vec()).map_err(|e| format!("{input}: {e}"))?
     } else {
-        reader
-            .block_data(index)
-            .map(|d| d.into_owned())
-            .map_err(|e| format!("{input}: {e}"))?
+        reader.block_data(index).map(|d| d.into_owned()).map_err(|e| format!("{input}: {e}"))?
     };
 
     match positional.get(1).map(String::as_str) {

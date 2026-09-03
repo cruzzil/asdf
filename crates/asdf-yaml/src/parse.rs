@@ -92,11 +92,7 @@ impl Builder {
         }
         // Name the anchor positionally; the source name is not surfaced by the
         // parser, and ASDF assigns no meaning to anchor names.
-        let position = self
-            .anchor_order
-            .iter()
-            .position(|a| *a == anchor_id)
-            .unwrap_or(0);
+        let position = self.anchor_order.iter().position(|a| *a == anchor_id).unwrap_or(0);
         self.doc.node_mut(node).anchor = Some(format!("anc{}", position));
     }
 
@@ -111,20 +107,14 @@ impl Builder {
             .ok_or(ParseError::Malformed("collection end without a matching start"))?;
 
         let (node, data, start) = match frame {
-            Frame::Sequence { items, node, start } => (
-                node,
-                NodeData::Sequence { items, style: CollectionStyle::Auto },
-                start,
-            ),
+            Frame::Sequence { items, node, start } => {
+                (node, NodeData::Sequence { items, style: CollectionStyle::Auto }, start)
+            }
             Frame::Mapping { entries, pending_key, node, start } => {
                 if pending_key.is_some() {
                     return Err(ParseError::Malformed("mapping ended with a dangling key"));
                 }
-                (
-                    node,
-                    NodeData::Mapping { entries, style: CollectionStyle::Auto },
-                    start,
-                )
+                (node, NodeData::Mapping { entries, style: CollectionStyle::Auto }, start)
             }
         };
 
@@ -163,9 +153,9 @@ impl Builder {
             }
 
             Event::Alias(anchor_id) => {
-                let target = self.anchors.get(&anchor_id).copied().ok_or(
-                    ParseError::Malformed("alias refers to an anchor that was never defined"),
-                )?;
+                let target = self.anchors.get(&anchor_id).copied().ok_or(ParseError::Malformed(
+                    "alias refers to an anchor that was never defined",
+                ))?;
                 let mut node = Node::new(NodeData::Alias(target));
                 node.span = Some(convert_span(span));
                 let id = self.doc.add(node);
@@ -241,10 +231,8 @@ fn scan_directives(input: &str, doc: &mut Document) {
         } else if let Some(rest) = line.strip_prefix("%TAG ") {
             let mut parts = rest.split_whitespace();
             if let (Some(handle), Some(prefix)) = (parts.next(), parts.next()) {
-                doc.tag_handles.push(TagHandle {
-                    handle: handle.to_string(),
-                    prefix: prefix.to_string(),
-                });
+                doc.tag_handles
+                    .push(TagHandle { handle: handle.to_string(), prefix: prefix.to_string() });
             }
         }
     }
@@ -349,10 +337,7 @@ mod tests {
         .unwrap();
         let root = doc.root().unwrap();
         let data = doc.mapping_get(root, "data").unwrap();
-        assert_eq!(
-            doc.tag_of(data).unwrap().full(),
-            "tag:stsci.edu:asdf/core/ndarray-1.1.0"
-        );
+        assert_eq!(doc.tag_of(data).unwrap().full(), "tag:stsci.edu:asdf/core/ndarray-1.1.0");
         let shape = doc.mapping_get(data, "shape").unwrap();
         assert_eq!(doc.container_len(shape), Some(1));
     }

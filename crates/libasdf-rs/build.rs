@@ -99,10 +99,7 @@ LIBASDF {
     if std::fs::read_to_string(&script).ok().as_deref() != Some(contents) {
         std::fs::write(&script, contents).expect("write version script");
     }
-    println!(
-        "cargo:rustc-link-arg-cdylib=-Wl,--version-script={}",
-        script.display()
-    );
+    println!("cargo:rustc-link-arg-cdylib=-Wl,--version-script={}", script.display());
 }
 
 /// Does the target's C compiler support `_Float16`?
@@ -133,11 +130,8 @@ fn write_config_h(include_dir: &Path, have_float16: bool) {
     let dir = include_dir.join("asdf");
     std::fs::create_dir_all(&dir).expect("create generated include dir");
 
-    let float16 = if have_float16 {
-        "#define ASDF_HAVE_FLOAT16 1"
-    } else {
-        "/* #undef ASDF_HAVE_FLOAT16 */"
-    };
+    let float16 =
+        if have_float16 { "#define ASDF_HAVE_FLOAT16 1" } else { "/* #undef ASDF_HAVE_FLOAT16 */" };
 
     let contents = format!(
         "\

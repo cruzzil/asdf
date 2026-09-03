@@ -123,9 +123,10 @@ impl Ndarray {
                     .ok_or_else(|| err!(InvalidArgument, "strides must be a sequence"))?;
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
-                    let text = doc.resolved(*item).as_str().ok_or_else(|| {
-                        err!(InvalidArgument, "stride entry is not a scalar")
-                    })?;
+                    let text = doc
+                        .resolved(*item)
+                        .as_str()
+                        .ok_or_else(|| err!(InvalidArgument, "stride entry is not a scalar"))?;
                     out.push(text.parse::<i64>().map_err(|_| {
                         err!(InvalidArgument, "stride entry is not an integer: {text}")
                     })?);
@@ -208,9 +209,8 @@ impl Ndarray {
 /// Parse the `source` key, which is either a block index or a URI.
 fn parse_source(doc: &Document, id: NodeId) -> Result<Source> {
     let node = doc.resolved(id);
-    let text = node
-        .as_str()
-        .ok_or_else(|| err!(InvalidArgument, "ndarray source must be a scalar"))?;
+    let text =
+        node.as_str().ok_or_else(|| err!(InvalidArgument, "ndarray source must be a scalar"))?;
 
     // A quoted scalar is always a URI, even if it looks numeric.
     let quoted = node.scalar_style().is_some_and(|s| s.is_quoted());
@@ -320,19 +320,17 @@ mod tests {
     #[test]
     fn a_quoted_numeric_source_is_still_a_uri() {
         // Quoting makes it a string, so it names a file rather than a block.
-        let nd = parse_nd(
-            "a:\n  source: '0'\n  shape: [4]\n  datatype: int8\n  byteorder: little\n",
-        )
-        .unwrap();
+        let nd =
+            parse_nd("a:\n  source: '0'\n  shape: [4]\n  datatype: int8\n  byteorder: little\n")
+                .unwrap();
         assert_eq!(nd.source, Source::External("0".into()));
     }
 
     #[test]
     fn source_minus_one_is_the_last_block() {
-        let nd = parse_nd(
-            "a:\n  source: -1\n  shape: ['*']\n  datatype: int64\n  byteorder: little\n",
-        )
-        .unwrap();
+        let nd =
+            parse_nd("a:\n  source: -1\n  shape: ['*']\n  datatype: int64\n  byteorder: little\n")
+                .unwrap();
         assert_eq!(nd.source, Source::LastBlock);
     }
 

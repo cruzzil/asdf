@@ -106,7 +106,10 @@ impl fmt::Display for Difference {
         match self {
             Difference::MissingKey { path, key, present_in } => {
                 let absent = if *present_in == Side::Left { Side::Right } else { Side::Left };
-                write!(f, "{path}: key {key:?} is in the {present_in} document but not the {absent}")
+                write!(
+                    f,
+                    "{path}: key {key:?} is in the {present_in} document but not the {absent}"
+                )
             }
             Difference::KindMismatch { path, left, right } => {
                 write!(f, "{path}: left is a {left}, right is a {right}")
@@ -214,9 +217,7 @@ fn scalars_equal(left: Resolved, right: Resolved, tolerance: Option<f64>) -> boo
         // narrow to: 42 is 42 whether it landed in uint8 or int64.
         (Uint(a, _), Uint(b, _)) => a == b,
         (Int(a, _), Int(b, _)) => a == b,
-        (Uint(a, _), Int(b, _)) | (Int(b, _), Uint(a, _)) => {
-            i128::from(a) == i128::from(b)
-        }
+        (Uint(a, _), Int(b, _)) | (Int(b, _), Uint(a, _)) => i128::from(a) == i128::from(b),
 
         (Double(a), Double(b)) => floats_equal(a, b, tolerance),
 
@@ -293,11 +294,7 @@ impl Comparer<'_> {
             let lt = tag_string(self.left.node(l).tag.as_ref());
             let rt = tag_string(self.right.node(r).tag.as_ref());
             if lt != rt {
-                self.push(Difference::TagMismatch {
-                    path: path.to_string(),
-                    left: lt,
-                    right: rt,
-                });
+                self.push(Difference::TagMismatch { path: path.to_string(), left: lt, right: rt });
             }
         }
 
@@ -346,8 +343,7 @@ impl Comparer<'_> {
                     doc.resolved(id).as_str().unwrap_or("<complex key>").to_string()
                 };
 
-                let left_keys: Vec<String> =
-                    le.iter().map(|e| key_of(self.left, e.key)).collect();
+                let left_keys: Vec<String> = le.iter().map(|e| key_of(self.left, e.key)).collect();
                 let right_keys: Vec<String> =
                     re.iter().map(|e| key_of(self.right, e.key)).collect();
 
@@ -399,13 +395,7 @@ pub fn compare_from(
     right_root: NodeId,
     options: CompareOptions,
 ) -> Comparison {
-    let mut c = Comparer {
-        left,
-        right,
-        options,
-        out: Comparison::default(),
-        seen: HashSet::new(),
-    };
+    let mut c = Comparer { left, right, options, out: Comparison::default(), seen: HashSet::new() };
     c.compare("", left_root, right_root);
     c.out
 }

@@ -255,6 +255,109 @@ fn md5_of(data: &[u8]) -> [u8; CHECKSUM_SIZE] {
     hasher.finalize().into()
 }
 
+/// Walking a tree to find every node carrying a given tag name.
+///
+/// The version suffix is ignored, so `core/ndarray-1.0.0` and
+/// `core/ndarray-1.1.0` both match `core/ndarray`.
+fn find_tagged(doc: &Document, name: &str) -> Vec<asdf_yaml::NodeId> {
+    use asdf_yaml::NodeData;
+
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let Some(root) = doc.root() else { return out };
+    let mut stack = vec![root];
+
+    while let Some(id) = stack.pop() {
+        let resolved = doc.resolve(id);
+        if !seen.insert(resolved) {
+            continue;
+        }
+        if doc.tag_of(resolved).is_some_and(|t| t.split_version().0 == name) {
+            out.push(resolved);
+        }
+        match &doc.node(resolved).data {
+            NodeData::Sequence { items, .. } => stack.extend(items.iter().copied()),
+            NodeData::Mapping { entries, .. } => {
+                stack.extend(entries.iter().map(|e| e.value));
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out
+}
+
+impl Reader {
+    /// Resolve an ndarray's `source` to a block index in this file.
+    fn block_index_for(&self, source: &crate::core::ndarray::Source) -> Option<usize> {
+        match source {
+            crate::core::ndarray::Source::Block(i) => Some(*i),
+            crate::core::ndarray::Source::LastBlock => self.block_count().checked_sub(1),
+            _ => None,
+        }
+    }
+
+    /// Parse the tree with every block-backed `core/ndarray` replaced by its
+    /// data inline.
+    ///
+    /// This is the transformation the ASDF Standard's reference corpus asks
+    /// for before comparing a file against its expected YAML. Arrays whose
+    /// data is not in this file -- an external `source`, used by exploded
+    /// form -- are left alone, and named in the returned list.
+    ///
+    /// Returns the transformed tree and the paths of any arrays that could
+    /// not be inlined.
+    pub fn tree_inlined(&self) -> Result<Option<(Document, Vec<String>)>> {
+        use crate::core::elements::{decode_all, inline_ndarray};
+        use crate::core::ndarray::Ndarray;
+
+        let Some(mut doc) = self.tree()? else { return Ok(None) };
+        let mut skipped = Vec::new();
+
+        for id in find_tagged(&doc, "core/ndarray") {
+            let nd = match Ndarray::parse(&doc, id) {
+                Ok(nd) => nd,
+                Err(e) => {
+                    skipped.push(format!("{id:?}: {e}"));
+                    continue;
+                }
+            };
+
+            // Inline data is already where it needs to be.
+            if matches!(nd.source, crate::core::ndarray::Source::Inline(_)) {
+                continue;
+            }
+
+            let Some(index) = self.block_index_for(&nd.source) else {
+                skipped.push(format!("{id:?}: data is outside this file ({:?})", nd.source));
+                continue;
+            };
+
+            let data = match self.block_data(index) {
+                Ok(d) => d,
+                Err(e) => {
+                    skipped.push(format!("{id:?}: block {index}: {e}"));
+                    continue;
+                }
+            };
+
+            let shape = match nd.resolved_shape(Some(data.len() as u64)) {
+                Ok(s) => s,
+                Err(e) => {
+                    skipped.push(format!("{id:?}: {e}"));
+                    continue;
+                }
+            };
+
+            match decode_all(&nd, &shape, &data) {
+                Ok(elements) => inline_ndarray(&mut doc, id, &elements, &shape)?,
+                Err(e) => skipped.push(format!("{id:?}: {e}")),
+            }
+        }
+        Ok(Some((doc, skipped)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,123 +530,13 @@ mod tests {
     fn a_file_without_a_tree_reads_cleanly() {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n");
-        let header = BlockHeader {
-            allocated_size: 4,
-            used_size: 4,
-            data_size: 4,
-            ..Default::default()
-        };
+        let header =
+            BlockHeader { allocated_size: 4, used_size: 4, data_size: 4, ..Default::default() };
         header.write(&mut buf);
         buf.extend_from_slice(b"data");
 
         let r = Reader::from_bytes(buf).unwrap();
         assert!(r.tree().unwrap().is_none());
         assert_eq!(&*r.block_data(0).unwrap(), b"data");
-    }
-}
-
-/// Walking a tree to find every node carrying a given tag name.
-///
-/// The version suffix is ignored, so `core/ndarray-1.0.0` and
-/// `core/ndarray-1.1.0` both match `core/ndarray`.
-fn find_tagged(doc: &Document, name: &str) -> Vec<asdf_yaml::NodeId> {
-    use asdf_yaml::NodeData;
-
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let Some(root) = doc.root() else { return out };
-    let mut stack = vec![root];
-
-    while let Some(id) = stack.pop() {
-        let resolved = doc.resolve(id);
-        if !seen.insert(resolved) {
-            continue;
-        }
-        if doc
-            .tag_of(resolved)
-            .is_some_and(|t| t.split_version().0 == name)
-        {
-            out.push(resolved);
-        }
-        match &doc.node(resolved).data {
-            NodeData::Sequence { items, .. } => stack.extend(items.iter().copied()),
-            NodeData::Mapping { entries, .. } => {
-                stack.extend(entries.iter().map(|e| e.value));
-            }
-            _ => {}
-        }
-    }
-    out.sort();
-    out
-}
-
-impl Reader {
-    /// Resolve an ndarray's `source` to a block index in this file.
-    fn block_index_for(&self, source: &crate::core::ndarray::Source) -> Option<usize> {
-        match source {
-            crate::core::ndarray::Source::Block(i) => Some(*i),
-            crate::core::ndarray::Source::LastBlock => self.block_count().checked_sub(1),
-            _ => None,
-        }
-    }
-
-    /// Parse the tree with every block-backed `core/ndarray` replaced by its
-    /// data inline.
-    ///
-    /// This is the transformation the ASDF Standard's reference corpus asks
-    /// for before comparing a file against its expected YAML. Arrays whose
-    /// data is not in this file -- an external `source`, used by exploded
-    /// form -- are left alone, and named in the returned list.
-    ///
-    /// Returns the transformed tree and the paths of any arrays that could
-    /// not be inlined.
-    pub fn tree_inlined(&self) -> Result<Option<(Document, Vec<String>)>> {
-        use crate::core::elements::{decode_all, inline_ndarray};
-        use crate::core::ndarray::Ndarray;
-
-        let Some(mut doc) = self.tree()? else { return Ok(None) };
-        let mut skipped = Vec::new();
-
-        for id in find_tagged(&doc, "core/ndarray") {
-            let nd = match Ndarray::parse(&doc, id) {
-                Ok(nd) => nd,
-                Err(e) => {
-                    skipped.push(format!("{id:?}: {e}"));
-                    continue;
-                }
-            };
-
-            // Inline data is already where it needs to be.
-            if matches!(nd.source, crate::core::ndarray::Source::Inline(_)) {
-                continue;
-            }
-
-            let Some(index) = self.block_index_for(&nd.source) else {
-                skipped.push(format!("{id:?}: data is outside this file ({:?})", nd.source));
-                continue;
-            };
-
-            let data = match self.block_data(index) {
-                Ok(d) => d,
-                Err(e) => {
-                    skipped.push(format!("{id:?}: block {index}: {e}"));
-                    continue;
-                }
-            };
-
-            let shape = match nd.resolved_shape(Some(data.len() as u64)) {
-                Ok(s) => s,
-                Err(e) => {
-                    skipped.push(format!("{id:?}: {e}"));
-                    continue;
-                }
-            };
-
-            match decode_all(&nd, &shape, &data) {
-                Ok(elements) => inline_ndarray(&mut doc, id, &elements, &shape)?,
-                Err(e) => skipped.push(format!("{id:?}: {e}")),
-            }
-        }
-        Ok(Some((doc, skipped)))
     }
 }

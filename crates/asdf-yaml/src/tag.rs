@@ -57,8 +57,7 @@ impl Tag {
 
     /// Whether this is a tag from the ASDF Standard.
     pub fn is_asdf(&self) -> bool {
-        self.handle == ASDF_STANDARD_TAG_PREFIX
-            || self.full().starts_with(ASDF_STANDARD_TAG_PREFIX)
+        self.handle == ASDF_STANDARD_TAG_PREFIX || self.full().starts_with(ASDF_STANDARD_TAG_PREFIX)
     }
 
     /// Whether this is one of YAML's own built-in tags (`!!str`, `!!int`, ...).
@@ -70,11 +69,7 @@ impl Tag {
     ///
     /// Returns `None` for tags outside the ASDF Standard.
     pub fn asdf_name(&self) -> Option<&str> {
-        if self.handle == ASDF_STANDARD_TAG_PREFIX {
-            Some(&self.suffix)
-        } else {
-            None
-        }
+        if self.handle == ASDF_STANDARD_TAG_PREFIX { Some(&self.suffix) } else { None }
     }
 
     /// Split an ASDF tag into its schema name and version, e.g.
@@ -174,11 +169,7 @@ mod tests {
 
     #[test]
     fn full_round_trips() {
-        for s in [
-            "tag:stsci.edu:asdf/core/asdf-1.1.0",
-            "tag:yaml.org,2002:str",
-            "!local",
-        ] {
+        for s in ["tag:stsci.edu:asdf/core/asdf-1.1.0", "tag:yaml.org,2002:str", "!local"] {
             assert_eq!(Tag::parse(s).full(), s);
         }
     }

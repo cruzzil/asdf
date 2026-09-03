@@ -107,11 +107,8 @@ fn info_output_matches_the_committed_goldens() {
             continue;
         };
 
-        let options = InfoOptions {
-            print_tree: true,
-            print_blocks: case.blocks,
-            verify_checksums: false,
-        };
+        let options =
+            InfoOptions { print_tree: true, print_blocks: case.blocks, verify_checksums: false };
         let Ok(actual) = render(&reader, options) else {
             differed.push((case.golden, "render failed".to_string()));
             continue;

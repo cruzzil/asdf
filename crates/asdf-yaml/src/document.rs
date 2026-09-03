@@ -178,10 +178,7 @@ impl Document {
     /// a streaming reader would see it.
     pub fn mapping_get(&self, id: NodeId, key: &str) -> Option<NodeId> {
         let entries = self.mapping_entries(id)?;
-        entries
-            .iter()
-            .find(|e| self.resolved(e.key).as_str() == Some(key))
-            .map(|e| e.value)
+        entries.iter().find(|e| self.resolved(e.key).as_str() == Some(key)).map(|e| e.value)
     }
 
     /// Insert or replace a mapping entry by string key.
@@ -191,9 +188,7 @@ impl Document {
         let target = self.resolve(id);
 
         let existing = self.mapping_entries(target).and_then(|entries| {
-            entries
-                .iter()
-                .position(|e| self.resolved(e.key).as_str() == Some(key))
+            entries.iter().position(|e| self.resolved(e.key).as_str() == Some(key))
         });
 
         match existing {
@@ -217,9 +212,10 @@ impl Document {
     /// Remove a mapping entry by string key, returning the value node.
     pub fn mapping_remove(&mut self, id: NodeId, key: &str) -> Option<NodeId> {
         let target = self.resolve(id);
-        let pos = self.mapping_entries(target)?.iter().position(|e| {
-            self.resolved(e.key).as_str() == Some(key)
-        })?;
+        let pos = self
+            .mapping_entries(target)?
+            .iter()
+            .position(|e| self.resolved(e.key).as_str() == Some(key))?;
         let NodeData::Mapping { entries, .. } = &mut self.node_mut(target).data else {
             return None;
         };

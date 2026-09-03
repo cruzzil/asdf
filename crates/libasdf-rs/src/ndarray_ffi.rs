@@ -73,11 +73,7 @@ mod tests {
     fn float16_stub_reports_an_error_rather_than_a_wrong_value() {
         let mut err: c_int = -1;
         let bits = unsafe {
-            asdf_shim_ndarray_read_float16_bits_at(
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                &mut err,
-            )
+            asdf_shim_ndarray_read_float16_bits_at(std::ptr::null_mut(), std::ptr::null(), &mut err)
         };
         assert_eq!(bits, 0);
         assert_eq!(err, NdarrayErr::Inval as c_int);

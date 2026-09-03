@@ -120,10 +120,9 @@ impl ScalarType {
             | ScalarType::Float64
             | ScalarType::Complex64 => 8,
             ScalarType::Complex128 => 16,
-            ScalarType::Ascii
-            | ScalarType::Ucs4
-            | ScalarType::Structured
-            | ScalarType::Unknown => 0,
+            ScalarType::Ascii | ScalarType::Ucs4 | ScalarType::Structured | ScalarType::Unknown => {
+                0
+            }
         }
     }
 
@@ -238,11 +237,7 @@ impl Datatype {
 
     /// A fixed-length string datatype, sized in characters.
     pub fn string(scalar: ScalarType, length: u64) -> Self {
-        Self {
-            scalar,
-            size: length * scalar.bytes_per_char(),
-            ..Default::default()
-        }
+        Self { scalar, size: length * scalar.bytes_per_char(), ..Default::default() }
     }
 
     /// Whether this is a compound type.
@@ -322,9 +317,8 @@ impl Datatype {
             return Ok(Field { name: None, datatype: Self::parse(doc, id)? });
         }
 
-        let name = doc
-            .mapping_get(id, "name")
-            .and_then(|n| doc.resolved(n).as_str().map(str::to_string));
+        let name =
+            doc.mapping_get(id, "name").and_then(|n| doc.resolved(n).as_str().map(str::to_string));
 
         let inner = doc
             .mapping_get(id, "datatype")
@@ -359,9 +353,8 @@ pub fn parse_shape(doc: &Document, id: NodeId) -> Result<Vec<u64>> {
 
 /// Parse a `shape` sequence, allowing `*` in the first position.
 pub fn parse_shape_with_star(doc: &Document, id: NodeId) -> Result<Vec<Option<u64>>> {
-    let items = doc
-        .sequence_items(id)
-        .ok_or_else(|| err!(InvalidArgument, "shape must be a sequence"))?;
+    let items =
+        doc.sequence_items(id).ok_or_else(|| err!(InvalidArgument, "shape must be a sequence"))?;
 
     let mut out = Vec::with_capacity(items.len());
     for (idx, item) in items.iter().enumerate() {
@@ -402,9 +395,22 @@ mod tests {
     #[test]
     fn scalar_names_round_trip() {
         for name in [
-            "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64",
-            "float16", "float32", "float64", "complex64", "complex128", "bool8",
-            "ascii", "ucs4",
+            "int8",
+            "uint8",
+            "int16",
+            "uint16",
+            "int32",
+            "uint32",
+            "int64",
+            "uint64",
+            "float16",
+            "float32",
+            "float64",
+            "complex64",
+            "complex128",
+            "bool8",
+            "ascii",
+            "ucs4",
         ] {
             let t = ScalarType::from_name(name);
             assert_ne!(t, ScalarType::Unknown, "{name}");

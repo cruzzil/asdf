@@ -215,11 +215,7 @@ impl BlockHeader {
     ///
     /// An empty name means the block is uncompressed.
     pub fn compression_name(&self) -> &str {
-        let end = self
-            .compression
-            .iter()
-            .position(|b| *b == 0)
-            .unwrap_or(COMPRESSION_FIELD_SIZE);
+        let end = self.compression.iter().position(|b| *b == 0).unwrap_or(COMPRESSION_FIELD_SIZE);
         std::str::from_utf8(&self.compression[..end]).unwrap_or("")
     }
 
@@ -248,7 +244,8 @@ mod tests {
     use super::*;
 
     fn sample() -> BlockHeader {
-        let mut h = BlockHeader { allocated_size: 64, used_size: 64, data_size: 64, ..Default::default() };
+        let mut h =
+            BlockHeader { allocated_size: 64, used_size: 64, data_size: 64, ..Default::default() };
         h.set_compression("").unwrap();
         h
     }
@@ -282,10 +279,7 @@ mod tests {
         assert_eq!(&buf[0..4], BLOCK_MAGIC);
         assert_eq!(&buf[4..6], &[0x00, 0x30]); // header_size == 48
         assert_eq!(&buf[6..10], &[0, 0, 0, 1]); // flags, big-endian
-        assert_eq!(
-            &buf[14..22],
-            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
-        );
+        assert_eq!(&buf[14..22], &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
     }
 
     #[test]
@@ -343,7 +337,8 @@ mod tests {
 
     #[test]
     fn compressed_block_may_have_differing_sizes() {
-        let mut h = BlockHeader { allocated_size: 20, used_size: 20, data_size: 64, ..Default::default() };
+        let mut h =
+            BlockHeader { allocated_size: 20, used_size: 20, data_size: 64, ..Default::default() };
         h.set_compression("zlib").unwrap();
         let mut buf = Vec::new();
         h.write(&mut buf);
@@ -388,13 +383,11 @@ mod tests {
 
     #[test]
     fn allocated_size_must_cover_used_size() {
-        let mut h = BlockHeader { allocated_size: 8, used_size: 64, data_size: 64, ..Default::default() };
+        let mut h =
+            BlockHeader { allocated_size: 8, used_size: 64, data_size: 64, ..Default::default() };
         h.set_compression("").unwrap();
         let mut buf = Vec::new();
         h.write(&mut buf);
-        assert_eq!(
-            BlockHeader::parse(&buf).unwrap_err().code(),
-            ErrorCode::InvalidBlockHeader
-        );
+        assert_eq!(BlockHeader::parse(&buf).unwrap_err().code(), ErrorCode::InvalidBlockHeader);
     }
 }

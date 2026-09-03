@@ -30,5 +30,5 @@ pub use asdf_yaml as yaml;
 pub use error::{Error, ErrorCode, Result};
 pub use layout::{Layout, scan};
 pub use reader::{ChecksumStatus, Reader};
-pub use writer::{PendingBlock, WriteOptions, Writer};
 pub use version::Version;
+pub use writer::{PendingBlock, WriteOptions, Writer};

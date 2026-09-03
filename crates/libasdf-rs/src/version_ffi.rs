@@ -91,9 +91,7 @@ pub unsafe extern "C" fn asdf_version_parse(version: *const c_char) -> *mut asdf
 /// `version` must be null or point to a valid `asdf_version_t`. The result
 /// must be freed with [`asdf_version_destroy`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn asdf_version_copy(
-    version: *const asdf_version_t,
-) -> *mut asdf_version_t {
+pub unsafe extern "C" fn asdf_version_copy(version: *const asdf_version_t) -> *mut asdf_version_t {
     guard("asdf_version_copy", std::ptr::null_mut(), || {
         if version.is_null() {
             return std::ptr::null_mut();

@@ -90,13 +90,7 @@ impl Version {
 
     /// Build a version from its numeric components.
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Self {
-            version: format!("{major}.{minor}.{patch}"),
-            major,
-            minor,
-            patch,
-            extra: None,
-        }
+        Self { version: format!("{major}.{minor}.{patch}"), major, minor, patch, extra: None }
     }
 
     /// The `(major, minor, patch)` triple, for ordering comparisons.

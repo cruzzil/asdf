@@ -57,11 +57,7 @@ fn scans_every_standard_reference_file() {
     };
     let refs = root.join("reference_files");
     let files = asdf_files(&refs);
-    assert!(
-        files.len() >= 100,
-        "expected the full reference corpus, found {} files",
-        files.len()
-    );
+    assert!(files.len() >= 100, "expected the full reference corpus, found {} files", files.len());
 
     let mut failures = Vec::new();
     let mut with_blocks = 0;
@@ -100,10 +96,8 @@ fn scans_every_standard_reference_file() {
                 // A rejected index is legitimate, but it should not happen
                 // across a corpus written by the reference implementation.
                 if let Some(reason) = &layout.index_rejection {
-                    failures.push(format!(
-                        "{}: block index rejected: {reason:?}",
-                        rel(&refs, path)
-                    ));
+                    failures
+                        .push(format!("{}: block index rejected: {reason:?}", rel(&refs, path)));
                 }
             }
             Err(e) => failures.push(format!("{}: {e}", rel(&refs, path))),
@@ -136,8 +130,7 @@ fn every_standard_version_is_represented() {
 
         for path in &files {
             let buf = std::fs::read(path).unwrap();
-            let layout = scan(&buf)
-                .unwrap_or_else(|e| panic!("{}: {e}", rel(&refs, path)));
+            let layout = scan(&buf).unwrap_or_else(|e| panic!("{}: {e}", rel(&refs, path)));
             // The format version on the header line is independent of the
             // standard version and has been 1.0.0 throughout.
             assert_eq!(
@@ -300,10 +293,7 @@ fn a_tampered_index_is_rejected() {
 
     // Shift the tree by inserting a comment, exactly the hand-edit the
     // standard warns about, and the offsets go stale.
-    let insert_at = buf
-        .windows(6)
-        .position(|w| w == b"%YAML ")
-        .expect("tree directive");
+    let insert_at = buf.windows(6).position(|w| w == b"%YAML ").expect("tree directive");
     let mut edited = Vec::new();
     edited.extend_from_slice(&buf[..insert_at]);
     edited.extend_from_slice(b"# an extra comment line\n");
@@ -315,10 +305,7 @@ fn a_tampered_index_is_rejected() {
         "a stale index must be rejected, got {:?}",
         layout.index_rejection
     );
-    assert!(matches!(
-        layout.index_rejection,
-        Some(IndexRejection::FirstOffsetMismatch { .. })
-    ));
+    assert!(matches!(layout.index_rejection, Some(IndexRejection::FirstOffsetMismatch { .. })));
     // ...and the blocks must still be found by skipping along.
     assert!(!layout.blocks.is_empty());
 }
@@ -524,12 +511,8 @@ fn every_reference_tree_survives_a_round_trip() {
         if result.is_equal() {
             round_tripped += 1;
         } else {
-            let detail: Vec<String> = result
-                .differences
-                .iter()
-                .take(3)
-                .map(|d| d.to_string())
-                .collect();
+            let detail: Vec<String> =
+                result.differences.iter().take(3).map(|d| d.to_string()).collect();
             failures.push(format!("{name}:\n      {}", detail.join("\n      ")));
         }
     }
@@ -613,8 +596,7 @@ fn every_reference_file_survives_being_rewritten() {
 
         // A streamed block has no well-defined size to copy, so those files
         // are left to phase 9.
-        if (0..source.block_count())
-            .any(|i| source.block(i).is_ok_and(|b| b.header.is_streamed()))
+        if (0..source.block_count()).any(|i| source.block(i).is_ok_and(|b| b.header.is_streamed()))
         {
             continue;
         }
@@ -662,7 +644,8 @@ fn every_reference_file_survives_being_rewritten() {
                 if !result.is_equal() {
                     let detail: Vec<String> =
                         result.differences.iter().take(3).map(|d| d.to_string()).collect();
-                    failures.push(format!("{name}: tree changed:\n      {}", detail.join("\n      ")));
+                    failures
+                        .push(format!("{name}: tree changed:\n      {}", detail.join("\n      ")));
                     continue;
                 }
             }
