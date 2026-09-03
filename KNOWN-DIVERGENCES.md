@@ -54,3 +54,23 @@ Byte-level parity with libasdf's emitted YAML is a nice-to-have, never a gate.
 Equality is judged at the YAML-value level. The binary block layer is exempt:
 block headers, checksums, padding and index offsets are byte-exact by
 specification.
+
+## Block checksums on compressed blocks
+
+**The specification** means the block's MD5 to cover the used data as stored,
+i.e. the compressed bytes for a compressed block.
+
+**Python asdf 5.x and earlier** instead checksum the *uncompressed* data
+([asdf#2015](https://github.com/asdf-format/asdf/issues/2015)). libasdf works
+around this by reading the file's `asdf_library` metadata and, when the writer
+is `asdf` at major version 5 or below, verifying against the decompressed
+bytes instead.
+
+**What we do.** The same workaround, with the same version test. It is not a
+theoretical concern: every one of the 17 compressed blocks across the ASDF
+Standard reference corpus and libasdf's fixtures is written by an affected
+version, so without the workaround all 17 would fail verification.
+
+Covered by `reader::tests::the_python_checksum_bug_is_worked_around`, which
+pins both directions -- an affected writer verifies, an unaffected one does
+not -- and by `corpus::every_checksummed_block_verifies`.

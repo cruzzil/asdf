@@ -4,13 +4,20 @@
 //! idiomatic Rust API (`asdf`) are both thin projections of it, so the two
 //! public faces cannot drift apart in semantics. Nothing here knows about C.
 
-#![forbid(unsafe_code)]
+// The engine is safe Rust with exactly one exception: memory-mapping a file
+// for reading, which no safe API can express. `deny` rather than `forbid` so
+// that one use can be allowed explicitly and reviewed on sight; every
+// `#[allow(unsafe_code)]` in this crate must carry a justification.
+#![deny(unsafe_code)]
 
 pub mod block;
+pub mod compression;
 pub mod error;
 pub mod layout;
+pub mod reader;
 pub mod version;
 
 pub use error::{Error, ErrorCode, Result};
 pub use layout::{Layout, scan};
+pub use reader::{ChecksumStatus, Reader};
 pub use version::Version;

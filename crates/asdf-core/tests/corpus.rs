@@ -322,3 +322,158 @@ fn a_tampered_index_is_rejected() {
     // ...and the blocks must still be found by skipping along.
     assert!(!layout.blocks.is_empty());
 }
+
+/// Every checksummed block across both corpora must verify.
+///
+/// This is the tier-1 data-level gate: it exercises block location, the
+/// stored-versus-decompressed distinction, all three decompressors, and the
+/// Python asdf checksum-bug workaround, against files written by two other
+/// implementations.
+#[test]
+fn every_checksummed_block_verifies() {
+    use asdf_core::reader::{ChecksumStatus, Reader};
+
+    let mut roots = Vec::new();
+    if let Some(r) = standard_dir() {
+        roots.push(r.join("reference_files"));
+    }
+    if let Some(r) = libasdf_dir() {
+        roots.push(r.join("tests/fixtures"));
+    }
+    if roots.is_empty() {
+        eprintln!("skipping: no corpora found");
+        return;
+    }
+
+    // The one fixture upstream ships specifically to *fail* verification.
+    let known_bad = ["255-invalid-checksum.asdf"];
+
+    let mut checked = 0;
+    let mut absent = 0;
+    let mut compressed = 0;
+    let mut workarounds = 0;
+    let mut failures = Vec::new();
+
+    for root in &roots {
+        for path in asdf_files(root) {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let Ok(reader) = Reader::open(&path) else { continue };
+            let uses_workaround = reader.has_python_checksum_bug();
+
+            for idx in 0..reader.block_count() {
+                // A streamed block's size fields are meaningless, so there is
+                // nothing well-defined to checksum.
+                if reader.block(idx).map(|b| b.header.is_streamed()).unwrap_or(false) {
+                    continue;
+                }
+                let Ok((status, computed)) = reader.verify_block_checksum(idx) else {
+                    failures.push(format!("{name}: block {idx}: verification errored"));
+                    continue;
+                };
+                match status {
+                    ChecksumStatus::Absent => absent += 1,
+                    ChecksumStatus::Valid => {
+                        checked += 1;
+                        if reader
+                            .block_compression(idx)
+                            .is_ok_and(|c| c != asdf_core::compression::Compression::None)
+                        {
+                            compressed += 1;
+                            if uses_workaround {
+                                workarounds += 1;
+                            }
+                        }
+                    }
+                    ChecksumStatus::Invalid => {
+                        if !known_bad.contains(&name.as_str()) {
+                            failures.push(format!(
+                                "{name}: block {idx}: checksum mismatch (computed {})",
+                                computed.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "verified {checked} checksums ({compressed} on compressed blocks, \
+         {workarounds} via the Python checksum-bug workaround); \
+         {absent} blocks carry no checksum"
+    );
+    assert!(checked > 0, "no checksums were verified at all");
+    assert!(failures.is_empty(), "failures:\n  {}", failures.join("\n  "));
+}
+
+/// The fixture upstream ships to exercise a *failing* checksum must fail.
+#[test]
+fn the_invalid_checksum_fixture_is_detected() {
+    use asdf_core::reader::{ChecksumStatus, Reader};
+
+    let Some(root) = libasdf_dir() else {
+        eprintln!("skipping: LIBASDF_DIR not found");
+        return;
+    };
+    let path = root.join("tests/fixtures/255-invalid-checksum.asdf");
+    if !path.is_file() {
+        eprintln!("skipping: fixture not present");
+        return;
+    }
+
+    let reader = Reader::open(&path).unwrap();
+    let (status, _) = reader.verify_block_checksum(0).unwrap();
+    assert_eq!(
+        status,
+        ChecksumStatus::Invalid,
+        "a corrupt checksum must be reported, not silently accepted"
+    );
+}
+
+/// Block data must be reachable for every block in both corpora.
+#[test]
+fn all_block_data_is_readable() {
+    use asdf_core::reader::Reader;
+
+    let mut roots = Vec::new();
+    if let Some(r) = standard_dir() {
+        roots.push(r.join("reference_files"));
+    }
+    if let Some(r) = libasdf_dir() {
+        roots.push(r.join("tests/fixtures"));
+    }
+
+    let mut blocks = 0;
+    let mut bytes = 0usize;
+    let mut failures = Vec::new();
+
+    for root in &roots {
+        for path in asdf_files(root) {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let Ok(reader) = Reader::open(&path) else { continue };
+            for idx in 0..reader.block_count() {
+                match reader.block_data(idx) {
+                    Ok(data) => {
+                        blocks += 1;
+                        bytes += data.len();
+                        // A non-streamed block's decompressed length must
+                        // match what its header promised.
+                        let header = &reader.block(idx).unwrap().header;
+                        if !header.is_streamed() && data.len() as u64 != header.data_size {
+                            failures.push(format!(
+                                "{name}: block {idx}: got {} bytes, header says {}",
+                                data.len(),
+                                header.data_size
+                            ));
+                        }
+                    }
+                    Err(e) => failures.push(format!("{name}: block {idx}: {e}")),
+                }
+            }
+        }
+    }
+
+    eprintln!("read {blocks} blocks totalling {bytes} bytes");
+    assert!(blocks > 0, "no blocks were read");
+    assert!(failures.is_empty(), "failures:\n  {}", failures.join("\n  "));
+}
