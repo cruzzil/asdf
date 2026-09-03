@@ -39,8 +39,13 @@ pub struct BlockLocation {
 impl BlockLocation {
     /// The offset one past the block's allocated space, where the next block
     /// or the block index begins.
+    ///
+    /// Saturating, because `allocated_size` comes straight from the file and
+    /// a corrupt one can be `u64::MAX`. Wrapping would produce an offset
+    /// *inside* the file and send the scanner somewhere plausible-looking;
+    /// saturating pushes it past the end, where the bounds check catches it.
     pub fn end_pos(&self) -> u64 {
-        self.data_pos + self.header.allocated_size
+        self.data_pos.saturating_add(self.header.allocated_size)
     }
 }
 

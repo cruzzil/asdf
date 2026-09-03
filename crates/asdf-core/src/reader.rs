@@ -154,8 +154,13 @@ impl Reader {
                 .map_err(|_| err!(UnexpectedEof, "block {index} used_size overflows"))?
         };
 
+        // Checked, since both `start` and `len` come from the file and a
+        // corrupt header can make the sum wrap.
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| err!(UnexpectedEof, "block {index} size overflows"))?;
         self.source
-            .get(start..start + len)
+            .get(start..end)
             .ok_or_else(|| err!(UnexpectedEof, "block {index} extends past the end of the file"))
     }
 
