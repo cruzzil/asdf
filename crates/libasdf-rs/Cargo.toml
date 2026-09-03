@@ -1,0 +1,26 @@
+[package]
+name = "libasdf-rs"
+description = "Drop-in C ABI replacement for libasdf, implemented in Rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+links = "asdf"
+build = "build.rs"
+
+[lib]
+name = "asdf"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+asdf-core.workspace = true
+libc.workspace = true
+half.workspace = true
+
+[build-dependencies]
+cc = "1"
+
+[lints]
+workspace = true

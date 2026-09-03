@@ -1,0 +1,952 @@
+/**
+ * .. _asdf/file.h:
+ *
+ * This is the high-level public API for working with ASDF files.  It includes
+ * functions for opening and closing ASDF file handles, represented by
+ * `asdf_file_t` pointers.
+ *
+ * Most of these functions work on an open `asdf_file_t *` as their first
+ * argument, and retrieve scalar values and more complex objects out of the
+ * ASDF tree.
+ */
+
+//
+
+#ifndef ASDF_FILE_H
+#define ASDF_FILE_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+
+#include <asdf/block.h>
+#include <asdf/emitter.h>
+#include <asdf/error.h>
+#include <asdf/log.h>
+#include <asdf/parser.h>
+#include <asdf/util.h>
+#include <asdf/value.h>
+
+ASDF_BEGIN_DECLS
+
+/**
+ * .. _file-handles:
+ *
+ * File handles
+ * ------------
+ */
+
+
+/**
+ * An opaque struct representing an open ASDF file handle
+ *
+ * Pointers to `asdf_file_t` are the primary interface to each open ASDF file
+ * and can be created and allocated with `asdf_open`, `asdf_open_file`,
+ * `asdf_open_fp`, or `asdf_open_mem`.
+ */
+typedef struct asdf_file asdf_file_t;
+
+
+/**
+ * .. _file-configuration:
+ *
+ * Configuration
+ * -------------
+ */
+
+
+/**
+ * Options for block decompression mode, for use with the ``decomp.mode`` field
+ * of `asdf_config_t`
+ *
+ * This controls *when* compressed binary block data is decompressed: eagerly
+ * (all at once the first time a block is accessed) or lazily (decompressed in
+ * page-sized chunks on demand, where supported).  See :ref:`compression` for
+ * details, and the individual `asdf_block_decomp_mode_t` members below.
+ *
+ * .. todo::
+ *
+ *   When lazy is implemented there may likely be multiple implementations
+ *   (userfaultfd, sigsegv, etc.).  Add options to specify exactly which
+ *   implementation to use, where ASDF_DECOMP_MODE_LAZY by itself will
+ *   choose the most appropriate choice (generally userfaultfd if available)
+ */
+typedef enum {
+    /** Automatically select the best mode */
+    ASDF_BLOCK_DECOMP_MODE_AUTO = 0,
+    /** Force eager decompression */
+    ASDF_BLOCK_DECOMP_MODE_EAGER,
+    /**
+     * Force lazy decompression *if possible*
+     *
+     * Lazy decompression is currently only implemented on recent-enough Linux
+     * versions (4.11+) that support the userfaultfd system call.  If this
+     * option is passed on a system where it is not supported it will
+     * fall back to eager decompression.
+     */
+    ASDF_BLOCK_DECOMP_MODE_LAZY,
+} asdf_block_decomp_mode_t;
+
+
+/**
+ * Struct containing extended options to use when opening and reading files
+ *
+ * For use with `asdf_open_ex` and relatives.
+ */
+typedef struct {
+    /** Low-level parser configuration; see `asdf_parser_cfg_t` */
+    asdf_parser_cfg_t parser;
+
+    /** Low-level emitter configuration; see `asdf_emitter_cfg_t` */
+    asdf_emitter_cfg_t emitter;
+
+    /** Logging configuration; see ``asdf_log_cfg_t`` */
+    asdf_log_cfg_t log;
+
+    /** Decompression options */
+    struct {
+        /** Decompression mode (see `asdf_block_decomp_mode_t`) */
+        asdf_block_decomp_mode_t mode;
+
+        /**
+         * Max size in bytes of the decompressed data, above which
+         * decompression to disk will be used (see :ref:`compression`)
+         */
+        size_t max_memory_bytes;
+
+        /**
+         * Max percentage (from ``0.0`` to ``1.0`` of total system memory
+         * above which decompression to disk will be used
+         * (see :ref:`compression`)
+         */
+        double max_memory_threshold;
+
+        /**
+         * Size in bytes of chunks to decompress at a time when using lazy
+         * decompression
+         *
+         * Defaults to one page, and is always rounded up to the nearest page
+         * size.
+         */
+        size_t chunk_size;
+
+        /**
+         * Optional temporary directory path to use when decompressing to disk
+         */
+        const char *tmp_dir;
+    } decomp;
+} asdf_config_t;
+
+
+// Forward-declarations for asdf_open_ex and so on
+asdf_file_t *asdf_open_file_ex(const char *filename, const char *mode, asdf_config_t *config);
+asdf_file_t *asdf_open_fp_ex(FILE *fp, const char *filename, asdf_config_t *config);
+asdf_file_t *asdf_open_mem_ex(const void *buf, size_t size, asdf_config_t *config);
+static asdf_file_t *asdf_open_file(const char *filename, const char *mode);
+static asdf_file_t *asdf_open_fp(FILE *fp, const char *filename);
+static asdf_file_t *asdf_open_mem(const void *buf, size_t size);
+
+
+// Helpers to build the `asdf_open` multiple-dispatch macro
+#define ASDF__PP_NARGS(...) ASDF__PP_NARGS_(__VA_ARGS__, 2, 1, 0)
+#define ASDF__PP_NARGS_(_1, _2, N, ...) N // NOLINT
+#define ASDF__PP_CAT(a, b) ASDF__PP_CAT_(a, b)
+#define ASDF__PP_CAT_(a, b) a##b // NOLINT
+
+
+#define ASDF__OPEN_1(source) \
+    _Generic( \
+        (source), \
+        FILE *: asdf_open_fp(source, NULL), \
+        const char *: asdf_open_file(source, "r"), \
+        char *: asdf_open_file(source, "r"), \
+        void *: asdf_open_mem(NULL, 0))
+#define ASDF__OPEN_2(source, ...) \
+    _Generic( \
+        (source), \
+        FILE *: asdf_open_fp, \
+        const char *: asdf_open_file, \
+        char *: asdf_open_file, \
+        const void *: asdf_open_mem)(source, __VA_ARGS__)
+
+
+/**
+ * .. _file-openers:
+ *
+ * File openers
+ * ------------
+ */
+
+/**
+ * Opens an ASDF file for reading
+ *
+ * This is a convenience macro for `asdf_open_file`, `asdf_open_fp`, or `asdf_open_mem`
+ * depending on the argument types
+ */
+#define asdf_open(...) /* NOLINT(readability-identifier-naming) */ \
+    ASDF__PP_CAT(ASDF__OPEN_, ASDF__PP_NARGS(__VA_ARGS__))(__VA_ARGS__)
+
+
+/**
+ * Opens an ASDF file for reading with extended options
+ *
+ * Extended version of `asdf_open` taking an optional pointer to
+ * :c:type:`asdf_config_t` configuration options as the last argument, or
+ * `NULL` to use the default options (equivalent to `asdf_open`).
+ *
+ * When passing in an `asdf_config_t *`, the config struct is *copied*:
+ *
+ * * This allows passing in the options from a local variable
+ * * Prevents modifications of the options while the file is open
+ * * In many cases you can leave options set to zero, and they will be filled
+ *   in with defaults.
+ *
+ * This is a convenience macro for `asdf_open_file_ex`, `asdf_open_fp_ex`, or
+ * `asdf_open_mem_ex` depending on the argument types
+ */
+#define asdf_open_ex(source, ...) /* NOLINT(readability-identifier-naming) */ \
+    _Generic( \
+        (source), \
+        const char *: asdf_open_file_ex, \
+        char *: asdf_open_file_ex, \
+        FILE *: asdf_open_fp_ex, \
+        void *: asdf_open_mem_ex)(source, __VA_ARGS__)
+
+/**
+ * Opens an ASDF file for reading
+ *
+ * Equivalent to `asdf_open`.
+ *
+ * :param filename: A null-terminated string containing the local filesystem
+ *   path to open
+ * :param mode: Currently must always be just ``"r"``
+ * :return: An `asdf_file_t *`, or ``NULL`` on error
+ */
+static inline asdf_file_t *asdf_open_file(const char *filename, const char *mode) {
+    return asdf_open_file_ex(filename, mode, NULL);
+}
+
+/**
+ * Opens an ASDF file from an already open `FILE *`
+ *
+ * This assumes the file is open for reading.
+ *
+ * :param fp: An open `FILE *`
+ * :param filename: An optional filename for the open file.
+ *   This need not be a real filesystem path, and can be any display name for
+ *   the file; used mainly in error messages.
+ * :return: An `asdf_file_t *`
+ */
+static inline asdf_file_t *asdf_open_fp(FILE *fp, const char *filename) {
+    return asdf_open_fp_ex(fp, filename, NULL);
+}
+
+/**
+ * Opens an ASDF file from an memory buffer
+ *
+ * :param buf: An arbitrary block of memory from a `void *`
+ * :param size: The size of the memory buffer
+ * :return: An `asdf_file_t *`
+ */
+static inline asdf_file_t *asdf_open_mem(const void *buf, size_t size) {
+    return asdf_open_mem_ex(buf, size, NULL);
+}
+
+
+#define ASDF__WRITE_TO_1(source, dest) \
+    _Generic( \
+        (dest), \
+        const char *: asdf_write_to_file, \
+        char *: asdf_write_to_file, \
+        FILE *: asdf_write_to_fp)(source, dest)
+
+
+#define ASDF__WRITE_TO_2(source, dest, ...) asdf_write_to_mem(source, dest, __VA_ARGS__)
+
+
+/**
+ * Write the contents of an ``asdf_file_t`` to a destination
+ *
+ * This is a type-generic macro that dispatches to one of the following based
+ * on the type and number of arguments after ``file``:
+ *
+ * * ``asdf_write_to(file, filename)`` -- where ``filename`` is a
+ *   ``const char *`` or ``char *``: calls `asdf_write_to_file`
+ * * ``asdf_write_to(file, fp)`` -- where ``fp`` is a ``FILE *``: calls
+ *   `asdf_write_to_fp`
+ * * ``asdf_write_to(file, buf, size)`` -- where ``buf`` is a ``void **`` and
+ *   ``size`` is a ``size_t *``: calls `asdf_write_to_mem`
+ *
+ * :param file: The `asdf_file_t *` to write
+ * :param ...: Destination argument(s) -- see above
+ * :return: 0 on success, non-zero on failure
+ */
+#define asdf_write_to(file, ...) /* NOLINT(readability-identifier-naming) */ \
+    ASDF__PP_CAT(ASDF__WRITE_TO_, ASDF__PP_NARGS(__VA_ARGS__))(file, __VA_ARGS__)
+
+
+/**
+ * Write the contents of the ``asdf_file_t`` to the given filesystem path
+ *
+ * :param file: The `asdf_file_t *` to write
+ * :param filename: Path to the output file; created or truncated as needed
+ * :return: 0 on success, non-zero on failure
+ */
+ASDF_EXPORT int asdf_write_to_file(asdf_file_t *file, const char *filename);
+
+
+/**
+ * Write the contents of the ``asdf_file_t`` to the given writeable ``FILE *``
+ * stream
+ *
+ * :param file: The `asdf_file_t *` to write
+ * :param fp: An open, writeable ``FILE *`` stream
+ * :return: 0 on success, non-zero on failure
+ */
+ASDF_EXPORT int asdf_write_to_fp(asdf_file_t *file, FILE *fp);
+
+
+/**
+ * Write the contents of the ``asdf_file_t`` to a memory buffer
+ *
+ * If ``*buf`` is non-NULL, a user-provided buffer is assumed and its size is
+ * read from ``*size``.  If the buffer is not large enough to hold the file,
+ * the output is truncated and a non-zero value is returned.
+ *
+ * If ``*buf`` is NULL, a buffer is allocated with `malloc()` and a pointer to
+ * it is stored in ``*buf``; the allocated size is written to ``*size``.  The
+ * caller is responsible for freeing the buffer with `free()`.
+ *
+ * :param file: The `asdf_file_t *` to write
+ * :param buf: Address of a ``void *`` buffer pointer (in/out)
+ * :param size: Address of a ``size_t`` holding the buffer size (in/out)
+ * :return: 0 on success, non-zero on failure
+ */
+ASDF_EXPORT int asdf_write_to_mem(asdf_file_t *file, void **buf, size_t *size);
+
+
+/**
+ * Closes an open `asdf_file_t *`, freeing associated resources where possible
+ *
+ * Any other resources associated with that file handle, such as ndarrays,
+ * should no longer be expected to work and should ideally be freed before
+ * closing the file.
+ *
+ * :param file: The `asdf_file_t *` to close
+ */
+ASDF_EXPORT void asdf_close(asdf_file_t *file);
+
+
+/**
+ * Opens an ASDF file for reading
+ *
+ * Extended version of `asdf_open` taking an optional pointer to
+ * :c:type:`asdf_config_t` configuration options, or `NULL` to
+ * use the default options (equivalent to `asdf_open`).
+ *
+ * When passing in an `asdf_config_t *`, the config struct is *copied*:
+ *
+ * * This allows passing in the options from a local variable
+ * * Prevents modifications of the options while the file is open
+ * * In many cases you can leave options set to zero, and they will be filled
+ *   in with defaults.
+ *
+ * This is an alias for `asdf_open_file_ex`.
+ *
+ * :param filename: A null-terminated string containing the local filesystem
+ *   path to open
+ * :param mode: Currently must always be just ``"r"``.  This will support other
+ *   opening modes in the future (e.g. for writes, updates).
+ * :param config: A pointer to an `asdf_config_t` (may be partially initialized)
+ * :return: An `asdf_file_t *`
+ */
+ASDF_EXPORT asdf_file_t *asdf_open_file_ex(
+    const char *filename, const char *mode, asdf_config_t *config);
+
+/**
+ * Opens an ASDF file from an already open `FILE *`, with optional extended
+ * options
+ *
+ * This assumes the file is open for reading.
+ *
+ * :param fp: An open `FILE *`
+ * :param filename: An optional filename for the open file.
+ *   This need not be a real filesystem path, and can be any display name for
+ *   the file; used mainly in error messages.
+ * :param config: A pointer to an `asdf_config_t` (may be partially initialized)
+ * :return: An `asdf_file_t *`
+ */
+ASDF_EXPORT asdf_file_t *asdf_open_fp_ex(FILE *fp, const char *filename, asdf_config_t *config);
+
+/**
+ * Opens an ASDF file from an memory buffer, with optional extended options
+ *
+ * :param buf: An arbitrary block of memory from a `void *`
+ * :param size: The size of the memory buffer
+ * :param config: A pointer to an `asdf_config_t` (may be partially initialized)
+ * :return: An `asdf_file_t *`
+ */
+ASDF_EXPORT asdf_file_t *asdf_open_mem_ex(const void *buf, size_t size, asdf_config_t *config);
+
+
+/**
+ * .. _file-errors:
+ *
+ * Error handling
+ * --------------
+ */
+
+
+/**
+ * Retrieve an error on a file
+ *
+ * This is typically used to check for errors on the file itself, such as
+ * parse errors, and not for user data errors (such as invalid type conversions
+ * on an `asdf_value_t`).
+ *
+ * If passed `NULL`, returns any global error, if set (typically from errors
+ * opening a file), or from library initialization.
+ *
+ * See the section on :ref:`error-handling` for more details.
+ *
+ * :param file: An open `asdf_file_t *` or `NULL`
+ * :return: `NULL` if there is no error set, otherwise a pointer to the error
+ *   message string
+ */
+ASDF_EXPORT const char *asdf_error(asdf_file_t *file);
+
+
+/**
+ * Retrieve the error code set on a file
+ *
+ * Returns `ASDF_ERR_NONE` if no error is set, or if ``file`` is ``NULL`` and
+ * there is no global error.
+ *
+ * :param file: An open `asdf_file_t *` or `NULL`
+ * :return: The `asdf_error_code_t` for the current error
+ */
+ASDF_EXPORT asdf_error_code_t asdf_error_code(asdf_file_t *file);
+
+
+/**
+ * Retrieve the saved OS ``errno`` from the last ``ASDF_ERR_SYSTEM`` error
+ *
+ * Only meaningful when `asdf_error_code` returns `ASDF_ERR_SYSTEM`.
+ * Returns ``0`` when there is no system error or ``file`` is ``NULL`` and
+ * there is no global error.
+ *
+ * :param file: An open `asdf_file_t *` or `NULL`
+ * :return: The saved ``errno`` value
+ */
+ASDF_EXPORT int asdf_error_errno(asdf_file_t *file);
+
+
+/**
+ * .. _file-value-getters:
+ *
+ * Reading values
+ * --------------
+ */
+
+/**
+ * The following functions are the high-level interface for retrieving typed
+ * values out of the ASDF metadata tree.  These include plain scalar values,
+ * mappings, sequences, as tagged data structures that have a registered
+ * extension for handling them (this includes objects belonging to the ASDF
+ * core schema, such as ``core/history_entry`` or ``core/ndarray``). The
+ * getters for schema-specific objects are not documented here, but follow
+ * the same patterns.
+ *
+ * For each type that can be read out of the ASDF tree there is an
+ * ``asdf_is_<type>`` function which just checks the type and returns a `bool`.
+ * Then there is an ``asdf_get_<type>`` function.  Each of these takes the
+ * `asdf_file_t *` as their first argument, then a :ref:`yaml-pointer`
+ * expression for the path within the tree to that value, and finally a
+ * pointer for the return value's type.  Each of these functions return their
+ * value by reference through an input argument.  The return value is always
+ * `asdf_value_err_t`.
+ *
+ * If the value exists and successfully converts to the requested type the
+ * return value is `ASDF_VALUE_OK`.  There are other return values such as
+ * `ASDF_VALUE_ERR_NOT_FOUND` (the path simply does not exist) or
+ * `ASDF_VALUE_ERR_TYPE_MISMATCH` (a value exists at that path but is the wrong
+ * type).  A few other more obscure errors can occur--see `asdf_value_err_t`.
+ *
+ * The one exception to the above is `asdf_get_value` which simply returns the
+ * generic `asdf_value_t *` if the path exists, or `NULL` otherwise.  See
+ * :ref:`values` for more details on generic values.
+ *
+ * .. todo::
+ *
+ *   Add support for referencing ASDF schemas.
+ */
+
+/**
+ * Get an arbitrary `asdf_value_t *` out of the tree
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the value
+ * :return: An `asdf_value_t *` wrapping the value, or `NULL` if the path does
+ *   not exist in the tree
+ */
+ASDF_EXPORT asdf_value_t *asdf_get_value(asdf_file_t *file, const char *path);
+
+/**
+ * Check if the value at the given tree path is a YAML mapping
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the value
+ * :return: `true` if the value is a mapping, `false` if it is another
+ *   type of value or if no value exists at that path.
+ */
+ASDF_EXPORT bool asdf_is_mapping(asdf_file_t *file, const char *path);
+
+/**
+ * Get a mapping out of the ASDF tree
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the mapping
+ * :param value: An `asdf_mapping_t **` into which to return the mapping
+ * :return: `ASDF_VALUE_OK` if the value exists and is a mapping, otherwise
+ *   `ASDF_VALUE_ERR_NOT_FOUND` or `ASDF_VALUE_ERR_TYPE_MISMATCH`.
+ */
+ASDF_EXPORT asdf_value_err_t
+asdf_get_mapping(asdf_file_t *file, const char *path, asdf_mapping_t **out);
+
+/**
+ * Check if the value at the given tree path is a YAML sequence
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the value
+ * :return: `true` if the value is a sequence, `false` if it is another
+ *   type of value or if no value exists at that path.
+ */
+ASDF_EXPORT bool asdf_is_sequence(asdf_file_t *file, const char *path);
+
+/**
+ * Get a sequence out of the ASDF tree
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the sequence
+ * :param value: An `asdf_sequence_t **` into which to return the sequence
+ * :return: `ASDF_VALUE_OK` if the value exists and is a sequence, otherwise
+ *   `ASDF_VALUE_ERR_NOT_FOUND` or `ASDF_VALUE_ERR_TYPE_MISMATCH`.
+ */
+ASDF_EXPORT asdf_value_err_t
+asdf_get_sequence(asdf_file_t *file, const char *path, asdf_sequence_t **out);
+
+/**
+ * Check if the value at the given tree path is a string scalar
+ *
+ * .. note::
+ *
+ *   libasdf adheres to the `YAML Core Schema`_ in the interpretation of scalar
+ *   values.  So here "is a string" means strictly not interpreted as any other
+ *   data type (int, bool, etc.) under the YAML.  This is the same convention
+ *   used in many other programming languages like Python, etc.
+ *
+ *   To check if the value is simply a scalar of any type use `asdf_is_scalar`.
+ *
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the string
+ * :return: `true` if the value is a string, `false` if it is another
+ *   type of value or if no value exists at that path.
+ */
+ASDF_EXPORT bool asdf_is_string(asdf_file_t *file, const char *path);
+
+/**
+ * Get a string out of the ASDF tree
+ *
+ * This version returns the string without a null terminator, and the length of
+ * the string into the ``out_len`` parameter.  This employs zero-copy where
+ * possible, so the memory pointing to the string may become unusable once the
+ * file is closed.
+ *
+ * .. note::
+ *
+ *   See the note about `asdf_is_string`.  This only returns `ASDF_VALUE_OK` if
+ *   the value exists and is strictly a string.  For a more generic version
+ *   that returns the raw text of a scalar see `asdf_get_scalar`.
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the string
+ * :param out: A `const char **` into which to return the string as a `const char *`
+ * :param out_len: A `size_t *` into which to return the length of the string
+ * :return: `ASDF_VALUE_OK` if the value exists and is a string, otherwise
+ *   `ASDF_VALUE_ERR_NOT_FOUND` or `ASDF_VALUE_ERR_TYPE_MISMATCH`.
+ */
+ASDF_EXPORT asdf_value_err_t
+asdf_get_string(asdf_file_t *file, const char *path, const char **out, size_t *out_len);
+
+/**
+ * Get a null-terminated string out of the ASDF tree
+ *
+ * Like `asdf_get_string` but returns a null-terminated copy of the string.
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the string
+ * :param out: A `const char **` into which to return the string as a `const char *`
+ * :return: `ASDF_VALUE_OK` if the value exists and is a string, otherwise
+ *   `ASDF_VALUE_ERR_NOT_FOUND` or `ASDF_VALUE_ERR_TYPE_MISMATCH`.
+ */
+ASDF_EXPORT asdf_value_err_t
+asdf_get_string0(asdf_file_t *file, const char *path, const char **out);
+
+/**
+ * Check if the value at the given tree path is a YAML scalar of any kind
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the value
+ * :return: `true` if the value is a scalar, `false` if it is another
+ *   type of value or if no value exists at that path.
+ */
+ASDF_EXPORT bool asdf_is_scalar(asdf_file_t *file, const char *path);
+
+/**
+ * Like `asdf_get_string` but returns the raw text of a scalar value as a
+ * string without interpretation under the `YAML Core Schema`_.
+ *
+ * This can be especially useful in the implementation of :ref:`extensions`
+ * to process tagged scalars.
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the scalar
+ * :param out: A `const char **` into which to return the scalar as a
+ *   `const char *`
+ * :param out_len: A `size_t *` into which to return the length of the scalar
+ * :return: `ASDF_VALUE_OK` if the value exists and is a scalar, otherwise
+ *   `ASDF_VALUE_ERR_NOT_FOUND` or `ASDF_VALUE_ERR_TYPE_MISMATCH`.
+ */
+ASDF_EXPORT asdf_value_err_t
+asdf_get_scalar(asdf_file_t *file, const char *path, const char **out, size_t *out_len);
+
+/**
+ * Like `asdf_get_scalar0` but returns a null-terminated string
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the scalar
+ * :param out: A `const char **` into which to return the scalar as a
+ *   `const char *`
+ * :return: `ASDF_VALUE_OK` if the value exists and is a scalar, otherwise
+ *   `ASDF_VALUE_ERR_NOT_FOUND` or `ASDF_VALUE_ERR_TYPE_MISMATCH`.
+ */
+ASDF_EXPORT asdf_value_err_t
+asdf_get_scalar0(asdf_file_t *file, const char *path, const char **out);
+
+/**
+ * Check if the value at the given tree path is a boolean scalar
+ *
+ * This returns true for the non-string (that is, unquoted) scalars
+ * ``true/True/TRUE``, ``false/False/FALSE`` as well as ints ``0`` or ``1``
+ * strictly.
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the bool
+ * :return: `true` if the value is a bool, `false` if it is another
+ *   type of value or if no value exists at that path.
+ */
+ASDF_EXPORT bool asdf_is_bool(asdf_file_t *file, const char *path);
+
+/**
+ * Get a bool value out of the ASDF tree
+ *
+ * See `asdf_is_bool`.
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the string
+ * :param out: A `bool *` into which to return the bool
+ * :return: `ASDF_VALUE_OK` if the value exists and is a bool, otherwise
+ *   `ASDF_VALUE_ERR_NOT_FOUND` or `ASDF_VALUE_ERR_TYPE_MISMATCH`.
+ */
+ASDF_EXPORT asdf_value_err_t asdf_get_bool(asdf_file_t *file, const char *path, bool *out);
+
+/**
+ * Check if the value at the given tree path is null
+ *
+ * This returns true for the unquoted scalars ``null/Null/NULL`` or ``~`` as
+ * well as empty values (e.g. if a mapping key is followed by nothing but
+ * whitespace).
+ *
+ * There is no corresponding ``asdf_get_null`` as it would probably be useless.
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the null value
+ * :return: `true` if the value is null, `false` if it is another
+ *   type of value or if no value exists at that path.
+ */
+ASDF_EXPORT bool asdf_is_null(asdf_file_t *file, const char *path);
+
+/**
+ * .. _int getters:
+ *
+ * Integer getters
+ * ---------------
+ *
+ * The following functions are the type checkers and getters for integer types.
+ *
+ * When libasdf detects an integer scalar it assigns to it the smallest C
+ * integer type that can hold that value.  For example the number ``42`` is
+ * typed as `ASDF_VALUE_UINT8`.
+ *
+ * However, integer up-casting to larger integer types is allowed
+ * Downcasting that would cause an overflow is not allowed.  For example ``42``
+ * can be cast to an ``int16``, but ``-42`` cannot be cast to a ``uint16``.
+ *
+ * .. note::
+ *
+ *   In practice, unless you know some schema expects a small integer for a
+ *   value, you will mostly just want to use `asdf_get_int64`.
+ *
+ * With the ``asdf_get_(uint)N`` getters the `asdf_value_err_t` return value
+ * may also be `ASDF_VALUE_ERR_OVERFLOW` if the value is an integer that is too
+ * large to represent in the requested type.
+ *
+ * Big integers (greater than ``UINT64_MAX`` or less than ``INT64_MIN``) are
+ * not supported--in fact the ASDF Standard expressly
+ * `forbids <ASDF Numeric Literals>`_ writing them to ASDF files.  Nevertheless
+ * it could be supported in the future if the need arises.  In fact,
+ * technically the ASDF Standard disallows integers greater than ``INT64_MAX``
+ * but here we do allow unsigned integers up to ``UINT64_MAX``.
+ */
+
+/**
+ * Check if the value at the given tree path is a integer scalar of any byte
+ * size
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the int
+ * :return: `true` if the value is an integer, `false` if it is another
+ *   type of value or if no value exists at that path.
+ */
+ASDF_EXPORT bool asdf_is_int(asdf_file_t *file, const char *path);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT bool asdf_is_int8(asdf_file_t *file, const char *path);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT asdf_value_err_t asdf_get_int8(asdf_file_t *file, const char *path, int8_t *out);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT bool asdf_is_int16(asdf_file_t *file, const char *path);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT asdf_value_err_t asdf_get_int16(asdf_file_t *file, const char *path, int16_t *out);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT bool asdf_is_int32(asdf_file_t *file, const char *path);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT asdf_value_err_t asdf_get_int32(asdf_file_t *file, const char *path, int32_t *out);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT bool asdf_is_int64(asdf_file_t *file, const char *path);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT asdf_value_err_t asdf_get_int64(asdf_file_t *file, const char *path, int64_t *out);
+
+/** Alias for `asdf_get_int64` */
+#define asdf_get_int asdf_get_int64
+
+/** See :ref:`int getters` */
+ASDF_EXPORT bool asdf_is_uint8(asdf_file_t *file, const char *path);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT asdf_value_err_t asdf_get_uint8(asdf_file_t *file, const char *path, uint8_t *out);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT bool asdf_is_uint16(asdf_file_t *file, const char *path);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT asdf_value_err_t asdf_get_uint16(asdf_file_t *file, const char *path, uint16_t *out);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT bool asdf_is_uint32(asdf_file_t *file, const char *path);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT asdf_value_err_t asdf_get_uint32(asdf_file_t *file, const char *path, uint32_t *out);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT bool asdf_is_uint64(asdf_file_t *file, const char *path);
+
+/** See :ref:`int getters` */
+ASDF_EXPORT asdf_value_err_t asdf_get_uint64(asdf_file_t *file, const char *path, uint64_t *out);
+
+/**
+ * .. _float getters:
+ *
+ * Float getters
+ * -------------
+ *
+ * Similarly to the integer getters the `asdf_is_float` method will return true
+ * if the floating point value can be represented as accurately in a 32-bit
+ * float as in a double (the mantissa and exponent are small).
+ *
+ * Otherwise it is safe to `asdf_is_double` and `asdf_get_double` for most
+ * cases. The `asdf_value_err_t` return value can also be
+ * `ASDF_VALUE_ERR_OVERFLOW` if the number is too large to represent as an
+ * IEEE 64-bit float (in particular, if `strtod` sets `errno = ERANGE`).
+ */
+
+/** See :ref:`float getters` */
+ASDF_EXPORT bool asdf_is_float(asdf_file_t *file, const char *path);
+
+/** See :ref:`float getters` */
+ASDF_EXPORT asdf_value_err_t asdf_get_float(asdf_file_t *file, const char *path, float *out);
+
+/** See :ref:`float getters` */
+ASDF_EXPORT bool asdf_is_double(asdf_file_t *file, const char *path);
+
+/** See :ref:`float getters` */
+ASDF_EXPORT asdf_value_err_t asdf_get_double(asdf_file_t *file, const char *path, double *out);
+
+/**
+ * .. _file-extension-getters:
+ *
+ * Extension object getters
+ * ------------------------
+ */
+
+/**
+ * These functions are the generic forms behind the per-extension
+ * ``asdf_is_<extension>`` / ``asdf_get_<extension>`` / ``asdf_set_<extension>``
+ * helpers (such as `asdf_get_ndarray`) that each registered extension
+ * generates.  They take an explicit `asdf_extension_t *`, which can be looked
+ * up for a registered tag with ``asdf_extension_get``, and are useful when the
+ * extension type is only known at runtime.  See :ref:`extensions` for more on
+ * the extension mechanism.
+ */
+
+/**
+ * Check whether the value at ``path`` is of the given extension type
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the value
+ * :param ext: The `asdf_extension_t *` describing the extension type
+ * :return: ``true`` if a value exists at ``path`` and matches the extension
+ *   type, otherwise ``false``
+ */
+ASDF_EXPORT bool asdf_is_extension_type(asdf_file_t *file, const char *path, asdf_extension_t *ext);
+
+/**
+ * Get the value at ``path`` deserialized into the given extension type
+ *
+ * On success the deserialized extension object is written through ``out``; the
+ * concrete type of ``*out`` is the C type associated with the extension (for
+ * example ``asdf_ndarray_t *`` for the ndarray extension).  The caller owns the
+ * returned object and must release it with the extension's corresponding
+ * ``asdf_<extension>_destroy`` function.
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` to the value
+ * :param ext: The `asdf_extension_t *` describing the extension type
+ * :param out: Receives the deserialized extension object on success
+ * :return: `ASDF_VALUE_OK` if the value exists and is of the extension type,
+ *   otherwise `ASDF_VALUE_ERR_NOT_FOUND` or `ASDF_VALUE_ERR_TYPE_MISMATCH`
+ */
+ASDF_EXPORT asdf_value_err_t
+asdf_get_extension_type(asdf_file_t *file, const char *path, asdf_extension_t *ext, void **out);
+
+
+/**
+ * Serialize an extension object into the tree at ``path``
+ *
+ * The object pointed to by ``obj`` is serialized according to ``ext`` and
+ * written into the tree at ``path``, creating any intermediate mappings as
+ * needed and replacing any existing value already at that path.
+ *
+ * Typically it is better to use the higher level ``asdf_set_<extension>``
+ * functions, (e.g. `asdf_set_ndarray`) which are type-safe wrappers around
+ * this function, and don't require looking up the extension.
+ *
+ * :param file: The `asdf_file_t *` for the file
+ * :param path: The :ref:`yaml-pointer` at which to write the value
+ * :param obj: Pointer to the extension object to serialize
+ * :param ext: The `asdf_extension_t *` describing the extension type
+ * :return: `ASDF_VALUE_OK` on success, otherwise an `asdf_value_err_t` error
+ */
+ASDF_EXPORT asdf_value_err_t asdf_set_extension_type(
+    asdf_file_t *file, const char *path, const void *obj, asdf_extension_t *ext);
+
+
+/**
+ * .. _file-value-setters:
+ *
+ * Setting values
+ * --------------
+ *
+ * The ``asdf_set_<type>`` family is the high-level counterpart to the
+ * ``asdf_get_<type>`` getters: each writes a value into the ASDF metadata tree
+ * at a given :ref:`yaml-pointer` path.  Every setter takes the `asdf_file_t *`
+ * as its first argument, the path as its second, and the value to write as the
+ * remaining argument(s).
+ *
+ * Any intermediate mappings named in the path that do not yet exist are
+ * created automatically, and an existing value already at the path is
+ * replaced.  Each function returns `ASDF_VALUE_OK` on success or an
+ * `asdf_value_err_t` error code.
+ *
+ * `asdf_set_value` inserts a pre-built generic `asdf_value_t *`;
+ * `asdf_set_string` takes an explicit byte length while `asdf_set_string0`
+ * expects a NUL-terminated string; `asdf_set_null` takes no value argument.
+ * The remaining scalar variants accept the corresponding C type directly
+ *
+ * For extension types, each register extension has a corresponding
+ * ``asdf_set_<extension>``, mirroring the ``asdf_get_<extension>`` functions
+ * described in :ref:`file-extension-getters`.  For example, `asdf_set_ndarray`
+ * can be used to assign an `asdf_ndarray_t *` to a path in YAML tree.
+ *
+ * See :ref:`writing` for a narrative guide.
+ */
+
+//
+
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t
+asdf_set_value(asdf_file_t *file, const char *path, asdf_value_t *value);
+
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t
+asdf_set_string(asdf_file_t *file, const char *path, const char *str, size_t len);
+
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t asdf_set_string0(asdf_file_t *file, const char *path, const char *str);
+
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t asdf_set_bool(asdf_file_t *file, const char *path, bool val);
+
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t asdf_set_null(asdf_file_t *file, const char *path);
+
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t asdf_set_int8(asdf_file_t *file, const char *path, int8_t val);
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t asdf_set_int16(asdf_file_t *file, const char *path, int16_t val);
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t asdf_set_int32(asdf_file_t *file, const char *path, int32_t val);
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t asdf_set_int64(asdf_file_t *file, const char *path, int64_t val);
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t asdf_set_uint8(asdf_file_t *file, const char *path, uint8_t val);
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t asdf_set_uint16(asdf_file_t *file, const char *path, uint16_t val);
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t asdf_set_uint32(asdf_file_t *file, const char *path, uint32_t val);
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t asdf_set_uint64(asdf_file_t *file, const char *path, uint64_t val);
+
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t asdf_set_float(asdf_file_t *file, const char *path, float val);
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t asdf_set_double(asdf_file_t *file, const char *path, double val);
+
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t
+asdf_set_mapping(asdf_file_t *file, const char *path, asdf_mapping_t *mapping);
+/** See :ref:`file-value-setters` */
+ASDF_EXPORT asdf_value_err_t
+asdf_set_sequence(asdf_file_t *file, const char *path, asdf_sequence_t *sequence);
+
+ASDF_END_DECLS
+
+#endif /* ASDF_FILE_H */

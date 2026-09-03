@@ -1,0 +1,28 @@
+[package]
+name = "asdf-core"
+description = "Core engine for reading and writing ASDF (Advanced Scientific Data Format) files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+asdf-yaml.workspace = true
+thiserror.workspace = true
+half.workspace = true
+md-5.workspace = true
+memmap2.workspace = true
+flate2 = { workspace = true, optional = true }
+bzip2 = { workspace = true, optional = true }
+lz4_flex = { workspace = true, optional = true }
+
+[features]
+default = ["zlib", "bzp2", "lz4"]
+zlib = ["dep:flate2"]
+bzp2 = ["dep:bzip2"]
+lz4 = ["dep:lz4_flex"]
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "asdf-cli"
+description = "Command-line tool for inspecting ASDF files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "asdf"
+path = "src/main.rs"
+
+[dependencies]
+asdf-core.workspace = true
+
+[lints]
+workspace = true
