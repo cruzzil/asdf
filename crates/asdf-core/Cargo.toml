@@ -26,3 +26,6 @@ lz4 = ["dep:lz4_flex"]
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+asdf-yaml.workspace = true
