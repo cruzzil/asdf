@@ -74,3 +74,17 @@ version, so without the workaround all 17 would fail verification.
 Covered by `reader::tests::the_python_checksum_bug_is_worked_around`, which
 pins both directions -- an affected writer verifies, an unaffected one does
 not -- and by `corpus::every_checksummed_block_verifies`.
+
+**A correction to libasdf's version test.** libasdf treats any `asdf` at
+major version 5 or below as affected. Measured against a real install, that
+is too broad: **asdf 5.3.1 records the digest of the stored bytes, i.e.
+correctly.** Applying the workaround on the strength of the version alone
+would therefore mislabel a correct file, and libasdf logs a warning saying so.
+
+We keep the same version test but use it only as a *gate on a fallback*: the
+stored bytes are checked first, and the decompressed bytes are tried only if
+that fails. A file from a corrected writer verifies on the first attempt and
+never reaches the workaround, so the too-broad version test costs nothing.
+
+Measured by `differential::python_written_checksums_verify`, which reports
+which form the installed Python asdf actually used rather than assuming.

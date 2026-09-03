@@ -39,6 +39,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Differential tests compare against the reference implementation.
+      # They skip with a note when it is absent, so this is not required for
+      # the suite to pass -- but it is the strongest evidence available.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python asdf
+        run: |
+          python -m venv /tmp/asdf-venv
+          /tmp/asdf-venv/bin/pip install --quiet asdf lz4
+
       - name: Build
         run: cargo build --workspace --all-targets
 

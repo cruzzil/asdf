@@ -85,8 +85,12 @@ wired into the test suite rather than reasoned about:
   `asdf info` captures, which this implementation reproduces byte for byte.
 - **A C ABI conformance harness** — real C programs compiled against the
   vendored headers and linked against the built library, covering the
-  `_Generic` macros, struct layouts, enum discriminants and the exported
-  symbol namespace.
+  `_Generic` macros, struct layouts, enum discriminants, a third-party
+  extension registering before `main`, and the exported symbol namespace.
+- **Differential tests against Python asdf** — files written here are read by
+  the reference implementation and vice versa, across every compression
+  method, so the two are checked against each other rather than only against
+  themselves. They skip when Python asdf is not installed.
 
 YAML output is compared at the **value level, never byte for byte** — YAML
 admits many spellings of the same value, and the standard's own corpus says
@@ -99,9 +103,9 @@ upstream, each with a test pinning it.
 The read path and the write path both work end to end. See `CONFORMANCE.md`
 for the ABI baseline and gates.
 
-Not yet implemented: the extension mechanism and the seven core-schema
-extensions, external array sources (exploded form), the `core/complex` tag,
-and most of the 378-symbol C surface.
+Not yet implemented: the remaining core-schema extensions
+(`meta`, `history_entry`, `datatype`, `time`), external array sources
+(exploded form), and the `core/complex` tag.
 
 ## Licence
 
