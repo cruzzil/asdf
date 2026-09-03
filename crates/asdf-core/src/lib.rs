@@ -18,6 +18,7 @@ pub mod info;
 pub mod layout;
 pub mod reader;
 pub mod version;
+pub mod writer;
 
 /// The ASDF YAML layer: document model, parser and emitter.
 ///
@@ -29,4 +30,5 @@ pub use asdf_yaml as yaml;
 pub use error::{Error, ErrorCode, Result};
 pub use layout::{Layout, scan};
 pub use reader::{ChecksumStatus, Reader};
+pub use writer::{PendingBlock, WriteOptions, Writer};
 pub use version::Version;

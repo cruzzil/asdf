@@ -477,3 +477,244 @@ fn all_block_data_is_readable() {
     assert!(blocks > 0, "no blocks were read");
     assert!(failures.is_empty(), "failures:\n  {}", failures.join("\n  "));
 }
+
+/// Every reference tree must survive being emitted and read back.
+///
+/// This is the emitter's real test: 112 documents written by two other
+/// implementations, covering tags, anchors and aliases, every scalar style,
+/// unicode, and deeply nested structures. Equality is judged at the value
+/// level, so formatting may differ freely while meaning may not.
+#[test]
+fn every_reference_tree_survives_a_round_trip() {
+    use asdf_yaml::{CompareOptions, compare, emit, parse_document};
+
+    let Some(root) = standard_dir() else {
+        eprintln!("skipping: ASDF_STANDARD_DIR not found");
+        return;
+    };
+    let refs = root.join("reference_files");
+
+    let mut round_tripped = 0;
+    let mut failures = Vec::new();
+
+    for path in asdf_files(&refs) {
+        let name = rel(&refs, &path);
+        let buf = std::fs::read(&path).unwrap();
+        let Ok(layout) = scan(&buf) else { continue };
+        let Some(text) = layout.tree_str(&buf) else { continue };
+        let Ok(original) = parse_document(text) else { continue };
+
+        let emitted = match emit(&original) {
+            Ok(t) => t,
+            Err(e) => {
+                failures.push(format!("{name}: emit failed: {e}"));
+                continue;
+            }
+        };
+
+        let reparsed = match parse_document(&emitted) {
+            Ok(d) => d,
+            Err(e) => {
+                failures.push(format!("{name}: emitted output does not parse: {e}"));
+                continue;
+            }
+        };
+
+        let result = compare(&original, &reparsed, CompareOptions::default());
+        if result.is_equal() {
+            round_tripped += 1;
+        } else {
+            let detail: Vec<String> = result
+                .differences
+                .iter()
+                .take(3)
+                .map(|d| d.to_string())
+                .collect();
+            failures.push(format!("{name}:\n      {}", detail.join("\n      ")));
+        }
+    }
+
+    eprintln!("{round_tripped} reference trees survived an emit/parse round trip");
+    assert!(round_tripped > 100, "expected the whole corpus, got {round_tripped}");
+    assert!(
+        failures.is_empty(),
+        "{} tree(s) did not round trip:\n    {}",
+        failures.len(),
+        failures.iter().take(5).cloned().collect::<Vec<_>>().join("\n    ")
+    );
+}
+
+/// Emitted trees must also be readable as complete ASDF tree sections.
+///
+/// A tree the emitter writes has to carry the directives and the `...`
+/// terminator, since a reader locates the tree's end by searching for it.
+#[test]
+fn emitted_trees_carry_the_markers_a_reader_needs() {
+    use asdf_yaml::{emit, parse_document};
+
+    let Some(root) = standard_dir() else {
+        eprintln!("skipping: ASDF_STANDARD_DIR not found");
+        return;
+    };
+    let path = root.join("reference_files/1.6.0/basic.asdf");
+    if !path.is_file() {
+        return;
+    }
+
+    let buf = std::fs::read(&path).unwrap();
+    let layout = scan(&buf).unwrap();
+    let doc = parse_document(layout.tree_str(&buf).unwrap()).unwrap();
+    let emitted = emit(&doc).unwrap();
+
+    assert!(emitted.starts_with("%YAML 1.1\n"), "{emitted}");
+    assert!(emitted.contains("%TAG ! tag:stsci.edu:asdf/\n"), "{emitted}");
+    assert!(emitted.contains("--- !core/asdf-1.1.0\n"), "{emitted}");
+    assert!(emitted.ends_with("...\n"), "{emitted}");
+
+    // Reassembled into a file, the layout scanner must find exactly this tree.
+    let mut file = Vec::new();
+    file.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n");
+    file.extend_from_slice(emitted.as_bytes());
+    let relaid = scan(&file).unwrap();
+    assert_eq!(
+        relaid.tree_str(&file).unwrap(),
+        emitted,
+        "the scanner must recover exactly the tree that was written"
+    );
+}
+
+/// Rewrite every reference file with our own writer and read it back.
+///
+/// This closes the loop on the write path: for each file in the corpus, take
+/// its tree and every one of its blocks, assemble a fresh ASDF file, and
+/// check that reading that file yields the same tree and byte-identical
+/// block data. It exercises the emitter, the block writer, checksum
+/// generation and block-index generation against 112 real files.
+#[test]
+fn every_reference_file_survives_being_rewritten() {
+    use asdf_core::compression::Compression;
+    use asdf_core::reader::{ChecksumStatus, Reader};
+    use asdf_core::writer::{PendingBlock, Writer};
+    use asdf_yaml::{CompareOptions, compare};
+
+    let Some(root) = standard_dir() else {
+        eprintln!("skipping: ASDF_STANDARD_DIR not found");
+        return;
+    };
+    let refs = root.join("reference_files");
+
+    let mut rewritten = 0;
+    let mut blocks_copied = 0;
+    let mut failures = Vec::new();
+
+    for path in asdf_files(&refs) {
+        let name = rel(&refs, &path);
+        let Ok(source) = Reader::open(&path) else { continue };
+
+        // A streamed block has no well-defined size to copy, so those files
+        // are left to phase 9.
+        if (0..source.block_count())
+            .any(|i| source.block(i).is_ok_and(|b| b.header.is_streamed()))
+        {
+            continue;
+        }
+
+        let Ok(Some(original_tree)) = source.tree() else { continue };
+
+        let mut writer = Writer::from_document(original_tree.clone());
+        let mut expected_blocks = Vec::new();
+        let mut ok = true;
+
+        for index in 0..source.block_count() {
+            let Ok(data) = source.block_data(index) else {
+                ok = false;
+                break;
+            };
+            let compression = source.block_compression(index).unwrap_or(Compression::None);
+            expected_blocks.push(data.to_vec());
+            writer.add_block(PendingBlock::compressed(data.to_vec(), compression));
+        }
+        if !ok {
+            failures.push(format!("{name}: could not read a block"));
+            continue;
+        }
+
+        let bytes = match writer.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                failures.push(format!("{name}: write failed: {e}"));
+                continue;
+            }
+        };
+
+        let rebuilt = match Reader::from_bytes(bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                failures.push(format!("{name}: the file we wrote will not scan: {e}"));
+                continue;
+            }
+        };
+
+        // The tree must survive.
+        match rebuilt.tree() {
+            Ok(Some(tree)) => {
+                let result = compare(&original_tree, &tree, CompareOptions::default());
+                if !result.is_equal() {
+                    let detail: Vec<String> =
+                        result.differences.iter().take(3).map(|d| d.to_string()).collect();
+                    failures.push(format!("{name}: tree changed:\n      {}", detail.join("\n      ")));
+                    continue;
+                }
+            }
+            _ => {
+                failures.push(format!("{name}: the rewritten file has no tree"));
+                continue;
+            }
+        }
+
+        // Every block must come back byte for byte.
+        if rebuilt.block_count() != expected_blocks.len() {
+            failures.push(format!(
+                "{name}: wrote {} blocks, read back {}",
+                expected_blocks.len(),
+                rebuilt.block_count()
+            ));
+            continue;
+        }
+        for (index, expected) in expected_blocks.iter().enumerate() {
+            match rebuilt.block_data(index) {
+                Ok(actual) if actual.as_ref() == expected.as_slice() => blocks_copied += 1,
+                Ok(actual) => failures.push(format!(
+                    "{name}: block {index} differs ({} bytes vs {})",
+                    actual.len(),
+                    expected.len()
+                )),
+                Err(e) => failures.push(format!("{name}: block {index}: {e}")),
+            }
+            // And the checksum we generated must verify.
+            if let Ok((status, _)) = rebuilt.verify_block_checksum(index)
+                && status != ChecksumStatus::Valid
+            {
+                failures.push(format!("{name}: block {index}: checksum {status:?}"));
+            }
+        }
+
+        // A written index must be one we would accept on read.
+        if rebuilt.block_count() > 0 && !rebuilt.layout().used_block_index() {
+            failures.push(format!(
+                "{name}: our own block index was rejected: {:?}",
+                rebuilt.layout().index_rejection
+            ));
+        }
+        rewritten += 1;
+    }
+
+    eprintln!("rewrote and re-read {rewritten} reference files, {blocks_copied} blocks copied");
+    assert!(rewritten > 90, "expected most of the corpus, got {rewritten}");
+    assert!(
+        failures.is_empty(),
+        "{} file(s) failed to survive a rewrite:\n    {}",
+        failures.len(),
+        failures.iter().take(6).cloned().collect::<Vec<_>>().join("\n    ")
+    );
+}

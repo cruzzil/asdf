@@ -10,9 +10,9 @@ use std::collections::HashMap;
 
 use saphyr_parser::{Event, Parser, ScanError, Span as SapSpan, SpannedEventReceiver};
 
-use crate::document::Document;
+use crate::document::{Document, YamlVersion};
 use crate::node::{CollectionStyle, Entry, Node, NodeData, NodeId, ScalarStyle, Span};
-use crate::tag::Tag;
+use crate::tag::{Tag, TagHandle};
 
 /// An error encountered while parsing a YAML document.
 #[derive(Debug, thiserror::Error)]
@@ -218,10 +218,44 @@ impl<'i> SpannedEventReceiver<'i> for Builder {
     }
 }
 
+/// Read the `%YAML` and `%TAG` directives from the head of a document.
+///
+/// `saphyr-parser` consumes directives internally and surfaces no event for
+/// them -- it hands back tags with their handle already expanded -- so they
+/// are scanned from the source instead. Without this the emitter could not
+/// reproduce the `%TAG ! tag:stsci.edu:asdf/` line that lets an ASDF tree
+/// write `!core/ndarray-1.1.0` rather than the full URI.
+fn scan_directives(input: &str, doc: &mut Document) {
+    for line in input.lines() {
+        let line = line.trim_end();
+        if line.starts_with("---") || line.starts_with("...") {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("%YAML ") {
+            let mut parts = rest.trim().split('.');
+            if let (Some(major), Some(minor)) = (parts.next(), parts.next())
+                && let (Ok(major), Ok(minor)) = (major.parse(), minor.parse())
+            {
+                doc.version = Some(YamlVersion { major, minor });
+            }
+        } else if let Some(rest) = line.strip_prefix("%TAG ") {
+            let mut parts = rest.split_whitespace();
+            if let (Some(handle), Some(prefix)) = (parts.next(), parts.next()) {
+                doc.tag_handles.push(TagHandle {
+                    handle: handle.to_string(),
+                    prefix: prefix.to_string(),
+                });
+            }
+        }
+    }
+}
+
 /// Parse a YAML document into a [`Document`].
 ///
 /// Only the first document in the stream is returned. Anchors and aliases are
-/// preserved as distinct nodes rather than being expanded.
+/// preserved as distinct nodes rather than being expanded, and the `%YAML`
+/// and `%TAG` directives are recorded so the document can be re-emitted with
+/// them intact.
 pub fn parse_document(input: &str) -> Result<Document, ParseError> {
     let mut builder = Builder::default();
     let parse_result = Parser::new_from_str(input).load(&mut builder, true);
@@ -234,6 +268,7 @@ pub fn parse_document(input: &str) -> Result<Document, ParseError> {
     let root = builder.root.ok_or(ParseError::Empty)?;
     let mut doc = builder.doc;
     doc.set_root(root);
+    scan_directives(input, &mut doc);
     Ok(doc)
 }
 

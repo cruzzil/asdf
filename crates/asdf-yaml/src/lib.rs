@@ -18,6 +18,7 @@
 
 pub mod compare;
 pub mod document;
+pub mod emit;
 pub mod node;
 pub mod parse;
 pub mod path;
@@ -26,6 +27,7 @@ pub mod tag;
 
 pub use compare::{CompareOptions, Comparison, Difference, compare, compare_from};
 pub use document::{Document, YamlVersion};
+pub use emit::{EmitError, EmitOptions, emit, emit_with};
 pub use node::{CollectionStyle, Entry, Node, NodeData, NodeId, ScalarStyle, Span};
 pub use parse::{ParseError, parse_document};
 pub use path::{Component, Path, PathError};
