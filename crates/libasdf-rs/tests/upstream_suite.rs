@@ -52,7 +52,7 @@ const SUITES: &[Suite] = &[
     Suite { name: "test-tests", expect_pass: 3, total: 3 },
     Suite { name: "test-error", expect_pass: 3, total: 3 },
     Suite { name: "test-time", expect_pass: 11, total: 17 },
-    Suite { name: "test-core-extensions", expect_pass: 9, total: 16 },
+    Suite { name: "test-core-extensions", expect_pass: 11, total: 16 },
     Suite { name: "test-extension", expect_pass: 7, total: 13 },
     Suite { name: "test-reference-files", expect_pass: 113, total: 113 },
 ];
@@ -83,9 +83,36 @@ fn include_dirs() -> Vec<PathBuf> {
     env!("ASDF_INCLUDE_DIRS").split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect()
 }
 
-fn shared_library_dir() -> Option<PathBuf> {
+fn shared_library() -> Option<PathBuf> {
     let dir = target_dir();
-    ["libasdf.so", "libasdf.dylib"].iter().any(|n| dir.join(n).is_file()).then_some(dir)
+    ["libasdf.so", "libasdf.dylib"].iter().map(|n| dir.join(n)).find(|p| p.is_file())
+}
+
+/// Build the shared library these tests load, so it cannot be stale.
+///
+/// `cargo test --test <name>` builds the package's *rlib*, which the test
+/// binary links, and can skip the `cdylib` -- they are separate artifacts of
+/// the same lib target. A stale `libasdf.so` makes the gate report on code
+/// that is no longer there, which is worse than no gate at all, so it is
+/// rebuilt here rather than assumed current. When it is already current this
+/// costs one `cargo` no-op.
+fn ensure_library_is_current() {
+    use std::sync::Once;
+
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        // Only the lib target, so this cannot recurse into the tests.
+        let out = Command::new(cargo).args(["build", "-p", "libasdf-rs", "--lib"]).output();
+        match out {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => eprintln!(
+                "warning: could not refresh libasdf.so:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(e) => eprintln!("warning: could not run cargo to refresh libasdf.so: {e}"),
+        }
+    });
 }
 
 fn env_dir(var: &str, fallback: &str) -> Option<PathBuf> {
@@ -121,10 +148,13 @@ fn upstream_c_test_suite_runs_against_this_library() {
         eprintln!("skipping: ASDF_STANDARD_DIR not found");
         return;
     };
-    let Some(lib_dir) = shared_library_dir() else {
+    ensure_library_is_current();
+    let Some(library) = shared_library() else {
         eprintln!("skipping: shared library not built");
         return;
     };
+    let lib_dir = library.parent().expect("the library's directory").to_path_buf();
+
     let munit = root.join("tests/munit/munit.c");
     if !munit.is_file() {
         eprintln!(

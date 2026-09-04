@@ -54,7 +54,7 @@ fn resolved_of(value: *mut AsdfValue) -> Option<Resolved> {
 }
 
 /// Build a value handle for a node of the same file.
-fn make_value(file: *mut AsdfFile, node: NodeId) -> *mut AsdfValue {
+pub(crate) fn make_value(file: *mut AsdfFile, node: NodeId) -> *mut AsdfValue {
     Box::into_raw(Box::new(AsdfValue::new(file, node)))
 }
 

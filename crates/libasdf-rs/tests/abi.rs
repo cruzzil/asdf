@@ -35,6 +35,33 @@ fn shared_library() -> Option<PathBuf> {
     None
 }
 
+/// Build the shared library these tests load, so it cannot be stale.
+///
+/// `cargo test --test <name>` builds the package's *rlib*, which the test
+/// binary links, and can skip the `cdylib` -- they are separate artifacts of
+/// the same lib target. A stale `libasdf.so` makes the gate report on code
+/// that is no longer there, which is worse than no gate at all, so it is
+/// rebuilt here rather than assumed current. When it is already current this
+/// costs one `cargo` no-op.
+fn ensure_library_is_current() {
+    use std::sync::Once;
+
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        // Only the lib target, so this cannot recurse into the tests.
+        let out = Command::new(cargo).args(["build", "-p", "libasdf-rs", "--lib"]).output();
+        match out {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => eprintln!(
+                "warning: could not refresh libasdf.so:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(e) => eprintln!("warning: could not run cargo to refresh libasdf.so: {e}"),
+        }
+    });
+}
+
 fn c_compiler() -> String {
     std::env::var("CC").unwrap_or_else(|_| "cc".to_string())
 }
@@ -54,6 +81,10 @@ fn compile_and_run(name: &str, source: &str, link: bool) -> Result<String, Strin
     let src = out_dir.join(format!("{name}.c"));
     let bin = out_dir.join(name);
     std::fs::write(&src, source).map_err(|e| e.to_string())?;
+
+    if link {
+        ensure_library_is_current();
+    }
 
     let mut cmd = Command::new(c_compiler());
     cmd.arg("-std=c11").arg("-Wall").arg("-Wextra").arg("-Werror");

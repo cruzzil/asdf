@@ -238,6 +238,7 @@ pub const TIME_TAG: &str = "tag:stsci.edu:asdf/time/time-1.4.0";
 pub(crate) fn time_deserialize(
     doc: &Document,
     node: NodeId,
+    _file: *mut crate::file_ffi::AsdfFile,
     out: *mut asdf_time_t,
 ) -> AsdfValueErr {
     // The shorthand: the whole tagged value is the time string.
@@ -386,7 +387,7 @@ mod tests {
         let root = doc.root().unwrap();
         let node = doc.mapping_get(root, "t").unwrap();
         let mut time = asdf_time_t::zeroed();
-        assert_eq!(time_deserialize(&doc, node, &mut time), AsdfValueErr::Ok);
+        assert_eq!(time_deserialize(&doc, node, std::ptr::null_mut(), &mut time), AsdfValueErr::Ok);
         time
     }
 

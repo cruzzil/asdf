@@ -436,10 +436,43 @@ pub fn civil_to_julian(civil: &Civil) -> f64 {
         + seconds / SECONDS_PER_DAY
 }
 
+/// Split a trailing UTC offset off a time-of-day.
+///
+/// Returns the time without it and the offset in seconds. `Z` means zero,
+/// and so does no designator at all -- ASDF carries the scale separately, so
+/// an unqualified time is read in its own scale.
+///
+/// The forms are ISO 8601's: `+HH:MM`, `-HH:MM`, `+HHMM` and `+HH`.
+fn split_utc_offset(time: &str) -> (&str, i64) {
+    let time = time.trim();
+    if let Some(rest) = time.strip_suffix(['Z', 'z']) {
+        return (rest.trim_end(), 0);
+    }
+    // The sign cannot be the first character: that would be part of the time
+    // itself, not an offset.
+    let Some(index) = time.rfind(['+', '-']).filter(|i| *i > 0) else {
+        return (time, 0);
+    };
+    let sign = if time.as_bytes()[index] == b'-' { -1 } else { 1 };
+    let designator = &time[index + 1..];
+
+    let (hours, minutes) = match designator.split_once(':') {
+        Some((h, m)) => (h, m),
+        // `+HHMM` packs both without a separator; `+HH` has only hours.
+        None if designator.len() == 4 => designator.split_at(2),
+        None => (designator, "0"),
+    };
+    let (Ok(hours), Ok(minutes)) = (hours.parse::<i64>(), minutes.parse::<i64>()) else {
+        return (time, 0);
+    };
+    (&time[..index], sign * (hours * 3600 + minutes * 60))
+}
+
 /// Parse an ISO 8601 or FITS date-time.
 ///
 /// Accepts `YYYY-MM-DD[T ]HH:MM:SS[.frac]`, with the time optional, and a
-/// signed five-digit "long year" as FITS permits.
+/// signed five-digit "long year" as FITS permits. A trailing UTC offset is
+/// applied, so `11:56:15+01:00` is 10:56:15 UTC.
 fn parse_datetime(text: &str) -> Option<Civil> {
     let text = text.trim();
     let (date, time) = match text.find(['T', ' ']) {
@@ -460,12 +493,12 @@ fn parse_datetime(text: &str) -> Option<Civil> {
         return None;
     }
 
+    let mut utc_offset = 0i64;
     let (hour, minute, second, nanosecond) = match time {
         None => (0, 0, 0, 0),
         Some(time) => {
-            // A trailing zone designator is accepted and ignored; ASDF times
-            // carry their scale separately.
-            let time = time.trim_end_matches('Z').trim();
+            let (time, offset) = split_utc_offset(time);
+            utc_offset = offset;
             let mut parts = time.split(':');
             let hour: u32 = parts.next()?.parse().ok()?;
             let minute: u32 = parts.next().unwrap_or("0").parse().ok()?;
@@ -490,7 +523,7 @@ fn parse_datetime(text: &str) -> Option<Civil> {
         }
     };
 
-    Some(complete(Civil {
+    let civil = complete(Civil {
         year: if negative { -year } else { year },
         month,
         day,
@@ -499,7 +532,32 @@ fn parse_datetime(text: &str) -> Option<Civil> {
         second,
         nanosecond,
         ..Default::default()
-    }))
+    });
+    if utc_offset == 0 {
+        return Some(civil);
+    }
+    // Re-derive the whole breakdown from the corrected instant rather than
+    // adjusting `unix_seconds` alone, so the calendar fields and the
+    // timestamp cannot disagree.
+    Some(civil_from_unix_seconds(civil.unix_seconds - utc_offset, civil.nanosecond))
+}
+
+/// The calendar breakdown for an instant, in the proleptic Gregorian
+/// calendar that [`complete`] uses.
+fn civil_from_unix_seconds(unix_seconds: i64, nanosecond: u32) -> Civil {
+    let days = unix_seconds.div_euclid(86_400);
+    let seconds_of_day = unix_seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    complete(Civil {
+        year,
+        month,
+        day,
+        hour: (seconds_of_day / 3600) as u32,
+        minute: ((seconds_of_day % 3600) / 60) as u32,
+        second: (seconds_of_day % 60) as u32,
+        nanosecond,
+        ..Default::default()
+    })
 }
 
 /// Parse a `YYYY:DDD:HH:MM:SS` day-of-year time.
@@ -735,6 +793,70 @@ mod tests {
         }
         // The Unix epoch is day zero, by definition.
         assert_eq!(days_from_civil(1970, 1, 1), 0);
+    }
+
+    /// A trailing UTC offset shifts the instant, as ISO 8601 says and as
+    /// libasdf's own parser does.
+    #[test]
+    fn utc_offsets_are_applied() {
+        // The exact value upstream's `test-core-extensions` expects from
+        // `fixtures/255.asdf`.
+        let mut t = Time::new("2025-07-23 11:56:15+00:00", TimeFormat::Iso, TimeScale::Utc);
+        assert_eq!(t.compute_civil().unwrap().unix_seconds, 1_753_271_775);
+
+        // An hour east is an hour earlier in UTC.
+        let mut east = Time::new("2025-07-23T11:56:15+01:00", TimeFormat::Iso, TimeScale::Utc);
+        assert_eq!(east.compute_civil().unwrap().unix_seconds, 1_753_271_775 - 3600);
+
+        // And an hour west is an hour later.
+        let mut west = Time::new("2025-07-23T11:56:15-01:00", TimeFormat::Iso, TimeScale::Utc);
+        assert_eq!(west.compute_civil().unwrap().unix_seconds, 1_753_271_775 + 3600);
+
+        // The calendar fields follow the instant, not the written text.
+        let shifted = east.compute_civil().unwrap();
+        assert_eq!((shifted.hour, shifted.minute, shifted.second), (10, 56, 15));
+
+        // `Z` and a bare time both mean no offset.
+        for text in ["2025-07-23T11:56:15Z", "2025-07-23T11:56:15"] {
+            let mut t = Time::new(text, TimeFormat::Iso, TimeScale::Utc);
+            assert_eq!(t.compute_civil().unwrap().unix_seconds, 1_753_271_775, "{text}");
+        }
+    }
+
+    #[test]
+    fn offset_designators_come_in_several_shapes() {
+        for (text, expected) in [
+            ("2025-07-23T11:56:15+01:30", 1_753_271_775 - 5400),
+            ("2025-07-23T11:56:15+0130", 1_753_271_775 - 5400),
+            ("2025-07-23T11:56:15+01", 1_753_271_775 - 3600),
+            ("2025-07-23T11:56:15-0130", 1_753_271_775 + 5400),
+        ] {
+            let mut t = Time::new(text, TimeFormat::Iso, TimeScale::Utc);
+            assert_eq!(t.compute_civil().unwrap().unix_seconds, expected, "{text}");
+        }
+    }
+
+    /// A negative year's leading sign must not be read as an offset.
+    #[test]
+    fn a_negative_year_is_not_an_offset() {
+        let mut t = Time::new("-0044-03-15T12:00:00", TimeFormat::Iso, TimeScale::Utc);
+        let civil = t.compute_civil().unwrap();
+        assert_eq!(civil.year, -44);
+        assert_eq!((civil.month, civil.day, civil.hour), (3, 15, 12));
+    }
+
+    /// The fixture upstream's `test-core-extensions` reads, whose time is a
+    /// single-quoted scalar folded across two lines.
+    #[test]
+    fn a_folded_time_string_still_parses() {
+        let doc = asdf_yaml::parse_document("time: '2025-07-23\n      11:56:15+00:00'\n").unwrap();
+        let root = doc.root().unwrap();
+        let node = doc.mapping_get(root, "time").unwrap();
+        let text = doc.resolved(node).as_str().unwrap();
+        assert_eq!(text, "2025-07-23 11:56:15+00:00", "the fold should become one space");
+
+        let mut t = Time::new(text, TimeFormat::Iso, TimeScale::Utc);
+        assert_eq!(t.compute_civil().unwrap().unix_seconds, 1_753_271_775);
     }
 
     #[test]

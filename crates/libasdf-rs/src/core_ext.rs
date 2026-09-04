@@ -20,7 +20,7 @@ use std::ffi::{CStr, CString, c_char, c_int};
 use asdf_core::yaml::{Document, NodeId, Tag};
 
 use crate::extension_ffi::{asdf_software_t, asdf_tag_t};
-use crate::file_ffi::{AsdfFile, AsdfValue, value_document, value_node};
+use crate::file_ffi::{AsdfFile, AsdfValue, value_document, value_file, value_node};
 use crate::panic::guard;
 use crate::types::AsdfValueErr;
 use crate::version_ffi::{asdf_version_parse, asdf_version_t};
@@ -159,9 +159,13 @@ macro_rules! declare_extension {
                 let (Some(doc), Some(node)) = (value_document(value), value_node(value)) else {
                     return AsdfValueErr::Unknown;
                 };
+                // The file goes through too: an extension whose object holds
+                // a value -- `extension_metadata`'s spare properties, say --
+                // needs one to build a handle against.
+                let file = value_file(value).unwrap_or(std::ptr::null_mut());
                 let boxed: Box<$ty> = Box::new(<$ty>::zeroed());
                 let raw = Box::into_raw(boxed);
-                match $deserialize(doc, node, raw) {
+                match $deserialize(doc, node, file, raw) {
                     AsdfValueErr::Ok => {
                         unsafe { *out = raw };
                         AsdfValueErr::Ok
@@ -472,7 +476,12 @@ impl asdf_software_t {
     }
 }
 
-fn software_deserialize(doc: &Document, node: NodeId, out: *mut asdf_software_t) -> AsdfValueErr {
+fn software_deserialize(
+    doc: &Document,
+    node: NodeId,
+    _file: *mut AsdfFile,
+    out: *mut asdf_software_t,
+) -> AsdfValueErr {
     // `name` and `version` are required by the schema.
     let name = string_field(doc, node, "name");
     let version = version_field(doc, node, "version");
@@ -600,6 +609,7 @@ impl asdf_extension_metadata_t {
 fn extension_metadata_deserialize(
     doc: &Document,
     node: NodeId,
+    file: *mut AsdfFile,
     out: *mut asdf_extension_metadata_t,
 ) -> AsdfValueErr {
     let class = string_field(doc, node, "extension_class");
@@ -607,14 +617,15 @@ fn extension_metadata_deserialize(
         return AsdfValueErr::ParseFailure;
     }
 
-    // The schema calls the package `software` in some versions and
-    // `package` in others; accept either.
-    let package = ["package", "software"]
-        .iter()
-        .find_map(|key| doc.mapping_get(node, key))
+    // Only `package`. The schema also has `software` and
+    // `manifest_software` keys, but those are not the package -- reading
+    // either into `package` makes a file that has no package look as though
+    // it has one, which is exactly what upstream's own test checks against.
+    let package = doc
+        .mapping_get(node, "package")
         .map(|id| {
             let raw = Box::into_raw(Box::new(asdf_software_t::zeroed()));
-            if software_deserialize(doc, id, raw) == AsdfValueErr::Ok {
+            if software_deserialize(doc, id, file, raw) == AsdfValueErr::Ok {
                 raw.cast_const()
             } else {
                 drop(unsafe { Box::from_raw(raw) });
@@ -623,10 +634,18 @@ fn extension_metadata_deserialize(
         })
         .unwrap_or(std::ptr::null());
 
+    // `metadata` is the whole mapping, so a caller can reach the properties
+    // the struct has no field for -- `extension_uri`, `manifest_software`.
+    let metadata = if file.is_null() {
+        std::ptr::null_mut()
+    } else {
+        crate::value_ffi::make_value(file, node)
+    };
+
     unsafe {
         (*out).extension_class = class;
         (*out).package = package;
-        (*out).metadata = std::ptr::null_mut();
+        (*out).metadata = metadata;
     }
     AsdfValueErr::Ok
 }
@@ -646,9 +665,28 @@ fn extension_metadata_serialize(
         && let Some(node) = software_serialize(doc, unsafe { &*obj.package })
     {
         doc.node_mut(node).tag = Some(Tag::parse(SOFTWARE_TAG));
-        let k = doc.add_scalar("software");
+        // `package`, matching the key the deserializer reads. Writing it as
+        // `software` would make the value fail to round-trip through its own
+        // reader, which is what upstream's serialize test catches.
+        let k = doc.add_scalar("package");
         pairs.push((k, node));
     }
+
+    // Any further properties the struct has no field for -- `extension_uri`,
+    // `manifest_software` -- ride along in `metadata`. The two keys with
+    // fields of their own are skipped so they cannot be written twice.
+    if let Some(node) = value_node(obj.metadata)
+        && let Some(entries) = doc.mapping_entries(doc.resolve(node)).map(<[_]>::to_vec)
+    {
+        for entry in entries {
+            let key = doc.resolved(entry.key).as_str().map(str::to_string);
+            if matches!(key.as_deref(), Some("extension_class" | "package")) {
+                continue;
+            }
+            pairs.push((entry.key, entry.value));
+        }
+    }
+
     (!pairs.is_empty()).then(|| doc.add_mapping(pairs))
 }
 
@@ -775,6 +813,11 @@ mod tests {
               name: asdf\n  version: 4.1.0\n\
               history:\n  extensions:\n  - !core/extension_metadata-1.0.0\n    \
               extension_class: asdf.extension._manifest.ManifestExtension\n    \
+              extension_uri: asdf://asdf-format.org/core/extensions/core-1.6.0\n    \
+              package: !core/software-1.0.0 {name: asdf_standard, version: 1.1.1}\n    \
+              software: !core/software-1.0.0 {name: asdf, version: 4.1.0}\n  \
+              - !core/extension_metadata-1.0.0\n    \
+              extension_class: some.other.Extension\n    \
               software: !core/software-1.0.0 {name: asdf, version: 4.1.0}\n",
         );
         buf.extend_from_slice(b"...\n");
@@ -952,9 +995,48 @@ mod tests {
             unsafe { CStr::from_ptr(view.extension_class) }.to_str().unwrap(),
             "asdf.extension._manifest.ManifestExtension"
         );
-        assert!(!view.package.is_null(), "the nested software must be read");
-        assert_eq!(unsafe { CStr::from_ptr((*view.package).name) }.to_str().unwrap(), "asdf");
+        // `package` is the `package` key alone. `software` and
+        // `manifest_software` are different things, and reading either into
+        // `package` would make a file that has none look as though it does.
+        assert!(!view.package.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr((*view.package).name) }.to_str().unwrap(),
+            "asdf_standard"
+        );
 
+        // Everything the struct has no field for stays reachable through
+        // `metadata`, which is the whole mapping.
+        assert!(!view.metadata.is_null());
+        let uri = c"extension_uri";
+        let entry = unsafe { crate::value_ffi::asdf_mapping_get(view.metadata, uri.as_ptr()) };
+        assert!(!entry.is_null());
+        let mut text = std::ptr::null();
+        assert_eq!(
+            unsafe { crate::value_ffi::asdf_value_as_string0(entry, &mut text) },
+            AsdfValueErr::Ok
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(text) }.to_str().unwrap(),
+            "asdf://asdf-format.org/core/extensions/core-1.6.0"
+        );
+        unsafe { crate::file_ffi::asdf_value_destroy(entry) };
+        unsafe { asdf_extension_metadata_destroy(metadata) };
+    }
+
+    /// An entry with no `package` must report none, rather than borrowing
+    /// the `software` beside it.
+    #[test]
+    fn extension_metadata_without_a_package_reports_none() {
+        let h = sample();
+        let path = c"history/extensions/1";
+        let mut metadata: *mut asdf_extension_metadata_t = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { asdf_get_extension_metadata(h.0, path.as_ptr(), &mut metadata) },
+            AsdfValueErr::Ok
+        );
+        let view = unsafe { &*metadata };
+        assert!(view.package.is_null());
+        assert!(!view.metadata.is_null(), "the mapping is still reachable");
         unsafe { asdf_extension_metadata_destroy(metadata) };
     }
 
@@ -1048,7 +1130,11 @@ impl asdf_history_entry_t {
 /// Read a null-terminated software array from a mapping's `software` key.
 ///
 /// The schema allows either one object or a sequence of them.
-fn read_software_list(doc: &Document, node: NodeId) -> *mut *const asdf_software_t {
+fn read_software_list(
+    doc: &Document,
+    node: NodeId,
+    file: *mut AsdfFile,
+) -> *mut *const asdf_software_t {
     let Some(entry) = doc.mapping_get(node, "software") else {
         return std::ptr::null_mut();
     };
@@ -1062,7 +1148,7 @@ fn read_software_list(doc: &Document, node: NodeId) -> *mut *const asdf_software
     let mut list: Vec<*const asdf_software_t> = Vec::with_capacity(nodes.len() + 1);
     for item in nodes {
         let raw = Box::into_raw(Box::new(asdf_software_t::zeroed()));
-        if software_deserialize(doc, item, raw) == AsdfValueErr::Ok {
+        if software_deserialize(doc, item, file, raw) == AsdfValueErr::Ok {
             list.push(raw.cast_const());
         } else {
             drop(unsafe { Box::from_raw(raw) });
@@ -1094,6 +1180,7 @@ unsafe fn free_software_list(list: *mut *const asdf_software_t) {
 fn history_entry_deserialize(
     doc: &Document,
     node: NodeId,
+    file: *mut AsdfFile,
     out: *mut asdf_history_entry_t,
 ) -> AsdfValueErr {
     let description = string_field(doc, node, "description");
@@ -1102,7 +1189,7 @@ fn history_entry_deserialize(
         .mapping_get(node, "time")
         .map(|id| {
             let raw = Box::into_raw(Box::new(asdf_time_t::zeroed()));
-            if time_deserialize(doc, id, raw) == AsdfValueErr::Ok {
+            if time_deserialize(doc, id, file, raw) == AsdfValueErr::Ok {
                 raw.cast_const()
             } else {
                 drop(unsafe { Box::from_raw(raw) });
@@ -1114,7 +1201,7 @@ fn history_entry_deserialize(
     unsafe {
         (*out).description = description;
         (*out).time = time;
-        (*out).software = read_software_list(doc, node);
+        (*out).software = read_software_list(doc, node, file);
     }
     AsdfValueErr::Ok
 }
@@ -1475,7 +1562,12 @@ impl asdf_datatype_t {
     }
 }
 
-fn datatype_deserialize(doc: &Document, node: NodeId, out: *mut asdf_datatype_t) -> AsdfValueErr {
+fn datatype_deserialize(
+    doc: &Document,
+    node: NodeId,
+    _file: *mut AsdfFile,
+    out: *mut asdf_datatype_t,
+) -> AsdfValueErr {
     use asdf_core::core::datatype::Datatype;
 
     let Ok(parsed) = Datatype::parse(doc, node) else {
@@ -1690,8 +1782,9 @@ impl asdf_meta_t {
 fn read_list<T>(
     doc: &Document,
     node: Option<NodeId>,
+    file: *mut AsdfFile,
     zeroed: fn() -> T,
-    deserialize: fn(&Document, NodeId, *mut T) -> AsdfValueErr,
+    deserialize: fn(&Document, NodeId, *mut AsdfFile, *mut T) -> AsdfValueErr,
 ) -> *mut *const T {
     let Some(node) = node else {
         return std::ptr::null_mut();
@@ -1704,7 +1797,7 @@ fn read_list<T>(
     let mut list: Vec<*const T> = Vec::with_capacity(items.len() + 1);
     for item in items {
         let raw = Box::into_raw(Box::new(zeroed()));
-        if deserialize(doc, item, raw) == AsdfValueErr::Ok {
+        if deserialize(doc, item, file, raw) == AsdfValueErr::Ok {
             list.push(raw.cast_const());
         } else {
             drop(unsafe { Box::from_raw(raw) });
@@ -1734,12 +1827,17 @@ unsafe fn free_list<T>(list: *mut *const T, destroy: unsafe extern "C" fn(*mut T
     drop(unsafe { Box::from_raw(slice) });
 }
 
-fn meta_deserialize(doc: &Document, node: NodeId, out: *mut asdf_meta_t) -> AsdfValueErr {
+fn meta_deserialize(
+    doc: &Document,
+    node: NodeId,
+    file: *mut AsdfFile,
+    out: *mut asdf_meta_t,
+) -> AsdfValueErr {
     let library = doc
         .mapping_get(node, "asdf_library")
         .map(|id| {
             let raw = Box::into_raw(Box::new(asdf_software_t::zeroed()));
-            if software_deserialize(doc, id, raw) == AsdfValueErr::Ok {
+            if software_deserialize(doc, id, file, raw) == AsdfValueErr::Ok {
                 raw
             } else {
                 drop(unsafe { Box::from_raw(raw) });
@@ -1764,11 +1862,17 @@ fn meta_deserialize(doc: &Document, node: NodeId, out: *mut asdf_meta_t) -> Asdf
         (*out).history.extensions = read_list(
             doc,
             extensions_node,
+            file,
             asdf_extension_metadata_t::zeroed,
             extension_metadata_deserialize,
         );
-        (*out).history.entries =
-            read_list(doc, entries_node, asdf_history_entry_t::zeroed, history_entry_deserialize);
+        (*out).history.entries = read_list(
+            doc,
+            entries_node,
+            file,
+            asdf_history_entry_t::zeroed,
+            history_entry_deserialize,
+        );
     }
     AsdfValueErr::Ok
 }
