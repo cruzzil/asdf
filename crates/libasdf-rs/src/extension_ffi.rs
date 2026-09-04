@@ -479,7 +479,7 @@ pub static libasdf_software: Identity<asdf_software_t> = Identity(asdf_software_
     name: c"libasdf-rs".as_ptr(),
     version: (&raw const libasdf_version).cast::<asdf_version_t>(),
     author: c"The libasdf-rs Developers".as_ptr(),
-    homepage: c"https://github.com/petesmc/libasdf-rs".as_ptr(),
+    homepage: c"https://github.com/cruzzil/libasdf-rs".as_ptr(),
 });
 
 /// Serialize a native object through an extension.
