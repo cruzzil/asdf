@@ -170,8 +170,10 @@ impl AsdfParser {
                 // `ASDF_PARSER_OPT_BUFFER_TREE` asks for the tree's text to
                 // be kept; without it `buf` stays null, as upstream's does.
                 let text = text.and_then(|text| CString::new(text).ok());
-                let buf = text.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
-                let info = Box::new(asdf_tree_info_t { start, end, buf });
+                // `buf` is filled in below, once the event is in its final
+                // home. Deriving it here would leave C holding a pointer that
+                // Rust considers invalid.
+                let info = Box::new(asdf_tree_info_t { start, end, buf: std::ptr::null() });
                 Some((AsdfEventType::TreeEnd, Payload::Tree { info, text }))
             }
             CoreEvent::Yaml(event) => Some((AsdfEventType::Yaml, Payload::Yaml(yaml_sub(&event)))),
@@ -200,7 +202,21 @@ impl AsdfParser {
         let Some(event) = built else {
             return std::ptr::null_mut();
         };
-        let handle = Box::into_raw(Box::new(event));
+        let mut boxed = Box::new(event);
+
+        // Point `asdf_tree_info_t.buf` at the buffered tree text, and do it
+        // only now. C reads that field directly, so the pointer has to name
+        // the copy that outlives this call -- and every move of the owning
+        // `CString` on the way here retags its buffer, which invalidates any
+        // pointer taken beforehand. Miri rejects the earlier form; on a real
+        // allocator it happens to work, which is exactly why it needed a
+        // checker to find.
+        if let Payload::Tree { info, text: Some(text) } = &mut boxed.payload {
+            let buf = text.as_ptr();
+            info.buf = buf;
+        }
+
+        let handle = Box::into_raw(boxed);
         self.live.push(handle);
         handle
     }

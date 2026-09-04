@@ -118,8 +118,33 @@ impl Reader {
     /// The file is memory-mapped, so block data is not read until it is used.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let file = std::fs::File::open(path)?;
 
+        // Miri interprets rather than executes, so it has no `mmap`. Reading
+        // the file whole is observably the same to every caller -- `Source`
+        // hands out a `&[u8]` either way -- and it is what lets the FFI layer,
+        // which is where the unsafe code actually lives, be checked at all.
+        #[cfg(miri)]
+        {
+            let bytes = std::fs::read(path)?;
+            let layout = scan(&bytes)?;
+            return Ok(Self {
+                source: Source::Owned(bytes),
+                layout,
+                path: Some(path.to_path_buf()),
+            });
+        }
+
+        #[cfg(not(miri))]
+        {
+            let file = std::fs::File::open(path)?;
+            Self::map(file, path)
+        }
+    }
+
+    /// The memory-mapping half of [`Reader::open`], split out so the `miri`
+    /// fallback above stays readable.
+    #[cfg(not(miri))]
+    fn map(file: std::fs::File, path: &Path) -> Result<Self> {
         // SAFETY: the only unsafe operation in the engine. Mapping is unsafe
         // because another process truncating the file can turn a later read
         // into SIGBUS. That hazard is inherent to memory-mapping and is the

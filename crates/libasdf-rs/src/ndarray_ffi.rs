@@ -90,6 +90,91 @@ pub struct asdf_ndarray_t {
     pub _reserved: *mut c_void,
 }
 
+/// Sixteen bytes, aligned to sixteen. See [`AlignedBuf`].
+///
+/// The field is never named again: it exists to give the allocation its size
+/// and its alignment, and the bytes are reached through the buffer's slice
+/// accessors. `#[repr(align)]` rather than `u128` because `u128`'s alignment
+/// is 16 only on some targets.
+#[repr(align(16))]
+#[derive(Clone, Copy, Debug)]
+struct Chunk(#[allow(dead_code)] [u8; 16]);
+
+/// A byte buffer aligned the way `malloc` aligns.
+///
+/// `asdf_ndarray_data` returns its pointer straight to C, and every caller
+/// casts it before dereferencing:
+///
+/// ```c
+/// int32_t *values = asdf_ndarray_data(array, &size);
+/// printf("%d\n", values[0]);
+/// ```
+///
+/// A `Vec<u8>` is aligned to 1, so that cast is undefined behaviour, and on a
+/// strict-alignment target it is a bus error rather than a theoretical one.
+/// Upstream libasdf gets this right without trying, because `malloc` is
+/// specified to return storage aligned for any fundamental type; we had
+/// quietly given up that guarantee by holding the bytes in a `Vec<u8>`.
+///
+/// Backing the storage with a 16-byte-aligned element restores it in safe
+/// code: `Vec<T>` is always aligned to `align_of::<T>()`. Sixteen covers
+/// every ASDF datatype -- the widest is `complex128`, a pair of doubles --
+/// and matches `max_align_t` on the platforms libasdf targets.
+#[derive(Clone, Debug)]
+pub(crate) struct AlignedBuf {
+    chunks: Vec<Chunk>,
+    /// The requested length. The backing store rounds up to a whole chunk.
+    len: usize,
+}
+
+impl AlignedBuf {
+    /// A zeroed buffer of `len` bytes.
+    fn zeroed(len: usize) -> Self {
+        Self { chunks: vec![Chunk([0; 16]); len.div_ceil(16)], len }
+    }
+
+    /// A buffer holding a copy of `bytes`.
+    fn from_slice(bytes: &[u8]) -> Self {
+        let mut buf = Self::zeroed(bytes.len());
+        buf.as_mut_slice()[..bytes.len()].copy_from_slice(bytes);
+        buf
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        // Reading a `[Chunk]` as bytes is always valid: `Chunk` is a byte
+        // array under a stricter alignment, so it has no padding and no
+        // invalid bit patterns.
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(self.chunks.as_ptr().cast::<u8>(), self.chunks.len() * 16)
+        };
+        &bytes[..self.len]
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: as `as_slice`, and the borrow is exclusive.
+        let bytes: &mut [u8] = unsafe {
+            std::slice::from_raw_parts_mut(
+                self.chunks.as_mut_ptr().cast::<u8>(),
+                self.chunks.len() * 16,
+            )
+        };
+        &mut bytes[..self.len]
+    }
+
+    /// The aligned pointer handed to C.
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.chunks.as_mut_ptr().cast::<u8>()
+    }
+}
+
+impl std::ops::Deref for AlignedBuf {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
 /// The state hanging off `_reserved`.
 ///
 /// It owns every buffer the public struct points at, so the pointers stay
@@ -106,9 +191,9 @@ struct NdarrayState {
     /// The engine's own view of the array.
     parsed: Ndarray,
     /// Data read from the file, cached for `asdf_ndarray_data`.
-    data: Option<Vec<u8>>,
+    data: Option<AlignedBuf>,
     /// A buffer from `asdf_ndarray_data_alloc`, owned until dealloc.
-    allocated: Option<Vec<u8>>,
+    allocated: Option<AlignedBuf>,
     /// Compression to use when the array is written.
     compression: Compression,
     /// Where the data will be written.
@@ -449,7 +534,7 @@ pub unsafe extern "C" fn asdf_ndarray_data_alloc(ndarray: *mut asdf_ndarray_t) -
             return std::ptr::null_mut();
         };
         if state.allocated.is_none() {
-            state.allocated = Some(vec![0u8; len]);
+            state.allocated = Some(AlignedBuf::zeroed(len));
         }
         state.allocated.as_mut().map_or(std::ptr::null_mut(), |b| b.as_mut_ptr().cast::<c_void>())
     })
@@ -940,9 +1025,9 @@ pub unsafe extern "C" fn asdf_ndarray_destroy(ndarray: *mut asdf_ndarray_t) {
 }
 
 /// Attach data read from a file to an array handle.
-pub(crate) fn set_data(array: *mut asdf_ndarray_t, data: Vec<u8>) {
+pub(crate) fn set_data(array: *mut asdf_ndarray_t, data: &[u8]) {
     if let Some(state) = state_of(array) {
-        state.data = Some(data);
+        state.data = Some(AlignedBuf::from_slice(data));
     }
 }
 
@@ -995,7 +1080,7 @@ fn ndarray_from_value(value: *mut crate::file_ffi::AsdfValue) -> *mut asdf_ndarr
     }
 
     let array = make_ndarray(parsed, shape);
-    if let Some(bytes) = data {
+    if let Some(bytes) = &data {
         set_data(array, bytes);
     }
     // Remember where the data came from so `asdf_ndarray_block` can hand
@@ -1190,7 +1275,7 @@ pub unsafe extern "C" fn asdf_ndarray_copy_into(
             return false;
         }
         if let Some(data) = state.allocated.as_ref().or(state.data.as_ref()) {
-            set_data(rebuilt, data.clone());
+            set_data(rebuilt, data);
         }
         if let Some(fresh) = state_of(rebuilt) {
             fresh.compression = state.compression;
@@ -1324,7 +1409,7 @@ pub unsafe extern "C" fn asdf_value_of_ndarray(
                 .allocated
                 .as_ref()
                 .or(state.data.as_ref())
-                .cloned()
+                .map(|b| b.as_slice().to_vec())
                 .unwrap_or_else(|| vec![0u8; expected]),
             None => vec![0u8; expected],
         };
@@ -1937,7 +2022,7 @@ mod tests {
 
         let array = make_ndarray(parsed, vec![values.len() as u64]);
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-        set_data(array, bytes);
+        set_data(array, &bytes);
         array
     }
 
@@ -1951,7 +2036,7 @@ mod tests {
         let parsed = CoreNdarray::parse(&doc, doc.mapping_get(root, "a").unwrap()).unwrap();
         let array = make_ndarray(parsed, vec![3, 4]);
         let bytes: Vec<u8> = (0i32..12).flat_map(i32::to_le_bytes).collect();
-        set_data(array, bytes);
+        set_data(array, &bytes);
         array
     }
 
@@ -2296,6 +2381,14 @@ mod tests {
             unsafe { asdf_ndarray_read_all(array, scalar_abi(ScalarType::Int8), &mut dst) },
             NdarrayErr::Overflow
         );
+
+        // Overflow still delivers the buffer -- the caller gets the saturated
+        // value *and* the report that it did not fit -- so `dst` owns an
+        // allocation the caller frees, exactly as the header says.
+        assert!(!dst.is_null());
+        assert_eq!(unsafe { *dst.cast::<i8>() }, i8::MAX);
+        unsafe { libc::free(dst) };
+
         unsafe { asdf_ndarray_destroy(array) };
     }
 
@@ -2386,6 +2479,55 @@ mod tests {
         unsafe { asdf_ndarray_destroy(array) };
     }
 
+    /// C casts the data pointer to the element type before dereferencing, so
+    /// an under-aligned buffer is undefined behaviour and, on a
+    /// strict-alignment target, a bus error. `malloc` gives upstream this for
+    /// free; holding the bytes in a `Vec<u8>` had quietly given it up. Found
+    /// by Miri, which rejected `data.cast::<i32>()` over a 2-aligned buffer.
+    ///
+    /// Be aware of what this test does and does not prove. Rust's global
+    /// allocator forwards to `malloc` for any alignment it already satisfies,
+    /// so on glibc a `Vec<u8>` comes back 16-aligned anyway and this test
+    /// passed even *with* the bug present. It is a tripwire for an allocator
+    /// that honours the requested alignment of 1, and a statement of the
+    /// contract. The gate that actually catches a regression here is Miri,
+    /// which models the guarantee rather than the platform.
+    #[test]
+    fn the_data_pointer_is_aligned_for_any_element_type() {
+        // Small sizes are the dangerous ones: a large allocation tends to be
+        // aligned by luck, so a test using only those would pass regardless.
+        for len in [1usize, 2, 3, 4, 6, 12, 20, 36] {
+            let array = int32_array(&vec![0; len]);
+
+            let allocated = unsafe { asdf_ndarray_data_alloc(array) };
+            assert!(!allocated.is_null());
+            assert_eq!(
+                allocated as usize % 16,
+                0,
+                "data_alloc returned a {}-byte buffer aligned to {}",
+                len * 4,
+                1 << (allocated as usize).trailing_zeros().min(4)
+            );
+
+            let mut size = 0usize;
+            let data = unsafe { asdf_ndarray_data(array, &mut size) };
+            assert_eq!(data as usize % 16, 0, "asdf_ndarray_data returned an unaligned pointer");
+            assert_eq!(size, len * 4);
+
+            unsafe { asdf_ndarray_data_dealloc(array) };
+
+            // The other buffer that escapes to C: data read from a file
+            // rather than allocated by the caller.
+            let bytes: Vec<u8> = (0..len as i32).flat_map(i32::to_le_bytes).collect();
+            set_data(array, &bytes);
+            let read = unsafe { asdf_ndarray_data(array, &mut size) };
+            assert_eq!(read as usize % 16, 0, "file data was handed out unaligned");
+            assert_eq!(unsafe { std::slice::from_raw_parts(read.cast::<u8>(), size) }, &bytes[..]);
+
+            unsafe { asdf_ndarray_destroy(array) };
+        }
+    }
+
     #[test]
     fn compression_and_storage_settings() {
         let array = int32_array(&[1]);
@@ -2442,7 +2584,7 @@ mod tests {
         let root = doc.root().unwrap();
         let parsed = CoreNdarray::parse(&doc, doc.mapping_get(root, "a").unwrap()).unwrap();
         let array = make_ndarray(parsed, vec![2, 3]);
-        set_data(array, vec![1, 2, 3, 4, 5, 6]);
+        set_data(array, &[1, 2, 3, 4, 5, 6]);
 
         // Row-major: [1][2] is the sixth element.
         let indices = [1u64, 2];

@@ -132,6 +132,31 @@ cannot pass for any other implementation. Byte parity on emitted YAML is a
 nice-to-have and never a gate; the binary block layer is where bytes matter,
 and there they are exact.
 
+## Undefined behaviour
+
+`cargo +nightly miri test -p libasdf-rs --lib` runs the FFI layer's 189 unit
+tests under Miri. That crate holds every unsafe block in the workspace bar one
+(`asdf-core`'s memory map, which Miri cannot execute and which `Reader::open`
+sidesteps under `cfg(miri)`).
+
+Miri found two defects that the 189 unit tests, the 501-case C suite, the ABI
+layout assertions and the reference corpus all passed:
+
+- `asdf_ndarray_data` handed C a buffer aligned to 1, held in a `Vec<u8>`.
+  Every caller casts it -- `int32_t *values = asdf_ndarray_data(...)` -- so the
+  dereference was undefined behaviour and, on a strict-alignment target, a bus
+  error. Upstream gets this right for free by using `malloc`. Fixed by backing
+  the buffer with a 16-byte-aligned element type.
+- `asdf_tree_info_t.buf` was derived from a `CString` that was then moved into
+  the event. Moving a `Box` retags its allocation, invalidating the pointer C
+  was left holding. Fixed by filling the field in once the event reaches its
+  final home.
+
+Both are latent on glibc/x86-64, which is why they needed a checker rather
+than a test. Run with `-Zmiri-ignore-leaks`: the extension registry is
+populated before `main` and never torn down, matching upstream's
+constructor-built one.
+
 ## Not yet wired up
 - **Differential testing against the real libasdf.** Blocked on building the C
   library locally, which needs `libfyaml`, `cmake`, `libbz2`, `liblz4` and

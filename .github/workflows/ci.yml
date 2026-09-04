@@ -83,6 +83,33 @@ jobs:
           LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf
         run: cargo test -p libasdf-rs --test upstream_suite -- --nocapture
 
+  # Every unsafe block in the workspace is in `libasdf-rs` -- `asdf-core` has
+  # one (the memory map), and the other three crates have none -- so this is
+  # the whole of the code Miri has anything to say about.
+  #
+  # It earns its place: it found two real defects that every other gate
+  # passed. An `asdf_ndarray_data` buffer aligned to 1 that C casts to
+  # `int32_t *`, and a tree-text pointer invalidated by moving its owning
+  # `CString`. Both are undefined behaviour that glibc's allocator and
+  # LLVM's current choices happen to render harmless, which is exactly the
+  # class of bug a test cannot see.
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: Miri
+        # Leaks are not undefined behaviour, and the extension registry is
+        # deliberately immortal: it is populated before `main` and never torn
+        # down, as upstream's constructor-built registry is. Isolation is off
+        # because the tests open files from the corpus.
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-ignore-leaks
+        run: cargo +nightly miri test -p libasdf-rs --lib
+
   lint:
     runs-on: ubuntu-latest
     steps:
