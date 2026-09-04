@@ -7,7 +7,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use asdf_yaml::{Document, EmitOptions, TagHandle, emit_with};
+use asdf_yaml::{Document, EmitOptions, NodeId, Tag, TagHandle, emit_with};
 
 use crate::block::header::{BlockHeader, CHECKSUM_SIZE};
 use crate::compression::Compression;
@@ -56,7 +56,60 @@ pub struct WriteOptions {
     /// Bytes of padding between the tree and the first block, so the tree can
     /// grow later without rewriting the whole file.
     pub tree_padding: usize,
+    /// The `asdf_library` provenance to record, unless the tree already has
+    /// one.
+    ///
+    /// Every ASDF writer stamps the file with what wrote it, and readers act
+    /// on it: the workaround for the Python checksum bug keys off exactly
+    /// this field. `None` writes nothing, which is what a caller reproducing
+    /// another writer's output wants.
+    pub asdf_library: Option<Software>,
 }
+
+/// The `core/software` record identifying what wrote a file.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Software {
+    pub name: String,
+    pub version: String,
+    pub author: Option<String>,
+    pub homepage: Option<String>,
+}
+
+impl Software {
+    /// This library's own identity.
+    pub fn this_library() -> Self {
+        Self {
+            name: "libasdf-rs".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            author: Some("The libasdf-rs Developers".to_string()),
+            homepage: Some("https://github.com/petesmc/libasdf-rs".to_string()),
+        }
+    }
+
+    /// Build the tree node for this record, tagged `core/software`.
+    fn to_node(&self, doc: &mut Document) -> NodeId {
+        let mut pairs = Vec::new();
+        let mut put = |doc: &mut Document, key: &str, value: &str| {
+            let k = doc.add_scalar(key);
+            let v = doc.add_scalar(value);
+            pairs.push((k, v));
+        };
+        put(doc, "name", &self.name);
+        put(doc, "version", &self.version);
+        if let Some(author) = &self.author {
+            put(doc, "author", author);
+        }
+        if let Some(homepage) = &self.homepage {
+            put(doc, "homepage", homepage);
+        }
+        let node = doc.add_mapping(pairs);
+        doc.node_mut(node).tag = Some(Tag::parse(SOFTWARE_TAG));
+        node
+    }
+}
+
+/// The tag a `core/software` record carries.
+const SOFTWARE_TAG: &str = "tag:stsci.edu:asdf/core/software-1.0.0";
 
 impl Default for WriteOptions {
     fn default() -> Self {
@@ -67,6 +120,7 @@ impl Default for WriteOptions {
             write_checksums: true,
             emit: EmitOptions::default(),
             tree_padding: 0,
+            asdf_library: Some(Software::this_library()),
         }
     }
 }
@@ -156,6 +210,16 @@ impl Writer {
             }
             if doc.tag_handles.is_empty() {
                 doc.tag_handles.push(TagHandle::asdf_default());
+            }
+            // Stamp the file with what wrote it, unless the tree already
+            // says -- a caller rewriting someone else's file keeps theirs.
+            if let Some(software) = &self.options.asdf_library
+                && let Some(root) = doc.root()
+                && doc.node(root).is_mapping()
+                && doc.mapping_get(root, "asdf_library").is_none()
+            {
+                let node = software.to_node(&mut doc);
+                doc.mapping_set(root, "asdf_library", node);
             }
 
             let text = emit_with(&doc, &options)
@@ -271,12 +335,48 @@ mod tests {
                       name: Dennis Richie\nfoo: 42\nnested:\n  a: [1, 2, 3]\n\
                       shared: &x {p: 1}\nalias: *x\n...\n";
         let original = tree(source);
-        let bytes = Writer::from_document(original.clone()).to_bytes().unwrap();
+        // No provenance stamp, so the tree that comes back is the tree that
+        // went in. `written_files_record_what_wrote_them` covers the stamp.
+        let options = WriteOptions { asdf_library: None, ..Default::default() };
+        let bytes =
+            Writer::from_document(original.clone()).with_options(options).to_bytes().unwrap();
 
         let reader = Reader::from_bytes(bytes).unwrap();
         let read_back = reader.tree().unwrap().unwrap();
         let result = compare(&original, &read_back, CompareOptions::default());
         assert!(result.is_equal(), "{result}");
+    }
+
+    /// Every file says what wrote it, unless the tree already does.
+    #[test]
+    fn a_written_file_records_what_wrote_it() {
+        let bytes = Writer::from_document(tree("x: 1\n")).to_bytes().unwrap();
+        let reader = Reader::from_bytes(bytes).unwrap();
+        let doc = reader.tree().unwrap().unwrap();
+        let root = doc.root().unwrap();
+
+        let library = doc.mapping_get(root, "asdf_library").expect("asdf_library");
+        assert_eq!(
+            doc.tag_of(library).map(asdf_yaml::Tag::full).as_deref(),
+            Some("tag:stsci.edu:asdf/core/software-1.0.0")
+        );
+        let name = doc.mapping_get(library, "name").unwrap();
+        assert_eq!(doc.resolved(name).as_str(), Some("libasdf-rs"));
+    }
+
+    #[test]
+    fn an_existing_provenance_stamp_is_kept() {
+        let source = "%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n\
+                      asdf_library: !core/software-1.0.0 {name: asdf, version: 4.1.0}\n\
+                      x: 1\n...\n";
+        let bytes = Writer::from_document(tree(source)).to_bytes().unwrap();
+        let reader = Reader::from_bytes(bytes).unwrap();
+        let doc = reader.tree().unwrap().unwrap();
+        let root = doc.root().unwrap();
+
+        let library = doc.mapping_get(root, "asdf_library").unwrap();
+        let name = doc.mapping_get(library, "name").unwrap();
+        assert_eq!(doc.resolved(name).as_str(), Some("asdf"), "the original writer must survive");
     }
 
     #[test]

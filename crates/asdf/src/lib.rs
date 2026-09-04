@@ -920,11 +920,48 @@ data: !core/ndarray-1.1.0\n  source: ../../../etc/passwd\n  datatype: int64\n  s
         let tree = file.tree().unwrap().unwrap();
         let root = tree.root().unwrap();
 
+        // `asdf_library` is appended by the writer, stamping the file with
+        // what wrote it, so it comes last.
         let keys: Vec<&str> = root.entries().map(|(k, _)| k).collect();
-        assert_eq!(keys, ["a", "b", "c"], "insertion order must survive");
+        assert_eq!(keys, ["a", "b", "c", "asdf_library"], "insertion order must survive");
 
         let values: Vec<i64> = root.entries().filter_map(|(_, v)| v.as_i64()).collect();
         assert_eq!(values, [1, 2, 3]);
+    }
+
+    /// Every file we write says what wrote it. Readers act on that: the
+    /// workaround for the Python checksum bug keys off exactly this field.
+    #[test]
+    fn written_files_record_what_wrote_them() {
+        let builder = AsdfBuilder::new();
+        let file = round_trip(&builder);
+        let tree = file.tree().unwrap().unwrap();
+
+        let library = tree.get("asdf_library").expect("asdf_library");
+        assert!(library.has_tag("core/software"));
+        assert_eq!(library.get("name").and_then(|v| v.as_str()), Some("libasdf-rs"));
+        assert!(library.get("version").and_then(|v| v.as_str()).is_some());
+        assert!(library.get("homepage").and_then(|v| v.as_str()).is_some());
+    }
+
+    /// A tree that already names its writer keeps it -- rewriting someone
+    /// else's file must not claim authorship of it.
+    #[test]
+    fn an_existing_asdf_library_is_left_alone() {
+        let source = "#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n\
+%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n\
+asdf_library: !core/software-1.0.0 {name: asdf, version: 4.1.0}\n\
+x: 1\n...\n";
+        let original = AsdfFile::from_bytes(source.as_bytes().to_vec()).unwrap();
+        let tree = original.tree().unwrap().unwrap();
+
+        let mut builder = AsdfBuilder::new();
+        *builder.document_mut() = tree.document().clone();
+        let rewritten = round_trip(&builder);
+
+        let tree = rewritten.tree().unwrap().unwrap();
+        let library = tree.get("asdf_library").unwrap();
+        assert_eq!(library.get("name").and_then(|v| v.as_str()), Some("asdf"));
     }
 
     #[test]

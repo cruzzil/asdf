@@ -175,7 +175,10 @@ pub unsafe extern "C" fn asdf_extension_register(ext: *mut asdf_extension_t) {
 /// Look up the extension registered for a tag.
 ///
 /// The tag is matched in full, so `core/ndarray-1.0.0` and
-/// `core/ndarray-1.1.0` each match only if the extension listed them.
+/// `core/ndarray-1.1.0` each match only if the extension listed them. The
+/// `tag:` prefix is optional on both sides: upstream canonicalizes with
+/// `asdf_yaml_tag_canonicalize`, and its own tests register and look up
+/// tags without it.
 ///
 /// # Safety
 /// `tag` must be a valid NUL-terminated string or null. `file` is accepted
@@ -190,7 +193,7 @@ pub unsafe extern "C" fn asdf_extension_get(
         if tag.is_null() {
             return std::ptr::null();
         }
-        let wanted = unsafe { CStr::from_ptr(tag) };
+        let wanted = unsafe { CStr::from_ptr(tag) }.to_string_lossy().into_owned();
         let registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
 
         for entry in registry.iter() {
@@ -205,7 +208,8 @@ pub unsafe extern "C" fn asdf_extension_get(
                 if tag_ptr.is_null() {
                     break;
                 }
-                if unsafe { CStr::from_ptr(tag_ptr) } == wanted {
+                let declared = unsafe { CStr::from_ptr(tag_ptr) }.to_string_lossy();
+                if tags_match(&declared, &wanted) {
                     return entry.extension;
                 }
                 index += 1;
@@ -297,6 +301,20 @@ pub unsafe extern "C" fn asdf_tag_destroy(tag: *mut asdf_tag_t) {
     })
 }
 
+/// Whether two tags name the same thing, with or without the `tag:` prefix.
+///
+/// An extension may register `stsci.edu:asdf/tests/foo-1.1.0` and a caller
+/// may look it up the same way, while the tag on a value is always the full
+/// `tag:stsci.edu:asdf/tests/foo-1.1.0`. Upstream reconciles the two by
+/// canonicalizing both with `asdf_yaml_tag_canonicalize`; comparing without
+/// the prefix is the same relation and allocates nothing.
+fn tags_match(left: &str, right: &str) -> bool {
+    fn bare(tag: &str) -> &str {
+        tag.strip_prefix("tag:").unwrap_or(tag)
+    }
+    bare(left) == bare(right)
+}
+
 /// Whether a value's tag is one this extension handles.
 ///
 /// # Safety
@@ -331,7 +349,7 @@ pub unsafe extern "C" fn asdf_value_is_extension_type(
             if tag_ptr.is_null() {
                 return false;
             }
-            if unsafe { CStr::from_ptr(tag_ptr) }.to_string_lossy() == full {
+            if tags_match(&unsafe { CStr::from_ptr(tag_ptr) }.to_string_lossy(), &full) {
                 return true;
             }
             index += 1;
