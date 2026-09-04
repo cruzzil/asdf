@@ -62,10 +62,14 @@ const ERROR_LOG_LEVELS: &[LogLevel] = &[
 ];
 
 /// Severity levels, matching `asdf_log_level_t`.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+///
+/// Zero is `None`, which is what a caller's zeroed `asdf_log_cfg_t` carries
+/// and what upstream reads as "unset, use the default".
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 #[repr(i32)]
 pub enum LogLevel {
-    /// Emit nothing.
+    /// Emit nothing, and what an unset configuration field holds.
+    #[default]
     None = 0,
     /// Fine-grained tracing.
     Trace,
@@ -368,6 +372,37 @@ unsafe fn emit_log(
         unsafe { CStr::from_ptr(src_file) }.to_string_lossy().into_owned()
     };
     eprintln!("{} libasdf {}:{}: {}", level.as_str(), src, lineno, msg);
+}
+
+/// Emit a log line against a file, honouring its own log configuration.
+///
+/// A file opened with an `asdf_config_t` may name its own stream and level,
+/// which is how a caller captures warnings; without one this falls back to
+/// the process-wide default.
+pub(crate) fn log_to_file(file: *mut crate::file_ffi::AsdfFile, level: LogLevel, msg: &str) {
+    let config = crate::file_ffi::file_config(file).unwrap_or_default();
+    let threshold =
+        if config.log_level == LogLevel::None { default_log_level() } else { config.log_level };
+    if level == LogLevel::None || level < threshold {
+        return;
+    }
+
+    let line = format!("{} libasdf: {msg}\n", level.as_str());
+    if config.log_stream.is_null() {
+        eprint!("{line}");
+        return;
+    }
+    // SAFETY: the caller's `asdf_config_t` named this stream and, by the C
+    // contract, keeps it open for the file's lifetime.
+    unsafe {
+        libc::fwrite(
+            line.as_ptr().cast::<c_void>(),
+            1,
+            line.len(),
+            config.log_stream.cast::<libc::FILE>(),
+        );
+        libc::fflush(config.log_stream.cast::<libc::FILE>());
+    }
 }
 
 /// The threshold used when a file carries no explicit configuration.

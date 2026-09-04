@@ -55,12 +55,32 @@ impl FileMode {
     }
 }
 
+/// The parts of `asdf_config_t` a file carries with it.
+///
+/// The struct C passes to `asdf_open_*_ex` is the caller's, and may be a
+/// local that goes out of scope the moment the call returns, so the fields
+/// that outlive the call are copied here rather than referenced.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FileConfig {
+    /// Where ndarray data is written, overriding each array's own setting.
+    pub array_storage: crate::types::AsdfArrayStorage,
+    /// Element count above which an inline ndarray draws a warning. Zero
+    /// selects the library default; `usize::MAX` suppresses it.
+    pub inline_ndarray_warning_thresh: usize,
+    /// Where log output goes; null means `stderr`.
+    pub log_stream: *mut c_void,
+    /// The minimum severity to emit; `None` selects the default.
+    pub log_level: crate::error_ffi::LogLevel,
+}
+
 /// An open ASDF file. Opaque to C.
 #[derive(Debug)]
 pub struct AsdfFile {
     reader: Option<Reader>,
     document: Option<Document>,
     mode: FileMode,
+    /// What the caller asked for at open time.
+    pub(crate) config: FileConfig,
     /// Blocks queued for writing.
     blocks: Vec<PendingBlock>,
     error: ErrorState,
@@ -84,6 +104,28 @@ impl AsdfValue {
     pub(crate) fn new(file: *mut AsdfFile, node: NodeId) -> Self {
         Self { file, node }
     }
+}
+
+/// Read the parts of a caller's `asdf_config_t` that a file keeps.
+///
+/// # Safety
+/// `config` must be null or point to a valid `asdf_config_t`.
+pub(crate) unsafe fn read_config(config: *const asdf_config_t) -> FileConfig {
+    if config.is_null() {
+        return FileConfig::default();
+    }
+    let view = unsafe { &*config };
+    FileConfig {
+        array_storage: view.emitter.array_storage,
+        inline_ndarray_warning_thresh: view.emitter.inline_ndarray_warning_thresh,
+        log_stream: view.log.stream,
+        log_level: view.log.level,
+    }
+}
+
+/// A file's configuration, for callers that need it after open.
+pub(crate) fn file_config(file: *const AsdfFile) -> Option<FileConfig> {
+    (!file.is_null()).then(|| unsafe { &*file }.config)
 }
 
 /// A handle's error state, for the `ASDF_ERROR_*` macros.
@@ -154,6 +196,7 @@ impl AsdfFile {
             reader: None,
             document: None,
             mode,
+            config: FileConfig::default(),
             blocks: Vec::new(),
             error: ErrorState::default(),
             interned: Mutex::new(Vec::new()),
@@ -224,6 +267,14 @@ impl AsdfFile {
 /// The tag every ASDF tree's root carries.
 const ASDF_ROOT_TAG: &str = "tag:stsci.edu:asdf/core/asdf-1.1.0";
 
+/// Attach a configuration to a freshly opened handle.
+fn with_config(file: *mut AsdfFile, settings: FileConfig) -> *mut AsdfFile {
+    if !file.is_null() {
+        unsafe { (*file).config = settings };
+    }
+    file
+}
+
 /// Build a file handle around a reader.
 fn open_reader(reader: Reader, mode: FileMode) -> *mut AsdfFile {
     let mut file = AsdfFile::new(mode);
@@ -252,7 +303,7 @@ pub unsafe extern "C" fn asdf_open_file_ex(
     config: *mut asdf_config_t,
 ) -> *mut AsdfFile {
     guard("asdf_open_file_ex", std::ptr::null_mut(), || {
-        let _ = config;
+        let settings = unsafe { read_config(config) };
         if mode.is_null() {
             return std::ptr::null_mut();
         }
@@ -264,14 +315,16 @@ pub unsafe extern "C" fn asdf_open_file_ex(
         // all -- upstream ignores it too, and the destination is named later
         // by `asdf_write_to`.
         if mode == FileMode::Write {
-            return Box::into_raw(Box::new(AsdfFile::new_for_writing()));
+            let mut file = AsdfFile::new_for_writing();
+            file.config = settings;
+            return Box::into_raw(Box::new(file));
         }
         if filename.is_null() {
             return std::ptr::null_mut();
         }
         let path = unsafe { CStr::from_ptr(filename) }.to_string_lossy().into_owned();
         match Reader::open(&path) {
-            Ok(reader) => open_reader(reader, mode),
+            Ok(reader) => with_config(open_reader(reader, mode), settings),
             Err(_) => std::ptr::null_mut(),
         }
     })
@@ -289,17 +342,19 @@ pub unsafe extern "C" fn asdf_open_mem_ex(
     config: *mut asdf_config_t,
 ) -> *mut AsdfFile {
     guard("asdf_open_mem_ex", std::ptr::null_mut(), || {
-        let _ = config;
+        let settings = unsafe { read_config(config) };
         // `asdf_open(NULL)` expands to `asdf_open_mem(NULL, 0)`, which is how
         // the C API asks for a new, empty file to write into.
         if buf.is_null() || size == 0 {
-            return Box::into_raw(Box::new(AsdfFile::new_for_writing()));
+            let mut file = AsdfFile::new_for_writing();
+            file.config = settings;
+            return Box::into_raw(Box::new(file));
         }
         // A buffer-backed file is read-*write* upstream: its tree may be
         // edited and written out elsewhere.
         let bytes = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
         match Reader::from_bytes(bytes) {
-            Ok(reader) => open_reader(reader, FileMode::ReadWrite),
+            Ok(reader) => with_config(open_reader(reader, FileMode::ReadWrite), settings),
             Err(_) => std::ptr::null_mut(),
         }
     })
@@ -320,7 +375,8 @@ pub unsafe extern "C" fn asdf_open_fp_ex(
     config: *mut asdf_config_t,
 ) -> *mut AsdfFile {
     guard("asdf_open_fp_ex", std::ptr::null_mut(), || {
-        let _ = (config, filename);
+        let _ = filename;
+        let settings = unsafe { read_config(config) };
         if fp.is_null() {
             return std::ptr::null_mut();
         }
@@ -347,7 +403,7 @@ pub unsafe extern "C" fn asdf_open_fp_ex(
             return std::ptr::null_mut();
         }
         match Reader::from_bytes(bytes) {
-            Ok(reader) => open_reader(reader, FileMode::ReadOnly),
+            Ok(reader) => with_config(open_reader(reader, FileMode::ReadOnly), settings),
             Err(_) => std::ptr::null_mut(),
         }
     })

@@ -154,7 +154,17 @@ fn scalar_from_abi(v: ScalarTypeAbi) -> ScalarType {
 }
 
 /// Build the C datatype view for `datatype`, parking owned storage in `state`.
-fn build_datatype(datatype: &Datatype, state: &mut NdarrayState) -> asdf_datatype_t {
+fn build_datatype(
+    datatype: &Datatype,
+    array_order: asdf_core::core::datatype::ByteOrder,
+    state: &mut NdarrayState,
+) -> asdf_datatype_t {
+    use asdf_core::core::datatype::ByteOrder;
+
+    // A datatype states its own byte order only inside a compound field; a
+    // plain one takes the array's, which is where the schema puts it.
+    let effective = |own: ByteOrder| if own == ByteOrder::Default { array_order } else { own };
+
     for field in &datatype.fields {
         let name = field.name.as_deref().and_then(|n| CString::new(n).ok()).unwrap_or_default();
         state.field_names.push(name);
@@ -169,7 +179,7 @@ fn build_datatype(datatype: &Datatype, state: &mut NdarrayState) -> asdf_datatyp
             type_: scalar_abi(field.datatype.scalar),
             size: field.datatype.item_size(),
             name: name_ptr,
-            byteorder: field.datatype.byteorder as i32,
+            byteorder: effective(field.datatype.byteorder) as i32,
             ndim: u32::try_from(shape.len()).unwrap_or(0),
             shape: if shape.is_empty() { std::ptr::null() } else { shape.as_ptr() },
             nfields: 0,
@@ -181,7 +191,7 @@ fn build_datatype(datatype: &Datatype, state: &mut NdarrayState) -> asdf_datatyp
         type_: scalar_abi(datatype.scalar),
         size: datatype.item_size(),
         name: std::ptr::null(),
-        byteorder: datatype.byteorder as i32,
+        byteorder: effective(datatype.byteorder) as i32,
         ndim: 0,
         shape: std::ptr::null(),
         nfields: u32::try_from(datatype.fields.len()).unwrap_or(0),
@@ -205,7 +215,13 @@ pub(crate) fn make_ndarray(parsed: Ndarray, shape: Vec<u64>) -> *mut asdf_ndarra
         data: None,
         allocated: None,
         compression: Compression::None,
-        storage: AsdfArrayStorage::Internal,
+        // Where the data was found is where it will go back, unless the
+        // caller says otherwise with `asdf_ndarray_storage_set`.
+        storage: match parsed.source {
+            Source::Inline(_) => AsdfArrayStorage::Inline,
+            Source::External(_) => AsdfArrayStorage::External,
+            _ => AsdfArrayStorage::Internal,
+        },
         file: std::ptr::null_mut(),
         block_index: None,
         block: std::ptr::null_mut(),
@@ -216,7 +232,7 @@ pub(crate) fn make_ndarray(parsed: Ndarray, shape: Vec<u64>) -> *mut asdf_ndarra
     state.fields.reserve(parsed.datatype.fields.len());
     state.field_names.reserve(parsed.datatype.fields.len());
     state.field_shapes.reserve(parsed.datatype.fields.len());
-    let datatype = build_datatype(&parsed.datatype, &mut state);
+    let datatype = build_datatype(&parsed.datatype, parsed.byteorder, &mut state);
 
     let source = match parsed.source {
         Source::Block(index) => index,
@@ -1312,8 +1328,26 @@ pub unsafe extern "C" fn asdf_value_of_ndarray(
                 .unwrap_or_else(|| vec![0u8; expected]),
             None => vec![0u8; expected],
         };
-        let compression =
-            state_of(obj.cast_mut()).map(|s| s.compression).unwrap_or(Compression::None);
+        let (compression, array_storage) = state_of(obj.cast_mut())
+            .map(|s| (s.compression, s.storage))
+            .unwrap_or((Compression::None, AsdfArrayStorage::Default));
+
+        // The file's own `emitter.array_storage` decides for every array it
+        // holds; each array's setting applies only where the file has none.
+        let config = crate::file_ffi::file_config(file).unwrap_or_default();
+        let storage = if config.array_storage == AsdfArrayStorage::Default {
+            array_storage
+        } else {
+            config.array_storage
+        };
+
+        // Inline storage writes the values into the tree instead of a block,
+        // which is what `asdf_ndarray_storage_set(.., INLINE)` asks for.
+        if storage == AsdfArrayStorage::Inline {
+            let count: u64 = shape.iter().product::<u64>().max(1);
+            warn_if_inline_is_large(file, count, config.inline_ndarray_warning_thresh);
+            return inline_value_of_ndarray(file, array, &shape, &payload);
+        }
 
         // Append the block, then reference it by index.
         let Some(blocks) = crate::file_ffi::file_blocks_mut(file) else {
@@ -1378,6 +1412,85 @@ pub unsafe extern "C" fn asdf_value_of_ndarray(
 
         Box::into_raw(Box::new(crate::file_ffi::AsdfValue::new(file, node)))
     })
+}
+
+/// Warn when an inline array is larger than the file's threshold.
+///
+/// Inline data is text, so a large array bloats the tree and slows every
+/// reader that parses it. A threshold of zero means the caller set none.
+fn warn_if_inline_is_large(file: *mut crate::file_ffi::AsdfFile, elements: u64, threshold: usize) {
+    if threshold == 0 || elements <= threshold as u64 {
+        return;
+    }
+    crate::error_ffi::log_to_file(
+        file,
+        crate::error_ffi::LogLevel::Warn,
+        &format!(
+            "inline ndarray has {elements} elements, exceeding the threshold of {threshold}; \
+             consider using binary block storage instead"
+        ),
+    );
+}
+
+/// Build the tree value for an array whose data goes inline.
+///
+/// The elements are decoded from the caller's buffer and nested to the
+/// array's shape, so the file carries `data: [[..], ..]` and no block at
+/// all. `byteorder` is left out: it describes bytes in a block, and there
+/// are none.
+fn inline_value_of_ndarray(
+    file: *mut crate::file_ffi::AsdfFile,
+    array: &asdf_ndarray_t,
+    shape: &[u64],
+    payload: &[u8],
+) -> *mut crate::file_ffi::AsdfValue {
+    use asdf_core::core::datatype::Datatype;
+    use asdf_core::core::ndarray::Ndarray;
+    use asdf_core::yaml::{CollectionStyle, NodeData, Tag};
+
+    let scalar = scalar_from_abi(array.datatype.type_);
+    let mut datatype = Datatype::scalar(scalar);
+    if array.datatype.size != 0 {
+        datatype.size = array.datatype.size;
+    }
+    let parsed = Ndarray {
+        source: Source::Block(0),
+        shape: shape.iter().map(|d| Some(*d)).collect(),
+        datatype,
+        byteorder: match array.byteorder {
+            62 => asdf_core::core::datatype::ByteOrder::Big,
+            60 => asdf_core::core::datatype::ByteOrder::Little,
+            _ => asdf_core::core::datatype::ByteOrder::native(),
+        },
+        offset: array.offset,
+        strides: None,
+        mask: None,
+    };
+
+    let Ok(elements) = asdf_core::core::decode_all(&parsed, shape, payload) else {
+        return std::ptr::null_mut();
+    };
+
+    let handle = unsafe { &mut *file };
+    let Some(doc) = handle.document_for_values() else {
+        return std::ptr::null_mut();
+    };
+
+    let data = asdf_core::core::elements::nest(doc, &elements, shape);
+    let datatype_node = doc.add_scalar(scalar.name());
+
+    let dims: Vec<_> = shape.iter().map(|d| doc.add_scalar(d.to_string())).collect();
+    let shape_node = doc.add_sequence(dims);
+    if let NodeData::Sequence { style, .. } = &mut doc.node_mut(shape_node).data {
+        *style = CollectionStyle::Flow;
+    }
+
+    let keys: Vec<_> = ["datatype", "data", "shape"].iter().map(|k| doc.add_scalar(*k)).collect();
+    let node =
+        doc.add_mapping(vec![(keys[0], datatype_node), (keys[1], data), (keys[2], shape_node)]);
+    doc.node_mut(node).tag = Some(Tag::parse("tag:stsci.edu:asdf/core/ndarray-1.1.0"));
+
+    Box::into_raw(Box::new(crate::file_ffi::AsdfValue::new(file, node)))
 }
 
 /// This machine's byte order, as the schema spells it.

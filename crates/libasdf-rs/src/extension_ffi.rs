@@ -507,7 +507,38 @@ pub unsafe extern "C" fn asdf_value_of_extension_type(
             // be written.
             return std::ptr::null_mut();
         };
-        unsafe { serialize(file, obj, extension.userdata.cast_const()) }
+
+        // The first tag an extension registers is the one written for a
+        // newly serialized object; without it the value goes into the tree
+        // untagged and nothing can read it back as this type.
+        if extension.tags.is_null() {
+            return std::ptr::null_mut();
+        }
+        let first = unsafe { *extension.tags };
+        if first.is_null() {
+            return std::ptr::null_mut();
+        }
+        let tag = unsafe { CStr::from_ptr(first) }.to_string_lossy().into_owned();
+
+        let value = unsafe { serialize(file, obj, extension.userdata.cast_const()) };
+        if value.is_null() {
+            return value;
+        }
+
+        let (Some(owner), Some(node)) =
+            (crate::file_ffi::value_file(value), crate::file_ffi::value_node(value))
+        else {
+            return value;
+        };
+        // The tag may be registered without its `tag:` prefix; the tree
+        // always carries the full form.
+        let full = if tag.starts_with("tag:") { tag } else { format!("tag:{tag}") };
+        // SAFETY: the file outlives every value taken from it, by the C
+        // contract, and the serializer has already finished with the tree.
+        if let Some(doc) = unsafe { &mut *owner }.document_for_values() {
+            doc.node_mut(node).tag = Some(asdf_core::yaml::Tag::parse(&full));
+        }
+        value
     })
 }
 
