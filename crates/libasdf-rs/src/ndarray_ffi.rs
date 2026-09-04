@@ -1467,8 +1467,16 @@ fn inline_value_of_ndarray(
         mask: None,
     };
 
-    let Ok(elements) = asdf_core::core::decode_all(&parsed, shape, payload) else {
-        return std::ptr::null_mut();
+    // A zero-dimensional array holds nothing -- `asdf_ndarray_size` says so
+    // and `asdf_ndarray_data_alloc` allocates nothing -- so there is no data
+    // to decode, and `data: []` is what goes in the tree.
+    let elements = if shape.is_empty() {
+        Vec::new()
+    } else {
+        match asdf_core::core::decode_all(&parsed, shape, payload) {
+            Ok(elements) => elements,
+            Err(_) => return std::ptr::null_mut(),
+        }
     };
 
     let handle = unsafe { &mut *file };
@@ -1476,7 +1484,15 @@ fn inline_value_of_ndarray(
         return std::ptr::null_mut();
     };
 
-    let data = asdf_core::core::elements::nest(doc, &elements, shape);
+    let data = if elements.is_empty() {
+        let node = doc.add_sequence(Vec::new());
+        if let NodeData::Sequence { style, .. } = &mut doc.node_mut(node).data {
+            *style = CollectionStyle::Flow;
+        }
+        node
+    } else {
+        asdf_core::core::elements::nest(doc, &elements, shape)
+    };
     let datatype_node = doc.add_scalar(scalar.name());
 
     let dims: Vec<_> = shape.iter().map(|d| doc.add_scalar(d.to_string())).collect();

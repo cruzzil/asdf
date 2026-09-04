@@ -10,7 +10,7 @@
 
 use asdf_yaml::{Document, NodeData, NodeId};
 
-use crate::core::datatype::{ByteOrder, Datatype, parse_shape_with_star};
+use crate::core::datatype::{ByteOrder, Datatype, ScalarType, parse_shape_with_star};
 use crate::error::{Result, err};
 
 /// Where an array's data comes from.
@@ -27,6 +27,92 @@ pub enum Source {
     External(String),
     /// Nested sequences in the tree itself.
     Inline(NodeId),
+}
+
+/// What the values in an inline array look like, so a type can be chosen.
+#[derive(Default, Debug)]
+struct InlineTypes {
+    has_string: bool,
+    has_float: bool,
+    has_signed: bool,
+    int_min: i64,
+    uint_max: u64,
+}
+
+/// The narrowest scalar type that holds every value of an inline array.
+///
+/// Inline data may carry no `datatype`, in which case the type is whatever
+/// the values need: a float if any is fractional, a signed integer if any is
+/// negative, and the smallest width that fits otherwise. Strings are not
+/// supported inline, and an array of nothing but booleans is `bool8`.
+pub fn infer_inline_datatype(doc: &Document, node: NodeId) -> ScalarType {
+    let mut seen = InlineTypes::default();
+    survey_inline(doc, node, &mut seen);
+
+    if seen.has_string {
+        return ScalarType::Unknown;
+    }
+    if seen.has_float {
+        return ScalarType::Float64;
+    }
+    if !seen.has_signed && seen.uint_max == 0 && seen.int_min == 0 {
+        // Nothing numeric at all: the values were booleans or nulls.
+        return ScalarType::Bool8;
+    }
+    if seen.has_signed {
+        if seen.int_min >= i64::from(i8::MIN) && seen.uint_max <= i8::MAX as u64 {
+            return ScalarType::Int8;
+        }
+        if seen.int_min >= i64::from(i16::MIN) && seen.uint_max <= i16::MAX as u64 {
+            return ScalarType::Int16;
+        }
+        if seen.int_min >= i64::from(i32::MIN) && seen.uint_max <= i32::MAX as u64 {
+            return ScalarType::Int32;
+        }
+        return ScalarType::Int64;
+    }
+    if seen.uint_max <= u64::from(u8::MAX) {
+        ScalarType::Uint8
+    } else if seen.uint_max <= u64::from(u16::MAX) {
+        ScalarType::Uint16
+    } else if seen.uint_max <= u64::from(u32::MAX) {
+        ScalarType::Uint32
+    } else {
+        ScalarType::Uint64
+    }
+}
+
+/// Walk an inline array's values, recording what types they need.
+fn survey_inline(doc: &Document, node: NodeId, seen: &mut InlineTypes) {
+    let resolved = doc.resolve(node);
+    if let Some(items) = doc.sequence_items(resolved).map(<[_]>::to_vec) {
+        for item in items {
+            survey_inline(doc, item, seen);
+        }
+        return;
+    }
+
+    let Some(text) = doc.resolved(resolved).as_str() else {
+        return;
+    };
+    let style = match &doc.resolved(resolved).data {
+        NodeData::Scalar { style, .. } => *style,
+        _ => return,
+    };
+
+    match asdf_yaml::resolve(text, style, asdf_yaml::Schema::Libasdf) {
+        asdf_yaml::Resolved::Uint(v, _) => seen.uint_max = seen.uint_max.max(v),
+        asdf_yaml::Resolved::Int(v, _) => {
+            seen.has_signed = true;
+            seen.int_min = seen.int_min.min(v);
+            if v > 0 {
+                seen.uint_max = seen.uint_max.max(v as u64);
+            }
+        }
+        asdf_yaml::Resolved::Double(_) => seen.has_float = true,
+        asdf_yaml::Resolved::String => seen.has_string = true,
+        _ => {}
+    }
 }
 
 /// How missing values are marked.
@@ -65,10 +151,13 @@ impl Ndarray {
 
         // The schema's shorthand: the whole tagged value is the nested data.
         if matches!(node.data, NodeData::Sequence { .. }) {
+            let data = doc.resolve(id);
             return Ok(Ndarray {
-                source: Source::Inline(doc.resolve(id)),
-                shape: infer_inline_shape(doc, doc.resolve(id)),
-                datatype: Datatype::default(),
+                source: Source::Inline(data),
+                shape: infer_inline_shape(doc, data),
+                // With no `datatype` key there is nothing to state one, so
+                // it is read off the values.
+                datatype: Datatype::scalar(infer_inline_datatype(doc, data)),
                 byteorder: ByteOrder::Default,
                 offset: 0,
                 strides: None,
@@ -102,7 +191,12 @@ impl Ndarray {
 
         let datatype = match doc.mapping_get(id, "datatype") {
             Some(d) => Datatype::parse(doc, d)?,
-            None => Datatype::default(),
+            // Inline data with no declared type is read off the values, as
+            // the shorthand above is.
+            None => match &source {
+                Source::Inline(node) => Datatype::scalar(infer_inline_datatype(doc, *node)),
+                _ => Datatype::default(),
+            },
         };
 
         let byteorder = doc
@@ -251,6 +345,49 @@ fn infer_inline_shape(doc: &Document, id: NodeId) -> Vec<Option<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Inline data with no `datatype` takes the narrowest type that holds
+    /// every value, which is what libasdf and Python asdf both do.
+    #[test]
+    fn an_inline_arrays_datatype_is_inferred_from_its_values() {
+        let cases = [
+            ("[[0, 1, 2], [3, 4, 5]]", ScalarType::Uint8),
+            ("[0, 255]", ScalarType::Uint8),
+            ("[0, 256]", ScalarType::Uint16),
+            ("[0, 70000]", ScalarType::Uint32),
+            ("[0, 5000000000]", ScalarType::Uint64),
+            ("[-1, 1]", ScalarType::Int8),
+            ("[-200, 1]", ScalarType::Int16),
+            ("[-70000, 1]", ScalarType::Int32),
+            ("[-5000000000, 1]", ScalarType::Int64),
+            // One fractional value makes the whole array a float.
+            ("[1, 2.5]", ScalarType::Float64),
+            // A signed type still has to hold the largest positive value.
+            ("[-1, 200]", ScalarType::Int16),
+            // Strings are not supported inline.
+            ("['a', 'b']", ScalarType::Unknown),
+            ("[true, false]", ScalarType::Bool8),
+        ];
+
+        for (data, expected) in cases {
+            let doc = asdf_yaml::parse_document(&format!("a: {data}\n")).unwrap();
+            let root = doc.root().unwrap();
+            let node = doc.mapping_get(root, "a").unwrap();
+            assert_eq!(infer_inline_datatype(&doc, node), expected, "{data}");
+        }
+    }
+
+    /// The bare-sequence shorthand infers its type as well as its shape.
+    #[test]
+    fn the_shorthand_form_infers_both_shape_and_type() {
+        let doc = asdf_yaml::parse_document("a: [[0, 1, 2], [3, 4, 5], [6, 7, 8]]\n").unwrap();
+        let root = doc.root().unwrap();
+        let nd = Ndarray::parse(&doc, doc.mapping_get(root, "a").unwrap()).unwrap();
+
+        assert_eq!(nd.resolved_shape(None).unwrap(), vec![3, 3]);
+        assert_eq!(nd.datatype.scalar, ScalarType::Uint8);
+        assert!(matches!(nd.source, Source::Inline(_)));
+    }
     use crate::core::datatype::ScalarType;
     use asdf_yaml::parse_document;
 
