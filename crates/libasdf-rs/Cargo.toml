@@ -4,7 +4,9 @@ description = "Drop-in C ABI replacement for libasdf, implemented in Rust"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# The crate ships the vendored upstream headers under `include/`, which stay on
+# their own BSD-3-Clause terms; everything written here is MIT.
+license = "MIT AND BSD-3-Clause"
 repository.workspace = true
 authors.workspace = true
 links = "asdf"

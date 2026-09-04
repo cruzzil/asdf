@@ -22,7 +22,7 @@ exist *only* in the headers:
 | Describe | `0.1.0rc2-3-g56d24aa` |
 | Package version | 0.1.0rc2 |
 | Vendored on | 2026-09-03 |
-| Licence | BSD-3-Clause (see upstream LICENSE) |
+| Licence | BSD-3-Clause — the upstream text is vendored alongside, as `LICENSE` |
 
 `asdf/config.h.in` is **not** vendored; `build.rs` generates `asdf/config.h` for the
 target instead.

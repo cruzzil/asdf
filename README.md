@@ -144,4 +144,10 @@ See `CONFORMANCE.md` for the ABI baseline and the gates, and
 
 ## Licence
 
-BSD-3-Clause, matching upstream libasdf.
+MIT, for everything written here — see `LICENSE`.
+
+One directory is third-party: `crates/libasdf-rs/include/` holds libasdf's public
+headers, copied verbatim, and stays on its own BSD-3-Clause terms. That licence
+travels with the files in `crates/libasdf-rs/include/LICENSE`, and the
+`libasdf-rs` crate declares itself `MIT AND BSD-3-Clause` because it ships them.
+No upstream libasdf *source* is used; the implementation is independent.
