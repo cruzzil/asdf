@@ -7,6 +7,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
+use asdf_core::events::{EventOptions, events, render_event};
 use asdf_core::info::{InfoOptions, render};
 use asdf_core::reader::{ChecksumStatus, Reader};
 
@@ -18,6 +19,7 @@ A tool for inspecting ASDF files.
 Commands:
   info              Print a rendering of an ASDF tree
   dd                Dump data from an ASDF binary block
+  events            Print the low-level parser events for a file
   verify-checksums  Verify binary block MD5 checksums
 
 Run `asdf COMMAND --help` for help on a sub-command.
@@ -47,6 +49,19 @@ Options:
   -h, --help         Show this help
 ";
 
+const EVENTS_USAGE: &str = "\
+Usage: asdf events [OPTIONS] FILENAME
+
+Print the low-level parser events for an ASDF file: the version headers, any
+comments, the block index, the tree's extent and the YAML events inside it,
+then each binary block.
+
+Options:
+      --no-yaml   Report the tree's extent but not the YAML events inside it
+  -v, --verbose   Print each event's details, not just its type
+  -h, --help      Show this help
+";
+
 const VERIFY_USAGE: &str = "\
 Usage: asdf verify-checksums FILENAME
 
@@ -71,6 +86,7 @@ fn main() -> ExitCode {
         }
         "info" => cmd_info(rest),
         "dd" => cmd_dd(rest),
+        "events" => cmd_events(rest),
         "verify-checksums" => cmd_verify(rest),
         other => {
             eprintln!("asdf: unknown command {other:?}\n");
@@ -165,6 +181,40 @@ fn cmd_dd(args: &[String]) -> Result<ExitCode, String> {
         }
         Some(path) => std::fs::write(path, &data).map_err(|e| format!("{path}: {e}"))?,
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `asdf events`: the low-level parser event stream, as upstream prints it.
+fn cmd_events(args: &[String]) -> Result<ExitCode, String> {
+    let mut filename = None;
+    let mut verbose = false;
+    // Upstream emits YAML events by default and takes `--no-yaml` to stop.
+    let mut yaml = true;
+
+    for arg in args {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print!("{EVENTS_USAGE}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            "-v" | "--verbose" => verbose = true,
+            "--no-yaml" => yaml = false,
+            other if other.starts_with('-') && other.len() > 1 => {
+                return Err(format!("unrecognised option {other:?}"));
+            }
+            other => filename = Some(other.to_string()),
+        }
+    }
+
+    let filename = filename.ok_or("events requires a FILENAME")?;
+    let buf = std::fs::read(&filename).map_err(|e| format!("{filename}: {e}"))?;
+    let stream = events(&buf, EventOptions { yaml }).map_err(|e| format!("{filename}: {e}"))?;
+
+    let mut out = String::new();
+    for event in &stream {
+        out.push_str(&render_event(event, verbose));
+    }
+    print!("{out}");
     Ok(ExitCode::SUCCESS)
 }
 

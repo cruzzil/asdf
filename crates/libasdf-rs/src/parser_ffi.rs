@@ -22,7 +22,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
-use asdf_core::layout::{self, Layout};
+use asdf_core::events::{Event as CoreEvent, EventOptions, events, render_event};
 use asdf_core::yaml::{YamlEvent, YamlEventKind};
 
 use asdf_core::ErrorCode;
@@ -34,23 +34,29 @@ use crate::types::{
     asdf_parser_cfg_t, asdf_tree_info_t, parser_opt,
 };
 
-/// What an event carries beyond its type.
+/// The storage an event hands C pointers into.
+///
+/// Only the events with an accessor in the public headers need one; the rest
+/// carry [`Payload::None`], and everything about them is still reachable
+/// through the event's `source`.
 #[derive(Debug)]
 enum Payload {
-    /// Nothing; the type says all there is to say.
+    /// Nothing to hand out a pointer to.
     None,
-    /// An `#ASDF` or `#ASDF_STANDARD` version, as written.
-    Version(CString),
     /// A comment line, without its leading `#`.
     Comment(CString),
     /// The tree's extent, and its text when buffering was asked for.
-    Tree(Box<asdf_tree_info_t>, Option<CString>),
+    Tree {
+        info: Box<asdf_tree_info_t>,
+        /// Backs `info.buf`. Never read directly -- dropping it would dangle
+        /// the pointer C was handed.
+        #[allow(dead_code)]
+        text: Option<CString>,
+    },
     /// A YAML sub-event.
     Yaml(YamlSub),
     /// A block's position and header.
     Block(Box<asdf_block_info_t>),
-    /// The offsets listed in the file's block index.
-    BlockIndex(Vec<i64>),
 }
 
 /// A YAML sub-event, with its strings owned.
@@ -71,23 +77,10 @@ struct YamlSub {
 pub struct AsdfEvent {
     event_type: AsdfEventType,
     payload: Payload,
-}
-
-/// The plan for one event, before its C-visible form is built.
-///
-/// The whole stream is worked out when the input is set, because the layout
-/// scan reads the file end-to-end anyway; each entry is then turned into an
-/// `AsdfEvent` on demand.
-#[derive(Debug)]
-enum Step {
-    Version(bool, String),
-    Comment(String),
-    BlockIndex(Vec<u64>),
-    TreeStart(usize),
-    Yaml(YamlEvent),
-    TreeEnd(usize, usize),
-    Block(usize),
-    End,
+    /// The engine's own form of this event, kept so that
+    /// [`asdf_event_print`] can use the engine's renderer rather than a
+    /// second copy of upstream's output format.
+    source: CoreEvent,
 }
 
 /// A parser handle. Opaque to C.
@@ -99,10 +92,8 @@ pub struct AsdfParser {
     buffer: Vec<u8>,
     /// The name reported in messages, when the input came from a path.
     filename: Option<CString>,
-    /// The scan of the file, once an input is set.
-    layout: Option<Layout>,
-    /// The remaining events to produce.
-    steps: std::collections::VecDeque<Step>,
+    /// The remaining events to produce, from the engine's stream.
+    steps: std::collections::VecDeque<CoreEvent>,
     /// Events handed out and not yet freed.
     live: Vec<*mut AsdfEvent>,
     /// The event `asdf_event_iterate` produced last, which it frees on the
@@ -119,7 +110,6 @@ impl AsdfParser {
             error: ErrorState::default(),
             buffer: Vec::new(),
             filename: None,
-            layout: None,
             steps: std::collections::VecDeque::new(),
             live: Vec::new(),
             iterated: std::ptr::null_mut(),
@@ -144,82 +134,41 @@ impl AsdfParser {
         self.steps.clear();
         self.finished = false;
 
-        let layout = match layout::scan(&self.buffer) {
-            Ok(l) => l,
+        let options = EventOptions { yaml: self.emits_yaml() };
+        match events(&self.buffer, options) {
+            Ok(stream) => {
+                self.steps.extend(stream);
+                self.error.clear();
+                0
+            }
             Err(e) => {
                 self.error.set_error(&e);
-                return -1;
+                -1
             }
-        };
-
-        self.steps.push_back(Step::Version(false, layout.format_version.to_string()));
-        if let Some(standard) = &layout.standard_version {
-            self.steps.push_back(Step::Version(true, standard.to_string()));
         }
-        for comment in &layout.comments {
-            self.steps.push_back(Step::Comment(comment.clone()));
-        }
-        if layout.block_index_pos.is_some() && !layout.block_index_offsets.is_empty() {
-            self.steps.push_back(Step::BlockIndex(layout.block_index_offsets.clone()));
-        }
-        if let Some(tree) = layout.tree.clone() {
-            self.steps.push_back(Step::TreeStart(tree.start));
-            if self.emits_yaml()
-                && let Some(text) = layout.tree_str(&self.buffer)
-                && let Ok(events) = asdf_core::yaml::scan_events(text)
-            {
-                self.steps.extend(events.into_iter().map(Step::Yaml));
-            }
-            self.steps.push_back(Step::TreeEnd(tree.start, tree.end));
-        }
-        for index in 0..layout.blocks.len() {
-            self.steps.push_back(Step::Block(index));
-        }
-        self.steps.push_back(Step::End);
-
-        self.layout = Some(layout);
-        self.error.clear();
-        0
     }
 
-    /// Turn the next planned step into an event the caller owns.
+    /// Turn the next event from the engine's stream into one the caller owns.
     fn next_event(&mut self) -> *mut AsdfEvent {
         let Some(step) = self.steps.pop_front() else {
             self.finished = true;
             return std::ptr::null_mut();
         };
-        let event = match step {
-            Step::Version(is_standard, text) => {
-                let kind = if is_standard {
-                    AsdfEventType::StandardVersion
-                } else {
-                    AsdfEventType::AsdfVersion
-                };
-                let Ok(owned) = CString::new(text) else {
-                    return std::ptr::null_mut();
-                };
-                AsdfEvent { event_type: kind, payload: Payload::Version(owned) }
-            }
-            Step::Comment(text) => {
-                let Ok(owned) = CString::new(text) else {
-                    return std::ptr::null_mut();
-                };
-                AsdfEvent { event_type: AsdfEventType::Comment, payload: Payload::Comment(owned) }
-            }
-            Step::BlockIndex(offsets) => AsdfEvent {
-                event_type: AsdfEventType::BlockIndex,
-                payload: Payload::BlockIndex(
-                    offsets.iter().map(|o| i64::try_from(*o).unwrap_or(i64::MAX)).collect(),
-                ),
-            },
-            Step::TreeStart(start) => {
+
+        let built = match step.clone() {
+            CoreEvent::AsdfVersion(_) => Some((AsdfEventType::AsdfVersion, Payload::None)),
+            CoreEvent::StandardVersion(_) => Some((AsdfEventType::StandardVersion, Payload::None)),
+            CoreEvent::Comment(text) => CString::new(text)
+                .ok()
+                .map(|owned| (AsdfEventType::Comment, Payload::Comment(owned))),
+            CoreEvent::BlockIndex(_) => Some((AsdfEventType::BlockIndex, Payload::None)),
+            CoreEvent::TreeStart { start } => {
                 let info = Box::new(asdf_tree_info_t { start, end: 0, buf: std::ptr::null() });
-                AsdfEvent {
-                    event_type: AsdfEventType::TreeStart,
-                    payload: Payload::Tree(info, None),
-                }
+                Some((AsdfEventType::TreeStart, Payload::Tree { info, text: None }))
             }
-            Step::TreeEnd(start, end) => {
+            CoreEvent::TreeEnd { start, end } => {
+                // `ASDF_PARSER_OPT_BUFFER_TREE` asks for the tree's text to
+                // be kept; without it `buf` stays null, as upstream's does.
                 let text = self
                     .buffers_tree()
                     .then(|| {
@@ -228,16 +177,10 @@ impl AsdfParser {
                     .flatten();
                 let buf = text.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
                 let info = Box::new(asdf_tree_info_t { start, end, buf });
-                AsdfEvent { event_type: AsdfEventType::TreeEnd, payload: Payload::Tree(info, text) }
+                Some((AsdfEventType::TreeEnd, Payload::Tree { info, text }))
             }
-            Step::Yaml(event) => AsdfEvent {
-                event_type: AsdfEventType::Yaml,
-                payload: Payload::Yaml(yaml_sub(&event)),
-            },
-            Step::Block(index) => {
-                let Some(location) = self.layout.as_ref().and_then(|l| l.blocks.get(index)) else {
-                    return std::ptr::null_mut();
-                };
+            CoreEvent::Yaml(event) => Some((AsdfEventType::Yaml, Payload::Yaml(yaml_sub(&event)))),
+            CoreEvent::Block(location) => {
                 let header = &location.header;
                 let info = Box::new(asdf_block_info_t {
                     index: location.index,
@@ -253,11 +196,15 @@ impl AsdfParser {
                         checksum: header.checksum,
                     },
                 });
-                AsdfEvent { event_type: AsdfEventType::Block, payload: Payload::Block(info) }
+                Some((AsdfEventType::Block, Payload::Block(info)))
             }
-            Step::End => AsdfEvent { event_type: AsdfEventType::End, payload: Payload::None },
-        };
+            CoreEvent::End => Some((AsdfEventType::End, Payload::None)),
+        }
+        .map(|(event_type, payload)| AsdfEvent { event_type, payload, source: step });
 
+        let Some(event) = built else {
+            return std::ptr::null_mut();
+        };
         let handle = Box::into_raw(Box::new(event));
         self.live.push(handle);
         handle
@@ -569,7 +516,7 @@ pub unsafe extern "C" fn asdf_event_comment(event: *const AsdfEvent) -> *const c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_event_tree_info(event: *const AsdfEvent) -> *const asdf_tree_info_t {
     guard("asdf_event_tree_info", std::ptr::null(), || match event_ref(event).map(|e| &e.payload) {
-        Some(Payload::Tree(info, _)) => std::ptr::from_ref::<asdf_tree_info_t>(info),
+        Some(Payload::Tree { info, .. }) => std::ptr::from_ref::<asdf_tree_info_t>(info),
         _ => std::ptr::null(),
     })
 }
@@ -642,85 +589,8 @@ pub unsafe extern "C" fn asdf_event_print(
         let Some(state) = event_ref(event) else {
             return;
         };
-        let mut text = format!("Event: {}\n", state.event_type.name().to_string_lossy());
-        if verbose {
-            text.push_str(&describe(state));
-        }
-        write_c_stream(file, &text);
+        write_c_stream(file, &render_event(&state.source, verbose));
     })
-}
-
-/// The verbose body of [`asdf_event_print`], for one event.
-fn describe(event: &AsdfEvent) -> String {
-    match &event.payload {
-        Payload::Version(text) => {
-            let label = match event.event_type {
-                AsdfEventType::StandardVersion => "Standard Version",
-                _ => "ASDF Version",
-            };
-            format!("  {label}: {}\n", text.to_string_lossy())
-        }
-        Payload::Comment(text) => format!("  Comment: {}\n", text.to_string_lossy()),
-        Payload::Yaml(sub) => {
-            let mut out = format!("  Type: {}\n", sub.kind.text().to_string_lossy());
-            if let Some(tag) = &sub.tag {
-                out.push_str(&format!("  Tag: {}\n", tag.to_string_lossy()));
-            }
-            if let Some(value) = &sub.value
-                && !value.as_bytes().is_empty()
-            {
-                out.push_str(&format!("  Value: {}\n", value.to_string_lossy()));
-            }
-            out
-        }
-        Payload::Tree(info, text) => {
-            if event.event_type == AsdfEventType::TreeStart {
-                format!("  Tree start position: {} (0x{:x})\n", info.start, info.start)
-            } else {
-                let mut out = format!("  Tree end position: {} (0x{:x})\n", info.end, info.end);
-                if let Some(text) = text {
-                    out.push_str(&format!("{}\n", text.to_string_lossy()));
-                }
-                out
-            }
-        }
-        Payload::Block(info) => {
-            let header = &info.header;
-            let mut out = String::new();
-            out.push_str(&format!(
-                "  Header position: {} (0x{:x})\n",
-                info.header_pos, info.header_pos
-            ));
-            out.push_str(&format!("  Data position: {} (0x{:x})\n", info.data_pos, info.data_pos));
-            out.push_str(&format!(
-                "  Allocated size: {} (0x{:x})\n",
-                header.allocated_size, header.allocated_size
-            ));
-            out.push_str(&format!(
-                "  Used size: {} (0x{:x})\n",
-                header.used_size, header.used_size
-            ));
-            out.push_str(&format!(
-                "  Data size: {} (0x{:x})\n",
-                header.data_size, header.data_size
-            ));
-            if header.compression[0] != 0 {
-                let name = String::from_utf8_lossy(&header.compression);
-                out.push_str(&format!("  Compression: {name}\n"));
-            }
-            out.push_str("  Checksum: ");
-            for byte in header.checksum {
-                out.push_str(&format!("{byte:02x}"));
-            }
-            out.push('\n');
-            out
-        }
-        Payload::BlockIndex(offsets) => {
-            let listed: Vec<String> = offsets.iter().map(i64::to_string).collect();
-            format!("  Offsets: {}\n", listed.join(", "))
-        }
-        Payload::None => String::new(),
-    }
 }
 
 /// Write to a C `FILE *`, falling back to `stdout` when it is null.

@@ -65,6 +65,14 @@ skip with a note when one is absent.
 | `every_declared_export_is_defined` | Every `ASDF_EXPORT` declaration in the preprocessed headers resolves to a defined symbol. The complement of the leakage gate: that one catches what we export and should not, this one catches what upstream promises and we do not provide. A miss is a link error in a consumer, invisible to the Rust build. |
 | `c_caller_can_walk_the_event_stream` | The low-level event API, walked from C over `basic.asdf`: the event sequence, the YAML sub-events and their expanded tags, and the tree and block accessors. Ported from upstream's `tests/test-event.c`, reduced to what the public headers expose. |
 
+A second family of gates lives in `asdf-core`'s test suite and compares
+rendered output against upstream's committed fixtures byte for byte:
+
+| Gate | What it proves |
+|---|---|
+| `info_goldens` | `asdf info` reproduces all 17 of upstream's `.info.txt` captures, ANSI styling included. |
+| `event_goldens` | `asdf events --verbose` reproduces all 4 of upstream's `.events.txt` captures. These pin the event *order*, which is not the file's own — the block index is reported before the tree — and the names libfyaml gives YAML events (`+MAP`, `=VAL`, `-SEQ`), which appear in no header. |
+
 ## Not yet wired up
 
 - **Upstream's own C test suite** (~20 `test-*.c` files with munit) compiled
