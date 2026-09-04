@@ -378,6 +378,13 @@ macro_rules! declare_extension {
 
         /// Deserialize through the registry's generic entry point.
         ///
+        /// Deliberately *not* routed through the typed
+        /// `asdf_value_as_<name>`: that one checks the tag first, and a
+        /// vtable method must not. The tag check belongs to
+        /// `asdf_value_as_extension_type`, which is what lets a caller
+        /// deserialize an untagged value -- an ndarray's `datatype`, say --
+        /// by reaching for the vtable directly, as upstream's own test does.
+        ///
         /// # Safety
         /// `value` must be a valid value handle and `out` writable.
         unsafe extern "C" fn $ext_deserialize_fn(
@@ -385,12 +392,26 @@ macro_rules! declare_extension {
             _userdata: *const std::ffi::c_void,
             out: *mut *mut std::ffi::c_void,
         ) -> AsdfValueErr {
-            let mut typed: *mut $ty = std::ptr::null_mut();
-            let err = unsafe { $value_as_fn(value, &mut typed) };
-            if err == AsdfValueErr::Ok && !out.is_null() {
-                unsafe { *out = typed.cast::<std::ffi::c_void>() };
-            }
-            err
+            guard(stringify!($ext_deserialize_fn), AsdfValueErr::Unknown, || {
+                if out.is_null() {
+                    return AsdfValueErr::Unknown;
+                }
+                let (Some(doc), Some(node)) = (value_document(value), value_node(value)) else {
+                    return AsdfValueErr::Unknown;
+                };
+                let file = value_file(value).unwrap_or(std::ptr::null_mut());
+                let raw = Box::into_raw(Box::new(<$ty>::zeroed()));
+                match $deserialize(doc, node, file, raw) {
+                    AsdfValueErr::Ok => {
+                        unsafe { *out = raw.cast::<std::ffi::c_void>() };
+                        AsdfValueErr::Ok
+                    }
+                    err => {
+                        unsafe { $destroy_fn(raw) };
+                        err
+                    }
+                }
+            })
         }
 
         /// Serialize through the registry's generic entry point.
@@ -1574,6 +1595,15 @@ fn datatype_deserialize(
         return AsdfValueErr::ParseFailure;
     };
 
+    // A datatype read on its own has no enclosing ndarray to inherit a byte
+    // order from, and the standard does not say what one means alone. Both
+    // libasdf and Python asdf take it as little-endian; see
+    // https://github.com/asdf-format/asdf-standard/issues/501
+    let default_order = asdf_core::core::datatype::ByteOrder::Little;
+    let order_of = |order: asdf_core::core::datatype::ByteOrder| {
+        if order == asdf_core::core::datatype::ByteOrder::Default { default_order } else { order }
+    };
+
     // Field descriptors and their names are leaked into owned allocations
     // that `deinit` reclaims, so the pointers stay valid for the object's
     // life.
@@ -1592,7 +1622,7 @@ fn datatype_deserialize(
             type_: field.datatype.scalar as i32,
             size: field.datatype.item_size(),
             name,
-            byteorder: field.datatype.byteorder as i32,
+            byteorder: order_of(field.datatype.byteorder) as i32,
             ndim,
             shape: shape_ptr,
             nfields: 0,
@@ -1611,7 +1641,7 @@ fn datatype_deserialize(
         (*out).type_ = parsed.scalar as i32;
         (*out).size = parsed.item_size();
         (*out).name = std::ptr::null();
-        (*out).byteorder = parsed.byteorder as i32;
+        (*out).byteorder = order_of(parsed.byteorder) as i32;
         (*out).ndim = 0;
         (*out).shape = std::ptr::null();
         (*out).nfields = nfields;
@@ -1620,33 +1650,27 @@ fn datatype_deserialize(
     AsdfValueErr::Ok
 }
 
-fn datatype_serialize(doc: &mut Document, obj: &asdf_datatype_t) -> Option<NodeId> {
+/// Whether a datatype is a plain scalar that needs no mapping around it.
+///
+/// Mirrors upstream's `asdf_datatype_is_simple_scalar`: not structured, no
+/// name, no shape, no fields, and a byte order that need not be stated.
+fn is_simple_scalar(obj: &asdf_datatype_t) -> bool {
+    use asdf_core::core::datatype::ByteOrder;
+    let scalar = crate::ndarray_ffi::scalar_from_abi_public(obj.type_);
+    scalar != asdf_core::core::datatype::ScalarType::Structured
+        && (obj.byteorder == 0 || obj.byteorder == ByteOrder::Little as i32)
+        && obj.name.is_null()
+        && obj.ndim == 0
+        && obj.nfields == 0
+}
+
+/// Render a scalar datatype: its name, or `[kind, length]` for a string.
+fn datatype_serialize_scalar(doc: &mut Document, obj: &asdf_datatype_t) -> Option<NodeId> {
     use asdf_core::core::datatype::ScalarType;
 
-    // A compound type is a sequence of field mappings.
-    if obj.nfields > 0 && !obj.fields.is_null() {
-        let fields = unsafe { std::slice::from_raw_parts(obj.fields, obj.nfields as usize) };
-        let mut items = Vec::with_capacity(fields.len());
-        for field in fields {
-            let mut pairs = Vec::new();
-            if !field.name.is_null() {
-                let text = unsafe { CStr::from_ptr(field.name) }.to_string_lossy().into_owned();
-                let key = doc.add_scalar("name");
-                let value = doc.add_scalar_styled(text, asdf_core::yaml::ScalarStyle::Plain);
-                pairs.push((key, value));
-            }
-            if let Some(node) = datatype_serialize(doc, field) {
-                let key = doc.add_scalar("datatype");
-                pairs.push((key, node));
-            }
-            items.push(doc.add_mapping(pairs));
-        }
-        return Some(doc.add_sequence(items));
-    }
-
-    // A string type is a [kind, length] pair, sized in characters.
     let scalar = crate::ndarray_ffi::scalar_from_abi_public(obj.type_);
     if scalar.is_string() {
+        // A string type is a [kind, length] pair, sized in characters.
         let characters = obj.size / scalar.bytes_per_char().max(1);
         let kind = doc.add_scalar(scalar.name());
         let length = doc.add_scalar(characters.to_string());
@@ -1656,30 +1680,155 @@ fn datatype_serialize(doc: &mut Document, obj: &asdf_datatype_t) -> Option<NodeI
         }
         return Some(seq);
     }
-
     (scalar != ScalarType::Unknown).then(|| doc.add_scalar(scalar.name()))
+}
+
+/// Render one field of a compound datatype as a mapping.
+///
+/// A field carries what a bare scalar cannot: its name, its own byte order,
+/// and a sub-array shape.
+fn datatype_serialize_field(doc: &mut Document, field: &asdf_datatype_t) -> Option<NodeId> {
+    use asdf_core::core::datatype::ScalarType;
+
+    let scalar = crate::ndarray_ffi::scalar_from_abi_public(field.type_);
+    let mut pairs = Vec::new();
+
+    if !field.name.is_null() {
+        let text = unsafe { CStr::from_ptr(field.name) }.to_string_lossy().into_owned();
+        let key = doc.add_scalar("name");
+        let value = doc.add_scalar_styled(text, asdf_core::yaml::ScalarStyle::Plain);
+        pairs.push((key, value));
+    }
+
+    let inner = if scalar == ScalarType::Structured {
+        datatype_serialize_impl(doc, field, false)?
+    } else {
+        datatype_serialize_scalar(doc, field)?
+    };
+    let key = doc.add_scalar("datatype");
+    pairs.push((key, inner));
+
+    if field.byteorder != 0
+        && let Some(order) = byteorder_name(field.byteorder)
+    {
+        let key = doc.add_scalar("byteorder");
+        let value = doc.add_scalar(order);
+        pairs.push((key, value));
+    }
+
+    if field.ndim > 0 && !field.shape.is_null() {
+        let dims = unsafe { std::slice::from_raw_parts(field.shape, field.ndim as usize) };
+        let items: Vec<NodeId> = dims.iter().map(|d| doc.add_scalar(d.to_string())).collect();
+        let seq = doc.add_sequence(items);
+        if let asdf_core::yaml::NodeData::Sequence { style, .. } = &mut doc.node_mut(seq).data {
+            *style = asdf_core::yaml::CollectionStyle::Flow;
+        }
+        let key = doc.add_scalar("shape");
+        pairs.push((key, seq));
+    }
+
+    let node = doc.add_mapping(pairs);
+    // Python asdf writes a plain non-string scalar field inline and anything
+    // richer in block style; upstream reproduces that, so we do too.
+    if scalar != ScalarType::Structured
+        && !scalar.is_string()
+        && field.ndim == 0
+        && let asdf_core::yaml::NodeData::Mapping { style, .. } = &mut doc.node_mut(node).data
+    {
+        *style = asdf_core::yaml::CollectionStyle::Flow;
+    }
+    Some(node)
+}
+
+/// The schema's name for a byte order discriminant.
+fn byteorder_name(byteorder: i32) -> Option<&'static str> {
+    use asdf_core::core::datatype::ByteOrder;
+    if byteorder == ByteOrder::Little as i32 {
+        Some("little")
+    } else if byteorder == ByteOrder::Big as i32 {
+        Some("big")
+    } else {
+        None
+    }
+}
+
+/// Render a datatype, as a field of a compound type or on its own.
+fn datatype_serialize_impl(
+    doc: &mut Document,
+    obj: &asdf_datatype_t,
+    is_field: bool,
+) -> Option<NodeId> {
+    use asdf_core::core::datatype::ScalarType;
+
+    let scalar = crate::ndarray_ffi::scalar_from_abi_public(obj.type_);
+
+    if is_simple_scalar(obj) {
+        return datatype_serialize_scalar(doc, obj);
+    }
+    if !is_field && scalar != ScalarType::Structured && obj.ndim == 0 {
+        // A top-level scalar is written as its name even when its byte order
+        // is not the default: the order belongs to the enclosing ndarray's
+        // own `byteorder`, not repeated here. As a *field* it would need the
+        // mapping form, which carries the per-field order.
+        return datatype_serialize_scalar(doc, obj);
+    }
+    if is_field {
+        return datatype_serialize_field(doc, obj);
+    }
+    if scalar == ScalarType::Structured {
+        let fields = if obj.nfields > 0 && !obj.fields.is_null() {
+            unsafe { std::slice::from_raw_parts(obj.fields, obj.nfields as usize) }
+        } else {
+            &[]
+        };
+        let items: Vec<NodeId> = fields
+            .iter()
+            .map(|field| datatype_serialize_impl(doc, field, true))
+            .collect::<Option<Vec<_>>>()?;
+        return Some(doc.add_sequence(items));
+    }
+    None
+}
+
+fn datatype_serialize(doc: &mut Document, obj: &asdf_datatype_t) -> Option<NodeId> {
+    datatype_serialize_impl(doc, obj, false)
 }
 
 unsafe fn datatype_deinit(obj: *mut asdf_datatype_t) {
     let datatype = unsafe { &mut *obj };
+    unsafe { datatype_free_storage(datatype) };
+    *datatype = asdf_datatype_t::zeroed();
+}
 
+/// Release everything a datatype owns, without zeroing it.
+///
+/// Recursive, because a field may itself be structured; the fields array is
+/// freed after its members, and each member's name and shape after that.
+///
+/// # Safety
+/// `datatype` must own its `name`, `shape` and `fields`, as one produced by
+/// the deserializer or by [`datatype_copy`] does.
+unsafe fn datatype_free_storage(datatype: &mut asdf_datatype_t) {
     if !datatype.fields.is_null() && datatype.nfields > 0 {
         let count = datatype.nfields as usize;
         let slice = std::ptr::slice_from_raw_parts_mut(datatype.fields.cast_mut(), count);
-        // Reclaim each field's own allocations before the array itself.
         for index in 0..count {
             let field = unsafe { &mut *datatype.fields.cast_mut().add(index) };
-            unsafe { free_c_string(field.name) };
-            if !field.shape.is_null() && field.ndim > 0 {
-                let shape =
-                    std::ptr::slice_from_raw_parts_mut(field.shape.cast_mut(), field.ndim as usize);
-                drop(unsafe { Box::from_raw(shape) });
-            }
+            unsafe { datatype_free_storage(field) };
         }
         drop(unsafe { Box::from_raw(slice) });
+        datatype.fields = std::ptr::null();
+        datatype.nfields = 0;
+    }
+    if !datatype.shape.is_null() && datatype.ndim > 0 {
+        let shape =
+            std::ptr::slice_from_raw_parts_mut(datatype.shape.cast_mut(), datatype.ndim as usize);
+        drop(unsafe { Box::from_raw(shape) });
+        datatype.shape = std::ptr::null();
+        datatype.ndim = 0;
     }
     unsafe { free_c_string(datatype.name) };
-    *datatype = asdf_datatype_t::zeroed();
+    datatype.name = std::ptr::null();
 }
 
 unsafe fn datatype_copy(src: &asdf_datatype_t, dst: *mut asdf_datatype_t) -> bool {
@@ -1688,8 +1837,17 @@ unsafe fn datatype_copy(src: &asdf_datatype_t, dst: *mut asdf_datatype_t) -> boo
     out.size = src.size;
     out.byteorder = src.byteorder;
     out.name = unsafe { clone_c_string(src.name) };
-    out.ndim = 0;
-    out.shape = std::ptr::null();
+
+    // A field's sub-array shape is its own storage, so the copy gets one
+    // too: a shallow copy would leave two owners of the same allocation.
+    if src.ndim > 0 && !src.shape.is_null() {
+        let dims = unsafe { std::slice::from_raw_parts(src.shape, src.ndim as usize) };
+        out.ndim = src.ndim;
+        out.shape = Box::into_raw(dims.to_vec().into_boxed_slice()).cast::<u64>().cast_const();
+    } else {
+        out.ndim = 0;
+        out.shape = std::ptr::null();
+    }
 
     if src.nfields == 0 || src.fields.is_null() {
         out.nfields = 0;
