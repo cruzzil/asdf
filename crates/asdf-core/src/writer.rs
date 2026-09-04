@@ -18,25 +18,50 @@ use crate::version::{ASDF_FORMAT_VERSION, ASDF_STANDARD_VERSION};
 /// A block queued for writing.
 #[derive(Clone, Debug)]
 pub struct PendingBlock {
-    /// The uncompressed data.
+    /// The data, uncompressed unless [`PendingBlock::already_compressed`] is
+    /// set.
     pub data: Vec<u8>,
-    /// How to compress it on the way out.
+    /// How to compress it on the way out, or how it is already compressed.
     pub compression: Compression,
     /// Space to reserve, which may exceed the used size so the block can grow
     /// later without moving everything after it. Zero means "use the used
     /// size".
     pub allocated_size: u64,
+    /// `data` already holds compressed bytes, to be written verbatim.
+    ///
+    /// This is how a block is copied from one file to another without a
+    /// decompress/recompress round trip, which would be wasteful and could
+    /// not reproduce the original bytes.
+    pub already_compressed: bool,
+    /// The uncompressed size, needed only when [`Self::already_compressed`]
+    /// is set: it is what the header must record and cannot be measured from
+    /// the bytes at hand.
+    pub uncompressed_size: u64,
 }
 
 impl PendingBlock {
     /// A block of uncompressed data.
     pub fn new(data: Vec<u8>) -> Self {
-        Self { data, compression: Compression::None, allocated_size: 0 }
+        Self {
+            data,
+            compression: Compression::None,
+            allocated_size: 0,
+            already_compressed: false,
+            uncompressed_size: 0,
+        }
     }
 
     /// A block compressed with the given method.
     pub fn compressed(data: Vec<u8>, compression: Compression) -> Self {
-        Self { data, compression, allocated_size: 0 }
+        Self { compression, ..Self::new(data) }
+    }
+
+    /// A block whose bytes are already compressed, written verbatim.
+    ///
+    /// `uncompressed_size` is what the data decompresses to; the header
+    /// records it and a reader needs it to size its output buffer.
+    pub fn precompressed(data: Vec<u8>, compression: Compression, uncompressed_size: u64) -> Self {
+        Self { compression, already_compressed: true, uncompressed_size, ..Self::new(data) }
     }
 }
 
@@ -250,17 +275,24 @@ impl Writer {
 
     /// Append one block's header and data.
     fn write_block(&self, out: &mut Vec<u8>, block: &PendingBlock) -> Result<()> {
-        let stored = block.compression.compress(&block.data)?;
+        // Bytes that are already compressed go out as they came in: a
+        // decompress/recompress round trip would waste the work and could
+        // not be relied on to reproduce them.
+        let stored = if block.already_compressed {
+            std::borrow::Cow::Borrowed(block.data.as_slice())
+        } else {
+            std::borrow::Cow::Owned(block.compression.compress(&block.data)?)
+        };
 
         let used_size = stored.len() as u64;
         let allocated_size = block.allocated_size.max(used_size);
-
-        let mut header = BlockHeader {
-            allocated_size,
-            used_size,
-            data_size: block.data.len() as u64,
-            ..Default::default()
+        let data_size = if block.already_compressed {
+            block.uncompressed_size
+        } else {
+            block.data.len() as u64
         };
+
+        let mut header = BlockHeader { allocated_size, used_size, data_size, ..Default::default() };
         header.set_compression(block.compression.name())?;
 
         if self.options.write_checksums {
@@ -379,6 +411,36 @@ mod tests {
         assert_eq!(doc.resolved(name).as_str(), Some("asdf"), "the original writer must survive");
     }
 
+    /// Bytes that are already compressed go out verbatim, with the
+    /// uncompressed size the caller declared recorded in the header.
+    ///
+    /// This is how a block is copied between files without a
+    /// decompress/recompress round trip -- which would waste the work and
+    /// could not be relied on to reproduce the original bytes.
+    #[test]
+    fn precompressed_blocks_are_written_as_they_came() {
+        let payload: Vec<u8> = (0..4096u32).map(|i| (i * 7) as u8).collect();
+        let compressed = Compression::Zlib.compress(&payload).unwrap();
+        assert!(compressed.len() < payload.len(), "the fixture must actually compress");
+
+        let mut writer = Writer::from_document(tree("a: 1\n"));
+        writer.add_block(PendingBlock::precompressed(
+            compressed.clone(),
+            Compression::Zlib,
+            payload.len() as u64,
+        ));
+
+        let reader = Reader::from_bytes(writer.to_bytes().unwrap()).unwrap();
+        // Stored exactly as handed over.
+        assert_eq!(reader.block_raw(0).unwrap(), &compressed[..]);
+        // And the header knows what it decompresses to, which a reader needs
+        // to size its buffer.
+        assert_eq!(reader.block(0).unwrap().header.data_size, payload.len() as u64);
+        assert_eq!(reader.block(0).unwrap().header.used_size, compressed.len() as u64);
+        assert_eq!(&*reader.block_data(0).unwrap(), &payload[..]);
+        assert_eq!(reader.block_compression(0).unwrap(), Compression::Zlib);
+    }
+
     #[test]
     fn writes_blocks_that_read_back_byte_for_byte() {
         let mut writer = Writer::from_document(tree("a: 1\n"));
@@ -473,11 +535,7 @@ mod tests {
     fn allocated_size_reserves_room_without_breaking_the_read() {
         let mut writer = Writer::from_document(tree("a: 1\n"));
         let data = vec![9u8; 100];
-        writer.add_block(PendingBlock {
-            data: data.clone(),
-            compression: Compression::None,
-            allocated_size: 4096,
-        });
+        writer.add_block(PendingBlock { allocated_size: 4096, ..PendingBlock::new(data.clone()) });
         writer.add_block(PendingBlock::new(vec![8u8; 10]));
 
         let reader = Reader::from_bytes(writer.to_bytes().unwrap()).unwrap();

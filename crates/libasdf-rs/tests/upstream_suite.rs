@@ -66,6 +66,7 @@ const SUITES: &[Suite] = &[
     // `asdf_library` names libasdf. Byte parity on YAML is a nice-to-have
     // and never a gate; the binary layer is where bytes matter.
     Suite { name: "test-value", expect_pass: 66, total: 68, needs_compat_headers: false },
+    Suite { name: "test-block", expect_pass: 6, total: 6, needs_compat_headers: false },
     Suite { name: "test-extension", expect_pass: 12, total: 13, needs_compat_headers: false },
     Suite {
         name: "test-reference-files",
@@ -77,7 +78,6 @@ const SUITES: &[Suite] = &[
 
 /// Suites that cannot run against another implementation, and why.
 const INTERNAL_ONLY: &[(&str, &str)] = &[
-    ("test-block", "includes file.h, libasdf's private file struct"),
     ("test-compression", "includes compression/compression.h"),
     ("test-emitter", "includes emitter.h, file.h and stream.h"),
     ("test-event", "includes event.h and parser.h, the private event struct"),
@@ -189,15 +189,29 @@ fn upstream_c_test_suite_runs_against_this_library() {
     // `HAVE_STATGRAB` from it -- left undefined, which selects the portable
     // path -- and `compat/numeric.h` reads `HAVE_FLOAT16`, which must match
     // what our own build probed for.
-    // `test-value.c` carries a stray `#include <libfyaml.h>` and never uses
-    // anything from it, so an empty header of that name is enough to let it
-    // compile. Nothing is being stood in for: there is no libfyaml API here
-    // to fake.
+    // Two headers a suite reaches for without needing anything private.
+    //
+    // `test-value.c` carries a stray `#include <libfyaml.h>` and uses
+    // nothing from it, so an empty header of that name lets it compile --
+    // nothing is being stood in for, because there is no libfyaml API in
+    // play. `test-block.c` includes libasdf's private `file.h` for the
+    // *public* types it re-exports and touches nothing private, so the
+    // public headers are what it actually needs.
     std::fs::write(
         build.join("libfyaml.h"),
         "/* Empty: test-value.c includes this and uses nothing from it. */\n",
     )
     .expect("write libfyaml stub");
+    std::fs::write(
+        build.join("file.h"),
+        "/* Stand-in for libasdf's private file.h: test-block.c includes it\n\
+           for the public types it re-exports and touches nothing private. */\n\
+         #pragma once\n\
+         #include <asdf/block.h>\n\
+         #include <asdf/emitter.h>\n\
+         #include <asdf/file.h>\n",
+    )
+    .expect("write file.h stand-in");
 
     let float16 = if cfg!(asdf_have_float16) { "#define HAVE_FLOAT16 1\n" } else { "" };
     std::fs::write(

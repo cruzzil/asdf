@@ -114,6 +114,10 @@ impl AsdfBlock {
             data: self.data.as_slice().to_vec(),
             compression: self.compression,
             allocated_size: self.allocated_size,
+            // Bytes handed to `asdf_block_data_set_compressed` go out
+            // verbatim, carrying the uncompressed size the caller declared.
+            already_compressed: self.data_is_compressed,
+            uncompressed_size: self.declared_data_size,
         }
     }
 }

@@ -86,25 +86,30 @@ checkout with its munit submodule initialised:
 $ cd ~/code/libasdf && git submodule update --init tests/munit
 ```
 
-Ten of upstream's twenty-one suites build against the public ABI. The other
-eleven include libasdf's private headers -- `event.h`, `parser.h`,
-`stream.h`, `file.h` -- to reach internals that are implementation detail
-rather than interface, so they cannot run against a different implementation
-by construction. Each is listed in the test with the header that rules it out.
+Eleven of upstream's twenty-one suites build against the public ABI. The
+other ten include libasdf's private headers -- `event.h`, `parser.h`,
+`stream.h`, `compression/compression.h` -- to reach internals that are
+implementation detail rather than interface, so they cannot run against a
+different implementation by construction. Each is listed in the test with the
+header that rules it out.
 
-Two needed a nudge and got one, neither of which stands anything in:
+Three needed a nudge, and none of them stands a private API in:
 
 - `test-ndarray` reaches for `compat/numeric.h`, a type alias for `_Float16`
   and nothing more, so libasdf's `src/` is added to its include path *after*
   the vendored headers and `asdf/*.h` still resolves to ours.
 - `test-value` carries a stray `#include <libfyaml.h>` and uses nothing from
   it, so an empty header of that name lets it compile.
+- `test-block` includes libasdf's private `file.h` for the *public* types it
+  re-exports and touches nothing private, so a stand-in that includes
+  `asdf/block.h`, `asdf/emitter.h` and `asdf/file.h` is what it actually
+  needs.
 
 Every suite's pass count is pinned. A change that loses ground fails, and so
 does one that gains ground without updating the number, so the figure below
 cannot drift.
 
-**492 of 495.**
+**498 of 501.**
 
 | Suite | | |
 |---|---|---|
@@ -116,6 +121,7 @@ cannot drift.
 | `test-core-extensions` | 16/16 | |
 | `test-ndarray` | 257/257 | the numeric conversion matrix, both byte orders deep |
 | `test-value` | 66/68 | the value API in full |
+| `test-block` | 6/6 | the low-level block API, including verbatim compressed copies |
 | `test-extension` | 12/13 | |
 | `test-reference-files` | 113/113 | every tagged value in every reference file |
 
