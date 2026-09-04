@@ -23,13 +23,36 @@ use crate::error_ffi::ErrorState;
 use crate::panic::guard;
 use crate::types::{AsdfValueErr, AsdfValueType, asdf_config_t};
 
-/// How a file was opened.
+/// How a file was opened, mirroring libasdf's `asdf_file_mode_t`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum FileMode {
-    /// Backed by an existing file or buffer.
+    /// Backed by an existing file or buffer, and not writable.
     ReadOnly,
-    /// Created empty for writing.
+    /// Created empty for writing; no input is read.
     Write,
+    /// Backed by an existing file or buffer *and* writable, which is what
+    /// `asdf_open_mem` and `asdf_open_file(.., "rw")` give.
+    ReadWrite,
+}
+
+impl FileMode {
+    /// Whether values may be placed in this file's tree.
+    fn writable(self) -> bool {
+        self != FileMode::ReadOnly
+    }
+
+    /// The mode named by a `mode` string, or `None` for anything else.
+    ///
+    /// libasdf accepts exactly `r`, `w` and `rw`, case-insensitively, and
+    /// reports anything else as an invalid argument.
+    fn parse(mode: &str) -> Option<Self> {
+        match mode.to_ascii_lowercase().as_str() {
+            "r" => Some(FileMode::ReadOnly),
+            "w" => Some(FileMode::Write),
+            "rw" => Some(FileMode::ReadWrite),
+            _ => None,
+        }
+    }
 }
 
 /// An open ASDF file. Opaque to C.
@@ -94,7 +117,7 @@ pub(crate) fn file_blocks_mut(file: *mut AsdfFile) -> Option<&'static mut Vec<Pe
         return None;
     }
     let handle = unsafe { &mut *file };
-    (handle.mode == FileMode::Write).then_some(&mut handle.blocks)
+    handle.mode.writable().then_some(&mut handle.blocks)
 }
 
 /// A file's tree.
@@ -130,7 +153,7 @@ impl AsdfFile {
     /// A file opened for writing starts with no tree; the first `asdf_set_*`
     /// call brings one into being, as libasdf's own write example expects.
     fn document_for_write(&mut self) -> Option<&mut Document> {
-        if self.mode != FileMode::Write {
+        if !self.mode.writable() {
             return None;
         }
         if self.document.is_none() {
@@ -178,8 +201,8 @@ impl AsdfFile {
 const ASDF_ROOT_TAG: &str = "tag:stsci.edu:asdf/core/asdf-1.1.0";
 
 /// Build a file handle around a reader.
-fn open_reader(reader: Reader) -> *mut AsdfFile {
-    let mut file = AsdfFile::new(FileMode::ReadOnly);
+fn open_reader(reader: Reader, mode: FileMode) -> *mut AsdfFile {
+    let mut file = AsdfFile::new(mode);
     match reader.tree() {
         Ok(doc) => file.document = doc,
         Err(e) => {
@@ -206,19 +229,25 @@ pub unsafe extern "C" fn asdf_open_file_ex(
 ) -> *mut AsdfFile {
     guard("asdf_open_file_ex", std::ptr::null_mut(), || {
         let _ = config;
+        if mode.is_null() {
+            return std::ptr::null_mut();
+        }
+        let text = unsafe { CStr::from_ptr(mode) }.to_string_lossy().into_owned();
+        let Some(mode) = FileMode::parse(&text) else {
+            return std::ptr::null_mut();
+        };
+        // A write-only open reads nothing, so it does not touch `filename` at
+        // all -- upstream ignores it too, and the destination is named later
+        // by `asdf_write_to`.
+        if mode == FileMode::Write {
+            return Box::into_raw(Box::new(AsdfFile::new(FileMode::Write)));
+        }
         if filename.is_null() {
             return std::ptr::null_mut();
         }
-        // Only reading is supported so far; writing arrives in phase 5.
-        if !mode.is_null() {
-            let mode = unsafe { CStr::from_ptr(mode) }.to_string_lossy();
-            if !mode.contains('r') {
-                return std::ptr::null_mut();
-            }
-        }
         let path = unsafe { CStr::from_ptr(filename) }.to_string_lossy().into_owned();
         match Reader::open(&path) {
-            Ok(reader) => open_reader(reader),
+            Ok(reader) => open_reader(reader, mode),
             Err(_) => std::ptr::null_mut(),
         }
     })
@@ -242,9 +271,11 @@ pub unsafe extern "C" fn asdf_open_mem_ex(
         if buf.is_null() || size == 0 {
             return Box::into_raw(Box::new(AsdfFile::new(FileMode::Write)));
         }
+        // A buffer-backed file is read-*write* upstream: its tree may be
+        // edited and written out elsewhere.
         let bytes = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
         match Reader::from_bytes(bytes) {
-            Ok(reader) => open_reader(reader),
+            Ok(reader) => open_reader(reader, FileMode::ReadWrite),
             Err(_) => std::ptr::null_mut(),
         }
     })
@@ -292,7 +323,7 @@ pub unsafe extern "C" fn asdf_open_fp_ex(
             return std::ptr::null_mut();
         }
         match Reader::from_bytes(bytes) {
-            Ok(reader) => open_reader(reader),
+            Ok(reader) => open_reader(reader, FileMode::ReadOnly),
             Err(_) => std::ptr::null_mut(),
         }
     })
@@ -768,7 +799,7 @@ fn set_node(
     let Some(handle) = write_target(file) else {
         return AsdfValueErr::Unknown;
     };
-    if handle.mode != FileMode::Write {
+    if !handle.mode.writable() {
         // libasdf reports a write to a read-only file distinctly from a
         // type problem, so a caller can tell the two apart.
         return AsdfValueErr::ReadOnly;
@@ -1535,11 +1566,72 @@ mod tests {
         assert_eq!(unsafe { asdf_set_int64(h.0, path.as_ptr(), 42) }, AsdfValueErr::Ok);
     }
 
+    /// Write the sample to a real file and hand back its path.
+    fn sample_on_disk(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("asdf-file-ffi-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, sample()).unwrap();
+        path
+    }
+
     #[test]
     fn writing_to_a_read_only_file_is_refused() {
+        let path = sample_on_disk("read-only.asdf");
+        let name = CString::new(path.to_str().unwrap()).unwrap();
+        let f = unsafe { asdf_open_file_ex(name.as_ptr(), c"r".as_ptr(), std::ptr::null_mut()) };
+        assert!(!f.is_null());
+        let h = Handle(f);
+
+        let key = cpath("foo");
+        assert_eq!(unsafe { asdf_set_int64(h.0, key.as_ptr(), 1) }, AsdfValueErr::ReadOnly);
+    }
+
+    /// libasdf gives a buffer-backed file read-*write* mode, so its tree may
+    /// be edited and written out somewhere else. Only an `"r"` open of a real
+    /// file is genuinely read-only.
+    #[test]
+    fn a_memory_backed_file_is_writable() {
         let h = open();
-        let path = cpath("foo");
-        assert_eq!(unsafe { asdf_set_int64(h.0, path.as_ptr(), 1) }, AsdfValueErr::ReadOnly);
+        let key = cpath("foo");
+        assert_eq!(unsafe { asdf_set_int64(h.0, key.as_ptr(), 1) }, AsdfValueErr::Ok);
+
+        // The file it was opened over is still there, with the edit applied
+        // on top rather than replacing it.
+        let name = cpath("name");
+        let mut out = std::ptr::null();
+        assert_eq!(unsafe { asdf_get_string0(h.0, name.as_ptr(), &mut out) }, AsdfValueErr::Ok);
+        let mut got: i64 = 0;
+        assert_eq!(unsafe { asdf_get_int64(h.0, key.as_ptr(), &mut got) }, AsdfValueErr::Ok);
+        assert_eq!(got, 1);
+    }
+
+    #[test]
+    fn open_modes_are_the_three_libasdf_accepts() {
+        let path = sample_on_disk("modes.asdf");
+        let name = CString::new(path.to_str().unwrap()).unwrap();
+
+        // `rw` reads the file and permits edits.
+        let f = unsafe { asdf_open_file_ex(name.as_ptr(), c"rw".as_ptr(), std::ptr::null_mut()) };
+        assert!(!f.is_null());
+        let h = Handle(f);
+        let key = cpath("foo");
+        assert_eq!(unsafe { asdf_set_int64(h.0, key.as_ptr(), 7) }, AsdfValueErr::Ok);
+
+        // `w` reads nothing at all -- not even the filename, which is why
+        // upstream accepts a null one here.
+        let w = unsafe { asdf_open_file_ex(name.as_ptr(), c"W".as_ptr(), std::ptr::null_mut()) };
+        assert!(!w.is_null());
+        let wh = Handle(w);
+        assert_eq!(unsafe { asdf_block_count(wh.0) }, 0);
+        assert_eq!(unsafe { asdf_set_int64(wh.0, key.as_ptr(), 1) }, AsdfValueErr::Ok);
+
+        // Anything else is an invalid argument.
+        for bad in [c"rb", c"a", c"r+", c""] {
+            let bad_open =
+                unsafe { asdf_open_file_ex(name.as_ptr(), bad.as_ptr(), std::ptr::null_mut()) };
+            assert!(bad_open.is_null(), "{bad:?} should not be a valid mode");
+        }
     }
 
     #[test]
