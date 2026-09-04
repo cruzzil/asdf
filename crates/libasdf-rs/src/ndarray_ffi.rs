@@ -1624,6 +1624,99 @@ pub unsafe extern "C" fn asdf_ndarray_read_tile_2d(
     })
 }
 
+// ---- Registry entry --------------------------------------------------
+//
+// See the matching section in `core_ext.rs`: generic callers reach an
+// extension only through `asdf_extension_get` and
+// `asdf_value_as_extension_type`, so the typed functions above are not
+// enough on their own. This family is written out rather than generated
+// because the ndarray extension's functions are hand-written too.
+
+/// Deserialize through the registry's generic entry point.
+///
+/// # Safety
+/// `value` must be a valid value handle and `out` writable.
+unsafe extern "C" fn ndarray_ext_deserialize(
+    value: *mut crate::file_ffi::AsdfValue,
+    _userdata: *const c_void,
+    out: *mut *mut c_void,
+) -> crate::types::AsdfValueErr {
+    let mut typed: *mut asdf_ndarray_t = std::ptr::null_mut();
+    let err = unsafe { asdf_value_as_ndarray(value, &mut typed) };
+    if err == crate::types::AsdfValueErr::Ok && !out.is_null() {
+        unsafe { *out = typed.cast::<c_void>() };
+    }
+    err
+}
+
+/// Serialize through the registry's generic entry point.
+///
+/// # Safety
+/// `obj` must be a valid `asdf_ndarray_t`.
+unsafe extern "C" fn ndarray_ext_serialize(
+    file: *mut crate::file_ffi::AsdfFile,
+    obj: *const c_void,
+    _userdata: *const c_void,
+) -> *mut crate::file_ffi::AsdfValue {
+    unsafe { asdf_value_of_ndarray(file, obj.cast::<asdf_ndarray_t>()) }
+}
+
+/// Deep-copy through the registry's generic entry point.
+///
+/// # Safety
+/// `src` and `dst` must be valid `asdf_ndarray_t` values.
+unsafe extern "C" fn ndarray_ext_copy(
+    file: *mut crate::file_ffi::AsdfFile,
+    src: *const c_void,
+    dst: *mut c_void,
+) -> bool {
+    unsafe {
+        asdf_ndarray_copy_into(file, src.cast::<asdf_ndarray_t>(), dst.cast::<asdf_ndarray_t>())
+    }
+}
+
+/// De-initialise through the registry's generic entry point.
+///
+/// # Safety
+/// `obj` must be a valid `asdf_ndarray_t`.
+unsafe extern "C" fn ndarray_ext_deinit(obj: *mut c_void) {
+    unsafe { asdf_ndarray_deinit(obj.cast::<asdf_ndarray_t>()) };
+}
+
+/// Build the ndarray extension's registry entry.
+///
+/// Upstream registers both `ndarray-1.1.0` and `ndarray-1.0.0`: the newer
+/// schema adds `float16` and requires one of `source`/`data`, but the same
+/// deserializer reads both.
+pub(crate) fn build_ndarray_extension() -> *mut crate::extension_ffi::asdf_extension_t {
+    use crate::extension_ffi::{
+        asdf_extension_t, asdf_extension_vtab_t, asdf_software_t, libasdf_software,
+    };
+
+    let tags: Vec<*const c_char> = vec![
+        c"tag:stsci.edu:asdf/core/ndarray-1.1.0".as_ptr(),
+        c"tag:stsci.edu:asdf/core/ndarray-1.0.0".as_ptr(),
+        std::ptr::null(),
+    ];
+    let tags = Box::leak(tags.into_boxed_slice());
+
+    let vtab = Box::leak(Box::new(asdf_extension_vtab_t {
+        serialize: Some(ndarray_ext_serialize),
+        deserialize: Some(ndarray_ext_deserialize),
+        copy: Some(ndarray_ext_copy),
+        deinit: Some(ndarray_ext_deinit),
+        _reserved: [None; 4],
+    }));
+
+    Box::leak(Box::new(asdf_extension_t {
+        tags: tags.as_ptr(),
+        software: (&raw const libasdf_software).cast::<asdf_software_t>().cast_mut(),
+        vtab: std::ptr::from_ref(vtab),
+        size: std::mem::size_of::<asdf_ndarray_t>(),
+        userdata: std::ptr::null_mut(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2074,97 +2167,4 @@ mod tests {
         assert!(unsafe { asdf_ndarray_data(null, &mut size) }.is_null());
         assert_eq!(size, 0);
     }
-}
-
-// ---- Registry entry --------------------------------------------------
-//
-// See the matching section in `core_ext.rs`: generic callers reach an
-// extension only through `asdf_extension_get` and
-// `asdf_value_as_extension_type`, so the typed functions above are not
-// enough on their own. This family is written out rather than generated
-// because the ndarray extension's functions are hand-written too.
-
-/// Deserialize through the registry's generic entry point.
-///
-/// # Safety
-/// `value` must be a valid value handle and `out` writable.
-unsafe extern "C" fn ndarray_ext_deserialize(
-    value: *mut crate::file_ffi::AsdfValue,
-    _userdata: *const c_void,
-    out: *mut *mut c_void,
-) -> crate::types::AsdfValueErr {
-    let mut typed: *mut asdf_ndarray_t = std::ptr::null_mut();
-    let err = unsafe { asdf_value_as_ndarray(value, &mut typed) };
-    if err == crate::types::AsdfValueErr::Ok && !out.is_null() {
-        unsafe { *out = typed.cast::<c_void>() };
-    }
-    err
-}
-
-/// Serialize through the registry's generic entry point.
-///
-/// # Safety
-/// `obj` must be a valid `asdf_ndarray_t`.
-unsafe extern "C" fn ndarray_ext_serialize(
-    file: *mut crate::file_ffi::AsdfFile,
-    obj: *const c_void,
-    _userdata: *const c_void,
-) -> *mut crate::file_ffi::AsdfValue {
-    unsafe { asdf_value_of_ndarray(file, obj.cast::<asdf_ndarray_t>()) }
-}
-
-/// Deep-copy through the registry's generic entry point.
-///
-/// # Safety
-/// `src` and `dst` must be valid `asdf_ndarray_t` values.
-unsafe extern "C" fn ndarray_ext_copy(
-    file: *mut crate::file_ffi::AsdfFile,
-    src: *const c_void,
-    dst: *mut c_void,
-) -> bool {
-    unsafe {
-        asdf_ndarray_copy_into(file, src.cast::<asdf_ndarray_t>(), dst.cast::<asdf_ndarray_t>())
-    }
-}
-
-/// De-initialise through the registry's generic entry point.
-///
-/// # Safety
-/// `obj` must be a valid `asdf_ndarray_t`.
-unsafe extern "C" fn ndarray_ext_deinit(obj: *mut c_void) {
-    unsafe { asdf_ndarray_deinit(obj.cast::<asdf_ndarray_t>()) };
-}
-
-/// Build the ndarray extension's registry entry.
-///
-/// Upstream registers both `ndarray-1.1.0` and `ndarray-1.0.0`: the newer
-/// schema adds `float16` and requires one of `source`/`data`, but the same
-/// deserializer reads both.
-pub(crate) fn build_ndarray_extension() -> *mut crate::extension_ffi::asdf_extension_t {
-    use crate::extension_ffi::{
-        asdf_extension_t, asdf_extension_vtab_t, asdf_software_t, libasdf_software,
-    };
-
-    let tags: Vec<*const c_char> = vec![
-        c"tag:stsci.edu:asdf/core/ndarray-1.1.0".as_ptr(),
-        c"tag:stsci.edu:asdf/core/ndarray-1.0.0".as_ptr(),
-        std::ptr::null(),
-    ];
-    let tags = Box::leak(tags.into_boxed_slice());
-
-    let vtab = Box::leak(Box::new(asdf_extension_vtab_t {
-        serialize: Some(ndarray_ext_serialize),
-        deserialize: Some(ndarray_ext_deserialize),
-        copy: Some(ndarray_ext_copy),
-        deinit: Some(ndarray_ext_deinit),
-        _reserved: [None; 4],
-    }));
-
-    Box::leak(Box::new(asdf_extension_t {
-        tags: tags.as_ptr(),
-        software: (&raw const libasdf_software).cast::<asdf_software_t>().cast_mut(),
-        vtab: std::ptr::from_ref(vtab),
-        size: std::mem::size_of::<asdf_ndarray_t>(),
-        userdata: std::ptr::null_mut(),
-    }))
 }
