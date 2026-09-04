@@ -77,16 +77,26 @@ $ ASDF_STANDARD_DIR=/path/to/asdf-standard LIBASDF_DIR=/path/to/libasdf cargo te
 Three independent oracles already exist for this format, and all three are
 wired into the test suite rather than reasoned about:
 
+- **libasdf's own C test suite** — the tests upstream wrote for its own
+  implementation, compiled against the vendored headers and linked against
+  the built `libasdf.so`. **498 of 501 pass**, across eleven of its
+  twenty-one suites; the other ten reach into libasdf's private headers and
+  cannot run against a different implementation by construction. This is the
+  strongest evidence the project can produce, and every suite's pass count is
+  pinned so it cannot drift.
 - **The ASDF Standard's reference corpus** — 105 `.asdf` files paired with the
   YAML they should read as, across seven standard versions. Following the
   corpus README's procedure (inline every array, dereference aliases, compare
-  at the value level), 91 pairs currently match exactly.
-- **libasdf's own fixtures and expected outputs** — including 17 committed
-  `asdf info` captures, which this implementation reproduces byte for byte.
+  at the value level), **all 105 match exactly**.
+- **libasdf's committed command-line captures** — 17 for `asdf info`, 4 for
+  `asdf events` and 3 for `asdf verify-checksums`, all reproduced byte for
+  byte, ANSI styling included.
 - **A C ABI conformance harness** — real C programs compiled against the
   vendored headers and linked against the built library, covering the
   `_Generic` macros, struct layouts, enum discriminants, a third-party
   extension registering before `main`, and the exported symbol namespace.
+  Every symbol the headers declare is checked to exist: 376 of 376, read out
+  of the preprocessed headers rather than a list kept by hand.
 - **Differential tests against Python asdf** — files written here are read by
   the reference implementation and vice versa, across every compression
   method, so the two are checked against each other rather than only against
@@ -100,12 +110,24 @@ upstream, each with a test pinning it.
 
 ## Status
 
-The read path and the write path both work end to end. See `CONFORMANCE.md`
-for the ABI baseline and gates.
+Feature-complete against upstream libasdf, and past it in a few places.
 
-Not yet implemented: the remaining core-schema extensions
-(`meta`, `history_entry`, `datatype`, `time`), external array sources
-(exploded form), and the `core/complex` tag.
+- Every symbol upstream's headers declare is exported and implemented.
+- All seven core-schema extensions, and the extension registry third-party
+  extensions register into before `main`.
+- Both the read and the write path, including compression (zlib, bzip2, lz4),
+  block indices, checksums and inline array storage.
+- The `asdf` command-line tool: `info`, `dd`, `events` and
+  `verify-checksums`, with upstream's options and output.
+- Past parity, in `asdf-core` and the idiomatic API rather than the C
+  surface: external array sources (exploded form), the `core/complex` tag,
+  and reading inline array data back out.
+
+Not implemented: schema validation against the ASDF Standard's JSON schemas,
+which upstream libasdf does not do either.
+
+See `CONFORMANCE.md` for the ABI baseline and the gates, and
+`KNOWN-DIVERGENCES.md` for the deliberate differences from upstream.
 
 ## Licence
 
