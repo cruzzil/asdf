@@ -202,6 +202,7 @@ fn public_struct_layouts_match() {
 #include <stdio.h>
 #include <asdf.h>
 #include <asdf/version.h>
+#include <asdf/core/time.h>
 
 #define SHOW(type, field) printf(#type "." #field "=%zu\n", offsetof(type, field))
 #define SHOW_TYPE(type) \
@@ -235,6 +236,22 @@ int main(void) {
     SHOW(asdf_datatype_t, shape);
     SHOW(asdf_datatype_t, nfields);
     SHOW(asdf_datatype_t, fields);
+
+    /* Embeds struct timespec and struct tm, whose layouts are
+       platform-specific -- the most likely of any to differ by target. */
+    SHOW_TYPE(asdf_time_t);
+    SHOW(asdf_time_t, value);
+    SHOW(asdf_time_t, info);
+    SHOW(asdf_time_t, format);
+    SHOW(asdf_time_t, scale);
+    SHOW(asdf_time_t, location);
+    SHOW_TYPE(asdf_time_info_t);
+    SHOW(asdf_time_info_t, ts);
+    SHOW(asdf_time_info_t, tm);
+    SHOW_TYPE(asdf_time_location_t);
+    SHOW(asdf_time_location_t, longitude);
+    SHOW(asdf_time_location_t, latitude);
+    SHOW(asdf_time_location_t, height);
 
     /* Public iterator heads that the implementation casts to and from. */
     SHOW_TYPE(asdf_mapping_iter_t);

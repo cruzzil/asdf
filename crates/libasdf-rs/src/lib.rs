@@ -31,6 +31,7 @@ pub mod extension_ffi;
 pub mod file_ffi;
 pub mod ndarray_ffi;
 pub mod panic;
+pub mod time_ffi;
 pub mod types;
 pub mod value_ffi;
 pub mod version_ffi;

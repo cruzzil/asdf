@@ -15,7 +15,7 @@
 //! the split libasdf's headers call out, because an object may be embedded,
 //! an array element, or static.
 
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, CString, c_char, c_int};
 
 use asdf_core::yaml::{Document, NodeId, Tag};
 
@@ -855,5 +855,459 @@ mod tests {
         unsafe { asdf_software_destroy(std::ptr::null_mut()) };
         unsafe { asdf_library_set(std::ptr::null_mut(), std::ptr::null()) };
         unsafe { asdf_library_set_version(std::ptr::null_mut(), std::ptr::null()) };
+    }
+}
+
+// ---- time/time -------------------------------------------------------
+
+use crate::time_ffi::{
+    TIME_TAG, asdf_time_t, time_copy, time_deinit, time_deserialize, time_serialize,
+};
+
+declare_extension! {
+    name: time,
+    ty: asdf_time_t,
+    tag: TIME_TAG,
+    deserialize: time_deserialize,
+    serialize: time_serialize,
+    deinit: time_deinit,
+    copy: time_copy,
+    is_fn: asdf_is_time,
+    value_is_fn: asdf_value_is_time,
+    value_as_fn: asdf_value_as_time,
+    value_of_fn: asdf_value_of_time,
+    get_fn: asdf_get_time,
+    set_fn: asdf_set_time,
+    copy_fn: asdf_time_copy,
+    copy_into_fn: asdf_time_copy_into,
+    array_copy_fn: asdf_time_array_copy,
+    deinit_fn: asdf_time_deinit,
+    destroy_fn: asdf_time_destroy,
+}
+
+// ---- core/history_entry ----------------------------------------------
+
+/// The tag for `core/history_entry`.
+pub const HISTORY_ENTRY_TAG: &str = "tag:stsci.edu:asdf/core/history_entry-1.0.0";
+
+/// Mirror of `asdf_history_entry_t`.
+#[repr(C)]
+#[derive(Debug)]
+pub struct asdf_history_entry_t {
+    /// What the entry records.
+    pub description: *const c_char,
+    /// When it happened, if the entry says.
+    pub time: *const asdf_time_t,
+    /// A null-terminated array of the software involved.
+    pub software: *mut *const asdf_software_t,
+}
+
+impl asdf_history_entry_t {
+    fn zeroed() -> Self {
+        Self {
+            description: std::ptr::null(),
+            time: std::ptr::null(),
+            software: std::ptr::null_mut(),
+        }
+    }
+}
+
+/// Read a null-terminated software array from a mapping's `software` key.
+///
+/// The schema allows either one object or a sequence of them.
+fn read_software_list(doc: &Document, node: NodeId) -> *mut *const asdf_software_t {
+    let Some(entry) = doc.mapping_get(node, "software") else {
+        return std::ptr::null_mut();
+    };
+
+    let nodes: Vec<NodeId> = match doc.sequence_items(entry) {
+        Some(items) => items.to_vec(),
+        // A single object rather than a list.
+        None => vec![entry],
+    };
+
+    let mut list: Vec<*const asdf_software_t> = Vec::with_capacity(nodes.len() + 1);
+    for item in nodes {
+        let raw = Box::into_raw(Box::new(asdf_software_t::zeroed()));
+        if software_deserialize(doc, item, raw) == AsdfValueErr::Ok {
+            list.push(raw.cast_const());
+        } else {
+            drop(unsafe { Box::from_raw(raw) });
+        }
+    }
+    if list.is_empty() {
+        return std::ptr::null_mut();
+    }
+    list.push(std::ptr::null());
+    list.shrink_to_fit();
+    Box::into_raw(list.into_boxed_slice()).cast::<*const asdf_software_t>()
+}
+
+/// Free a software array produced by [`read_software_list`].
+unsafe fn free_software_list(list: *mut *const asdf_software_t) {
+    if list.is_null() {
+        return;
+    }
+    let mut count = 0isize;
+    while !unsafe { *list.offset(count) }.is_null() {
+        unsafe { asdf_software_destroy((*list.offset(count)).cast_mut()) };
+        count += 1;
+    }
+    // The array itself was a boxed slice, including its null terminator.
+    let slice = std::ptr::slice_from_raw_parts_mut(list, count as usize + 1);
+    drop(unsafe { Box::from_raw(slice) });
+}
+
+fn history_entry_deserialize(
+    doc: &Document,
+    node: NodeId,
+    out: *mut asdf_history_entry_t,
+) -> AsdfValueErr {
+    let description = string_field(doc, node, "description");
+
+    let time = doc
+        .mapping_get(node, "time")
+        .map(|id| {
+            let raw = Box::into_raw(Box::new(asdf_time_t::zeroed()));
+            if time_deserialize(doc, id, raw) == AsdfValueErr::Ok {
+                raw.cast_const()
+            } else {
+                drop(unsafe { Box::from_raw(raw) });
+                std::ptr::null()
+            }
+        })
+        .unwrap_or(std::ptr::null());
+
+    unsafe {
+        (*out).description = description;
+        (*out).time = time;
+        (*out).software = read_software_list(doc, node);
+    }
+    AsdfValueErr::Ok
+}
+
+fn history_entry_serialize(doc: &mut Document, obj: &asdf_history_entry_t) -> Option<NodeId> {
+    let mut pairs = Vec::new();
+
+    if !obj.description.is_null() {
+        let text = unsafe { CStr::from_ptr(obj.description) }.to_string_lossy().into_owned();
+        let key = doc.add_scalar("description");
+        let value = doc.add_scalar_styled(text, asdf_core::yaml::ScalarStyle::SingleQuoted);
+        pairs.push((key, value));
+    }
+    if !obj.time.is_null()
+        && let Some(node) = time_serialize(doc, unsafe { &*obj.time })
+    {
+        doc.node_mut(node).tag = Some(Tag::parse(TIME_TAG));
+        let key = doc.add_scalar("time");
+        pairs.push((key, node));
+    }
+    if !obj.software.is_null() {
+        let mut items = Vec::new();
+        let mut index = 0isize;
+        while !unsafe { *obj.software.offset(index) }.is_null() {
+            let entry = unsafe { *obj.software.offset(index) };
+            if let Some(node) = software_serialize(doc, unsafe { &*entry }) {
+                doc.node_mut(node).tag = Some(Tag::parse(SOFTWARE_TAG));
+                items.push(node);
+            }
+            index += 1;
+        }
+        if !items.is_empty() {
+            let list = doc.add_sequence(items);
+            let key = doc.add_scalar("software");
+            pairs.push((key, list));
+        }
+    }
+
+    (!pairs.is_empty()).then(|| doc.add_mapping(pairs))
+}
+
+unsafe fn history_entry_deinit(obj: *mut asdf_history_entry_t) {
+    let entry = unsafe { &mut *obj };
+    unsafe { free_c_string(entry.description) };
+    if !entry.time.is_null() {
+        unsafe { asdf_time_destroy(entry.time.cast_mut()) };
+    }
+    unsafe { free_software_list(entry.software) };
+    *entry = asdf_history_entry_t::zeroed();
+}
+
+unsafe fn history_entry_copy(src: &asdf_history_entry_t, dst: *mut asdf_history_entry_t) -> bool {
+    let out = unsafe { &mut *dst };
+    out.description = unsafe { clone_c_string(src.description) };
+    out.time = if src.time.is_null() {
+        std::ptr::null()
+    } else {
+        unsafe { asdf_time_copy(std::ptr::null_mut(), src.time) }.cast_const()
+    };
+    out.software = if src.software.is_null() {
+        std::ptr::null_mut()
+    } else {
+        unsafe { asdf_software_array_copy(std::ptr::null_mut(), src.software) }
+            .cast::<*const asdf_software_t>()
+    };
+    true
+}
+
+declare_extension! {
+    name: history_entry,
+    ty: asdf_history_entry_t,
+    tag: HISTORY_ENTRY_TAG,
+    deserialize: history_entry_deserialize,
+    serialize: history_entry_serialize,
+    deinit: history_entry_deinit,
+    copy: history_entry_copy,
+    is_fn: asdf_is_history_entry,
+    value_is_fn: asdf_value_is_history_entry,
+    value_as_fn: asdf_value_as_history_entry,
+    value_of_fn: asdf_value_of_history_entry,
+    get_fn: asdf_get_history_entry,
+    set_fn: asdf_set_history_entry,
+    copy_fn: asdf_history_entry_copy,
+    copy_into_fn: asdf_history_entry_copy_into,
+    array_copy_fn: asdf_history_entry_array_copy,
+    deinit_fn: asdf_history_entry_deinit,
+    destroy_fn: asdf_history_entry_destroy,
+}
+
+/// Append a history entry to the file.
+///
+/// # Safety
+/// `file` must be a file handle open for writing and `description` a valid
+/// NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_history_entry_add(
+    file: *mut AsdfFile,
+    description: *const c_char,
+) -> c_int {
+    guard("asdf_history_entry_add", -1, || {
+        if file.is_null() || description.is_null() {
+            return -1;
+        }
+        let entry = asdf_history_entry_t {
+            description,
+            time: std::ptr::null(),
+            software: std::ptr::null_mut(),
+        };
+        let value = unsafe { asdf_value_of_history_entry(file, &entry) };
+        if value.is_null() {
+            return -1;
+        }
+
+        // Entries accumulate under history/entries, which is created on the
+        // first call.
+        let handle = unsafe { &mut *file };
+        let Some(node) = crate::file_ffi::value_node(value) else {
+            unsafe { crate::file_ffi::asdf_value_destroy(value) };
+            return -1;
+        };
+        let Some(doc) = handle.document_for_values() else {
+            unsafe { crate::file_ffi::asdf_value_destroy(value) };
+            return -1;
+        };
+
+        let existing = doc.lookup_str("history/entries");
+        let list = match existing {
+            Some(list) if doc.resolved(list).is_sequence() => doc.resolve(list),
+            _ => {
+                let fresh = doc.add(asdf_core::yaml::Node::sequence());
+                if doc.insert_at_str("history/entries", fresh).is_err() {
+                    unsafe { crate::file_ffi::asdf_value_destroy(value) };
+                    return -1;
+                }
+                fresh
+            }
+        };
+        if let asdf_core::yaml::NodeData::Sequence { items, .. } = &mut doc.node_mut(list).data {
+            items.push(node);
+        }
+
+        unsafe { crate::file_ffi::asdf_value_destroy(value) };
+        0
+    })
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use crate::file_ffi::{asdf_close, asdf_open_mem_ex, asdf_write_to_mem};
+    use crate::time_ffi::asdf_time_t;
+
+    struct Handle(*mut AsdfFile);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            unsafe { asdf_close(self.0) };
+        }
+    }
+
+    fn open(tree: &str) -> Handle {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n");
+        buf.extend_from_slice(b"%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
+        buf.extend_from_slice(tree.as_bytes());
+        buf.extend_from_slice(b"...\n");
+        let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), std::ptr::null_mut()) };
+        assert!(!f.is_null());
+        Handle(f)
+    }
+
+    #[test]
+    fn reads_a_history_entry() {
+        let h = open(
+            "entry: !core/history_entry-1.0.0\n  \
+             description: 'reprocessed with a new flat'\n  \
+             time: !time/time-1.4.0 '2026-09-04T12:00:00'\n  \
+             software:\n  - !core/software-1.0.0 {name: mypipeline, version: 1.2.3}\n",
+        );
+
+        let path = c"entry";
+        assert!(unsafe { asdf_is_history_entry(h.0, path.as_ptr()) });
+
+        let mut entry: *mut asdf_history_entry_t = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { asdf_get_history_entry(h.0, path.as_ptr(), &mut entry) },
+            AsdfValueErr::Ok
+        );
+        let view = unsafe { &*entry };
+        assert_eq!(
+            unsafe { CStr::from_ptr(view.description) }.to_str().unwrap(),
+            "reprocessed with a new flat"
+        );
+
+        // The nested time, decoded.
+        assert!(!view.time.is_null());
+        let time = unsafe { &*view.time };
+        assert_eq!(time.info.tm.tm_year, 2026 - 1900);
+        assert_eq!(time.info.tm.tm_mday, 4);
+
+        // The software list, null-terminated.
+        assert!(!view.software.is_null());
+        let first = unsafe { *view.software };
+        assert!(!first.is_null());
+        assert_eq!(unsafe { CStr::from_ptr((*first).name) }.to_str().unwrap(), "mypipeline");
+        assert!(unsafe { *view.software.offset(1) }.is_null(), "list must be terminated");
+
+        unsafe { asdf_history_entry_destroy(entry) };
+    }
+
+    #[test]
+    fn a_single_software_object_is_accepted() {
+        // The schema allows one object where a list would also do.
+        let h = open(
+            "entry: !core/history_entry-1.0.0\n  description: 'x'\n  \
+             software: !core/software-1.0.0 {name: solo, version: 0.1.0}\n",
+        );
+        let mut entry: *mut asdf_history_entry_t = std::ptr::null_mut();
+        unsafe { asdf_get_history_entry(h.0, c"entry".as_ptr(), &mut entry) };
+        let view = unsafe { &*entry };
+        assert!(!view.software.is_null());
+        let first = unsafe { *view.software };
+        assert_eq!(unsafe { CStr::from_ptr((*first).name) }.to_str().unwrap(), "solo");
+        unsafe { asdf_history_entry_destroy(entry) };
+    }
+
+    #[test]
+    fn history_entries_can_be_added_and_read_back() {
+        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let h = Handle(f);
+
+        assert_eq!(unsafe { asdf_history_entry_add(h.0, c"first change".as_ptr()) }, 0);
+        assert_eq!(unsafe { asdf_history_entry_add(h.0, c"second change".as_ptr()) }, 0);
+
+        let mut buf: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut size = 0usize;
+        assert_eq!(unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) }, 0);
+
+        let reopened = unsafe { asdf_open_mem_ex(buf, size, std::ptr::null_mut()) };
+        let r = Handle(reopened);
+
+        // Both entries must be there, in order.
+        for (index, expected) in [(0, "first change"), (1, "second change")] {
+            let path = CString::new(format!("history/entries/{index}")).unwrap();
+            let mut entry: *mut asdf_history_entry_t = std::ptr::null_mut();
+            assert_eq!(
+                unsafe { asdf_get_history_entry(r.0, path.as_ptr(), &mut entry) },
+                AsdfValueErr::Ok,
+                "entry {index}"
+            );
+            assert_eq!(unsafe { CStr::from_ptr((*entry).description) }.to_str().unwrap(), expected);
+            unsafe { asdf_history_entry_destroy(entry) };
+        }
+
+        unsafe { libc::free(buf) };
+    }
+
+    #[test]
+    fn a_history_entry_round_trips_through_a_written_file() {
+        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let h = Handle(f);
+
+        let value = CString::new("2026-09-04T12:00:00").unwrap();
+        let time = asdf_time_t { value: value.as_ptr().cast_mut(), ..asdf_time_t::zeroed() };
+        let entry = asdf_history_entry_t {
+            description: c"a described change".as_ptr(),
+            time: &time,
+            software: std::ptr::null_mut(),
+        };
+
+        assert_eq!(
+            unsafe { asdf_set_history_entry(h.0, c"note".as_ptr(), &entry) },
+            AsdfValueErr::Ok
+        );
+
+        let mut buf: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut size = 0usize;
+        unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) };
+        let reopened = unsafe { asdf_open_mem_ex(buf, size, std::ptr::null_mut()) };
+        let r = Handle(reopened);
+
+        let mut read_back: *mut asdf_history_entry_t = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { asdf_get_history_entry(r.0, c"note".as_ptr(), &mut read_back) },
+            AsdfValueErr::Ok
+        );
+        let view = unsafe { &*read_back };
+        assert_eq!(
+            unsafe { CStr::from_ptr(view.description) }.to_str().unwrap(),
+            "a described change"
+        );
+        assert!(!view.time.is_null(), "the nested time must survive");
+
+        unsafe { asdf_history_entry_destroy(read_back) };
+        unsafe { libc::free(buf) };
+    }
+
+    #[test]
+    fn a_time_value_round_trips() {
+        let h = open("t: !time/time-1.4.0 '2026-09-04T12:34:56'\n");
+        assert!(unsafe { asdf_is_time(h.0, c"t".as_ptr()) });
+
+        let mut time: *mut asdf_time_t = std::ptr::null_mut();
+        assert_eq!(unsafe { asdf_get_time(h.0, c"t".as_ptr(), &mut time) }, AsdfValueErr::Ok);
+        let view = unsafe { &*time };
+        assert_eq!(unsafe { CStr::from_ptr(view.value) }.to_str().unwrap(), "2026-09-04T12:34:56");
+        assert_eq!(view.info.tm.tm_hour, 12);
+
+        // The copy must be independent of the original.
+        let copy = unsafe { asdf_time_copy(h.0, time) };
+        assert!(!copy.is_null());
+        unsafe { asdf_time_destroy(time) };
+        assert_eq!(
+            unsafe { CStr::from_ptr((*copy).value) }.to_str().unwrap(),
+            "2026-09-04T12:34:56"
+        );
+        unsafe { asdf_time_destroy(copy) };
+    }
+
+    #[test]
+    fn deinit_is_safe_on_zeroed_objects() {
+        let mut entry = asdf_history_entry_t::zeroed();
+        unsafe { asdf_history_entry_deinit(&mut entry) };
+        unsafe { asdf_history_entry_deinit(&mut entry) };
+
+        let mut time = asdf_time_t::zeroed();
+        unsafe { asdf_time_deinit(&mut time) };
+        unsafe { asdf_time_deinit(std::ptr::null_mut()) };
     }
 }
