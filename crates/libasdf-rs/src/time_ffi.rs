@@ -7,7 +7,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_int};
 
-use asdf_core::core::time::{Civil, Time, TimeFormat, TimeScale};
+use asdf_core::core::time::{Civil, Time, TimeFormat, TimeScale, infer_format};
 use asdf_core::yaml::{Document, NodeId};
 
 use crate::panic::guard;
@@ -244,7 +244,13 @@ pub(crate) fn time_deserialize(
     // The shorthand: the whole tagged value is the time string.
     let resolved = doc.resolved(node);
     let (value, format, scale, location) = if let Some(text) = resolved.as_str() {
-        (text.to_string(), TimeFormat::Iso, TimeScale::Utc, asdf_time_location_t::default())
+        // With no `format` key there is nothing to say what this is, so the
+        // format is read off the value's shape. A value matching none of the
+        // schema's string forms is not a time.
+        let Some(format) = infer_format(text) else {
+            return AsdfValueErr::ParseFailure;
+        };
+        (text.to_string(), format, TimeScale::Utc, asdf_time_location_t::default())
     } else if resolved.is_mapping() {
         let Some(value) = doc
             .mapping_get(node, "value")
@@ -263,7 +269,15 @@ pub(crate) fn time_deserialize(
             .mapping_get(node, "base_format")
             .and_then(|id| doc.resolved(id).as_str())
             .and_then(TimeFormat::from_name);
-        let format = base.or(wire).unwrap_or(TimeFormat::Iso);
+        // As for the bare form, a mapping with no `format` has its format
+        // inferred rather than assumed to be ISO.
+        let format = match base.or(wire) {
+            Some(format) => format,
+            None => match infer_format(&value) {
+                Some(format) => format,
+                None => return AsdfValueErr::ParseFailure,
+            },
+        };
 
         let scale = doc
             .mapping_get(node, "scale")
@@ -316,39 +330,87 @@ pub(crate) fn time_serialize(doc: &mut Document, obj: &asdf_time_t) -> Option<No
     let value = unsafe { CStr::from_ptr(obj.value) }.to_string_lossy().into_owned();
     let format = format_from_abi(obj.format);
     let scale = TimeScale::from_i32(obj.scale);
+    // A reserved slot has no name and cannot be written.
+    format.name()?;
 
-    // A plain UTC ISO time is written as a bare string, which is the
-    // shorthand the schema allows and what other writers produce.
-    if format == TimeFormat::Iso && scale == TimeScale::Utc {
-        return Some(doc.add_scalar_styled(value, asdf_core::yaml::ScalarStyle::SingleQuoted));
-    }
+    // A `J`- or `B`-prefixed string stored under `jyear`/`byear` is really
+    // the `*_str` "other" form -- astropy accepts only the prefixed strings
+    // under those -- so relabel it and let the "other" handling below place
+    // it in `base_format`.
+    let effective = match (format, value.chars().next()) {
+        (TimeFormat::Jyear, Some('J' | 'j')) => TimeFormat::JyearStr,
+        (TimeFormat::Byear, Some('B' | 'b')) => TimeFormat::ByearStr,
+        _ => format,
+    };
+
+    // A numeric "other" format has no string wire form of its own, so its
+    // value is rewritten as an ISO date-time from the parsed instant. A value
+    // that is already a date-time string -- a `plot_date` just read back from
+    // this very form -- is written verbatim.
+    let value = if needs_reformat(effective) && infer_format(&value).is_none() {
+        let mut parsed = Time::new(value.clone(), format, scale);
+        let civil = parsed.compute_civil().ok()?;
+        format_isot(&civil)
+    } else {
+        value
+    };
 
     let mut pairs = Vec::new();
-    let key = doc.add_scalar("value");
-    let node = doc.add_scalar_styled(value, asdf_core::yaml::ScalarStyle::SingleQuoted);
-    pairs.push((key, node));
+    let mut put = |doc: &mut Document, key: &str, text: String| {
+        let k = doc.add_scalar(key);
+        let v = doc.add_scalar_styled(text, asdf_core::yaml::ScalarStyle::SingleQuoted);
+        pairs.push((k, v));
+    };
+    put(doc, "value", value);
 
-    // The schema only permits standard formats in `format`; anything else
-    // goes in `base_format` with a standard stand-in.
-    let (wire, base) = Time::new("", format, scale).wire_formats();
-    if let Some(name) = wire.name() {
-        let key = doc.add_scalar("format");
-        let node = doc.add_scalar(name);
-        pairs.push((key, node));
-    }
-    if let Some(base) = base
-        && let Some(name) = base.name()
-    {
-        let key = doc.add_scalar("base_format");
-        let node = doc.add_scalar(name);
-        pairs.push((key, node));
-    }
+    // The schema permits only standard formats in `format`; an "other"
+    // effective format goes in `base_format` with `format` left out, and its
+    // standard wire form is re-inferred from the value on read.
+    let name = effective.name()?.to_string();
+    put(doc, if effective.is_other() { "base_format" } else { "format" }, name);
+
     if scale != TimeScale::Utc {
-        let key = doc.add_scalar("scale");
-        let node = doc.add_scalar(scale.name());
-        pairs.push((key, node));
+        put(doc, "scale", scale.name().to_string());
+    }
+    if obj.location.longitude != 0.0 || obj.location.latitude != 0.0 || obj.location.height != 0.0 {
+        let mut location = Vec::new();
+        for (key, number) in [
+            ("longitude", obj.location.longitude),
+            ("latitude", obj.location.latitude),
+            ("height", obj.location.height),
+        ] {
+            let k = doc.add_scalar(key);
+            let v = doc.add_scalar(asdf_core::core::elements::format_float(number));
+            location.push((k, v));
+        }
+        let node = doc.add_mapping(location);
+        let k = doc.add_scalar("location");
+        pairs.push((k, node));
     }
     Some(doc.add_mapping(pairs))
+}
+
+/// Whether a format's value must be rewritten as a date-time string.
+///
+/// Only `plot_date` has a numeric scalar form of its own; `ymdhms` and
+/// `datetime64` are always stored as ISO strings, and a bare-integer
+/// `datetime64` is unit-ambiguous, so neither is reformatted.
+fn needs_reformat(format: TimeFormat) -> bool {
+    format == TimeFormat::PlotDate
+}
+
+/// Render an instant as an `isot` string, trailing zeros trimmed.
+fn format_isot(civil: &Civil) -> String {
+    let mut out = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        civil.year, civil.month, civil.day, civil.hour, civil.minute, civil.second
+    );
+    if civil.nanosecond > 0 {
+        let fraction = format!("{:09}", civil.nanosecond);
+        out.push('.');
+        out.push_str(fraction.trim_end_matches('0'));
+    }
+    out
 }
 
 pub(crate) unsafe fn time_deinit(obj: *mut asdf_time_t) {
@@ -445,14 +507,23 @@ mod tests {
         assert_eq!(time.info.ts.tv_sec, 0);
     }
 
+    /// Upstream always writes the mapping form, even for a plain UTC ISO
+    /// time. Writing the bare-string shorthand instead would be terser but
+    /// would not be what a libasdf-written file looks like.
     #[test]
-    fn serializes_a_plain_utc_iso_time_as_a_string() {
+    fn serializes_a_plain_utc_iso_time_as_a_mapping() {
         let mut doc = Document::new_asdf();
         let value = CString::new("2026-09-04T12:00:00").unwrap();
         let time = asdf_time_t { value: value.as_ptr().cast_mut(), ..asdf_time_t::zeroed() };
         let node = time_serialize(&mut doc, &time).unwrap();
-        assert_eq!(doc.node(node).as_str(), Some("2026-09-04T12:00:00"));
-        assert!(doc.node(node).is_scalar(), "the shorthand is a bare string");
+
+        assert!(doc.node(node).is_mapping());
+        let written = doc.mapping_get(node, "value").unwrap();
+        assert_eq!(doc.node(written).as_str(), Some("2026-09-04T12:00:00"));
+        let format = doc.mapping_get(node, "format").unwrap();
+        assert_eq!(doc.node(format).as_str(), Some("iso"));
+        assert!(doc.mapping_get(node, "scale").is_none(), "UTC is the default");
+        assert!(doc.mapping_get(node, "location").is_none(), "no location was set");
     }
 
     #[test]
@@ -466,11 +537,80 @@ mod tests {
         };
         let node = time_serialize(&mut doc, &time).unwrap();
 
+        // An "other" format is written in `base_format` *instead of*
+        // `format`, not alongside it: the schema's `format` enum does not
+        // contain it, and a reader re-infers the wire form from the value.
         assert!(doc.node(node).is_mapping());
-        let format = doc.mapping_get(node, "format").unwrap();
-        assert_eq!(doc.node(format).as_str(), Some("iso"), "the wire format is standard");
+        assert!(doc.mapping_get(node, "format").is_none(), "`format` is omitted entirely");
         let base = doc.mapping_get(node, "base_format").unwrap();
         assert_eq!(doc.node(base).as_str(), Some("isot"), "the real format goes here");
+    }
+
+    /// A `J`- or `B`-prefixed string under `jyear`/`byear` is really the
+    /// `*_str` form, and is relabelled so it round-trips as one.
+    #[test]
+    fn prefixed_epoch_year_strings_become_their_str_forms() {
+        for (text, format, expected) in [
+            ("J2000.0", TimeFormat::Jyear, "jyear_str"),
+            ("B1950.0", TimeFormat::Byear, "byear_str"),
+        ] {
+            let mut doc = Document::new_asdf();
+            let value = CString::new(text).unwrap();
+            let time = asdf_time_t {
+                value: value.as_ptr().cast_mut(),
+                format: format as c_int,
+                ..asdf_time_t::zeroed()
+            };
+            let node = time_serialize(&mut doc, &time).unwrap();
+            assert!(doc.mapping_get(node, "format").is_none(), "{text}");
+            let base = doc.mapping_get(node, "base_format").unwrap();
+            assert_eq!(doc.node(base).as_str(), Some(expected), "{text}");
+        }
+
+        // A numeric jyear keeps the standard format.
+        let mut doc = Document::new_asdf();
+        let value = CString::new("2000.0").unwrap();
+        let time = asdf_time_t {
+            value: value.as_ptr().cast_mut(),
+            format: TimeFormat::Jyear as c_int,
+            ..asdf_time_t::zeroed()
+        };
+        let node = time_serialize(&mut doc, &time).unwrap();
+        let format = doc.mapping_get(node, "format").unwrap();
+        assert_eq!(doc.node(format).as_str(), Some("jyear"));
+    }
+
+    /// `plot_date` has a numeric value with no string wire form, so it is
+    /// rewritten as an ISO date-time from the instant it names.
+    #[test]
+    fn a_numeric_other_format_is_rewritten_as_a_date_time() {
+        let mut doc = Document::new_asdf();
+        // Matplotlib day 1 is 0001-01-01 in its own reckoning.
+        let value = CString::new("739903.5").unwrap();
+        let time = asdf_time_t {
+            value: value.as_ptr().cast_mut(),
+            format: TimeFormat::PlotDate as c_int,
+            ..asdf_time_t::zeroed()
+        };
+        let node = time_serialize(&mut doc, &time).unwrap();
+
+        let written = doc.mapping_get(node, "value").unwrap();
+        let text = doc.node(written).as_str().unwrap();
+        assert!(text.contains('T'), "a numeric plot_date becomes a date-time: {text}");
+        let base = doc.mapping_get(node, "base_format").unwrap();
+        assert_eq!(doc.node(base).as_str(), Some("plot_date"));
+
+        // A value that is already a date-time string is written verbatim.
+        let mut doc = Document::new_asdf();
+        let value = CString::new("2025-10-14T13:26:41").unwrap();
+        let time = asdf_time_t {
+            value: value.as_ptr().cast_mut(),
+            format: TimeFormat::PlotDate as c_int,
+            ..asdf_time_t::zeroed()
+        };
+        let node = time_serialize(&mut doc, &time).unwrap();
+        let written = doc.mapping_get(node, "value").unwrap();
+        assert_eq!(doc.node(written).as_str(), Some("2025-10-14T13:26:41"));
     }
 
     #[test]

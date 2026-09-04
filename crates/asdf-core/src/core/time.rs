@@ -560,6 +560,128 @@ fn civil_from_unix_seconds(unix_seconds: i64, nanosecond: u32) -> Civil {
     })
 }
 
+/// Guess a time's format from the shape of its value string.
+///
+/// A `time/time` value need not say what format it is in, and the schema's
+/// string forms are distinguishable, so the format is read off the value.
+/// libasdf does this with five regexes tried in a fixed order; the order is
+/// what makes an ordinary four-digit year ISO rather than FITS, since the
+/// FITS pattern also admits one.
+///
+/// Returns `None` when the value matches none of them, which is an error at
+/// the call site rather than a silent fall back to ISO.
+pub fn infer_format(value: &str) -> Option<TimeFormat> {
+    // Each pattern anchors at the start and may leave a tail, as libasdf's
+    // do.
+    if matches_iso_shape(value, false) {
+        return Some(TimeFormat::Iso);
+    }
+    if let Some(rest) = value.strip_prefix('B')
+        && matches_year_shape(rest)
+    {
+        return Some(TimeFormat::Byear);
+    }
+    if let Some(rest) = value.strip_prefix('J')
+        && matches_year_shape(rest)
+    {
+        return Some(TimeFormat::Jyear);
+    }
+    if matches_yday_shape(value) {
+        return Some(TimeFormat::Yday);
+    }
+    // Reached only for the signed five-digit "long year", since the plain
+    // four-digit form was already claimed by ISO above.
+    if matches_iso_shape(value, true) {
+        return Some(TimeFormat::Fits);
+    }
+    None
+}
+
+/// `\d{4}-\d\d-\d\d([T ]\d\d:\d\d:\d\d(.\d+)?)?`, optionally
+/// allowing FITS's signed five-digit year.
+fn matches_iso_shape(value: &str, long_year: bool) -> bool {
+    let bytes = value.as_bytes();
+    let digits = |at: usize, count: usize| -> bool {
+        bytes.len() >= at + count && bytes[at..at + count].iter().all(u8::is_ascii_digit)
+    };
+
+    let mut at = if long_year {
+        // Only the signed five-digit branch: the four-digit one is ISO's.
+        if !matches!(bytes.first(), Some(b'+' | b'-')) || !digits(1, 5) {
+            return false;
+        }
+        6
+    } else {
+        if !digits(0, 4) {
+            return false;
+        }
+        4
+    };
+
+    for _ in 0..2 {
+        if bytes.get(at) != Some(&b'-') || !digits(at + 1, 2) {
+            return false;
+        }
+        at += 3;
+    }
+
+    // The time of day is optional; anything else trailing is ignored, as
+    // these are prefix matches.
+    if !matches!(bytes.get(at), Some(b'T' | b' ')) {
+        return true;
+    }
+    at += 1;
+    if !digits(at, 2) {
+        return false;
+    }
+    at += 2;
+    for _ in 0..2 {
+        if bytes.get(at) != Some(&b':') || !digits(at + 1, 2) {
+            return false;
+        }
+        at += 3;
+    }
+    true
+}
+
+/// `\d+(.\d+)?`, the tail of a `B`/`J` epoch-year value.
+fn matches_year_shape(value: &str) -> bool {
+    let mut chars = value.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    true
+}
+
+/// `\d{4}:\d{3}:\d\d:\d\d:\d\d(.\d+)?`.
+fn matches_yday_shape(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let digits = |at: usize, count: usize| -> bool {
+        bytes.len() >= at + count && bytes[at..at + count].iter().all(u8::is_ascii_digit)
+    };
+
+    if !digits(0, 4) || bytes.get(4) != Some(&b':') {
+        return false;
+    }
+    if !digits(5, 3) || bytes.get(8) != Some(&b':') {
+        return false;
+    }
+    let mut at = 9;
+    for step in 0..3 {
+        if !digits(at, 2) {
+            return false;
+        }
+        at += 2;
+        if step < 2 {
+            if bytes.get(at) != Some(&b':') {
+                return false;
+            }
+            at += 1;
+        }
+    }
+    true
+}
+
 /// Parse a `YYYY:DDD:HH:MM:SS` day-of-year time.
 fn parse_yday(text: &str) -> Option<Civil> {
     let mut parts = text.trim().split(':');
@@ -857,6 +979,31 @@ mod tests {
 
         let mut t = Time::new(text, TimeFormat::Iso, TimeScale::Utc);
         assert_eq!(t.compute_civil().unwrap().unix_seconds, 1_753_271_775);
+    }
+
+    /// The shapes libasdf's five auto-detect patterns match, in its order.
+    #[test]
+    fn formats_are_inferred_from_the_value_string() {
+        use TimeFormat as F;
+        let cases = [
+            ("2025-10-14T13:26:41.0000", Some(F::Iso)),
+            ("2025-10-14 13:26:41", Some(F::Iso)),
+            ("2025-10-14", Some(F::Iso)),
+            ("B2025.78707178", Some(F::Byear)),
+            ("J2025.78707178", Some(F::Jyear)),
+            ("2025:287:13:26:41.0000", Some(F::Yday)),
+            // The signed five-digit "long year" is the only thing that
+            // reaches the FITS pattern; a four-digit year is ISO first.
+            ("+12025-10-14T13:26:41.0000", Some(F::Fits)),
+            ("-12025-10-14T13:26:41.0000", Some(F::Fits)),
+            ("not a time at all", None),
+            ("2025-13", None),
+            ("B", None),
+            ("2025:287", None),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(infer_format(text), expected, "{text}");
+        }
     }
 
     #[test]
