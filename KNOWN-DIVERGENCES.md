@@ -113,3 +113,51 @@ violation of that reservation. Nothing in the public headers references them.
 Covered by `abi::every_declared_export_is_defined`, which checks the other
 direction -- every symbol the vendored headers declare is defined -- and by
 `abi::exports_only_the_asdf_namespace`.
+
+## External array sources are read by the engine, not by the C ABI
+
+An `ndarray`'s `source` may be a string naming another file rather than a
+block index; that is how the standard's *exploded* form stores data. Upstream
+libasdf does not read them. `src/core/ndarray.c` asks for `source` as a
+`uint64` and, on a type mismatch, logs
+
+> currently only internal binary block sources are supported; ndarray at %s
+> has an unsupported source and will not be read
+
+and hands back nothing.
+
+**What we do.** `asdf_core` resolves them, so the idiomatic API and the CLI
+read exploded files; `libasdf-rs` deliberately does not, so a C caller sees
+what upstream's would. This is the split the project is built around: missing
+functionality goes in the engine, and the C surface stays at parity.
+
+Resolution is deliberately narrow. The URI must be a relative path with no
+`..` component and no scheme, so a tree can only name files beneath its own
+directory -- a tree is untrusted input, and following an arbitrary path out of
+it would let a crafted file name anything on the machine. A file read from
+memory has no directory to resolve against and resolves nothing.
+
+Covered by `reader::tests::external_source_uris_may_not_escape_the_directory`,
+`reader::tests::an_external_source_is_read_from_the_neighbouring_file` and
+`reference_pairs::inlined_reference_trees_equal_their_expected_yaml`, which
+now covers `exploded.asdf`.
+
+## Complex numbers are spelled the way CPython spells them
+
+The `core/complex-1.0.0` schema accepts a family of spellings and pins none of
+them. Every complex value in the reference corpus was written by Python asdf,
+so the canonical text is CPython's `complex.__repr__`: `0j`, `(-0+0j)`,
+`(nan-infj)`, `-1.7976931348623157e+308j`. Note what that is *not* -- it is
+not `(0.0+0.0j)`, because CPython formats the parts without forcing a decimal
+point, and it is not `1.7976931348623157e308`, because the exponent carries a
+sign and at least two digits.
+
+`asdf_core::core::pyrepr` reproduces it, including the shortest-round-trip
+digits and the switch to exponent notation when the decimal point would fall
+outside `-4 < decpt <= 16`. Upstream libasdf has no complex support at all, so
+there is nothing to be at parity with; matching Python is what makes the
+corpus compare equal.
+
+Covered by `pyrepr::tests` and, against the interpreter itself rather than
+written-down expectations, by
+`differential::float_and_complex_spellings_match_python`.

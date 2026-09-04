@@ -1,7 +1,7 @@
 //! Reading an ASDF file: its tree, and the data in its binary blocks.
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use asdf_yaml::{Document, parse_document};
 
@@ -60,11 +60,56 @@ impl ChecksumStatus {
     }
 }
 
+/// The relative path an external `source` URI names, if it names a safe one.
+///
+/// Rejects anything that could escape the referring file's directory: an
+/// absolute path, a `..` component, a Windows drive or UNC prefix, or a URI
+/// with a scheme or authority. `file:` is not special-cased -- a relative
+/// path is the only form the reference corpus uses and the only one worth
+/// the risk.
+fn external_relative_path(uri: &str) -> Result<PathBuf> {
+    if uri.is_empty() {
+        return Err(err!(InvalidArgument, "external source is an empty URI"));
+    }
+    if uri.contains("://") || uri.starts_with('/') || uri.starts_with('\\') {
+        return Err(err!(
+            InvalidArgument,
+            "external source {uri:?} is not a relative path; only files beside the \
+             referring one can be resolved"
+        ));
+    }
+
+    // Percent-decoding is deliberately not done: a URI needing it is not one
+    // the corpus produces, and decoding would reopen the escape it rejects.
+    let path = Path::new(uri);
+    for component in path.components() {
+        use std::path::Component;
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(err!(
+                    InvalidArgument,
+                    "external source {uri:?} climbs out of the referring file's directory"
+                ));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(err!(InvalidArgument, "external source {uri:?} is not relative"));
+            }
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
 /// An open ASDF file.
 #[derive(Debug)]
 pub struct Reader {
     source: Source,
     layout: Layout,
+    /// Where the file came from, when it came from disk.
+    ///
+    /// Kept so that an array whose `source` names another file -- exploded
+    /// form -- can be resolved relative to this one, as the standard says.
+    path: Option<PathBuf>,
 }
 
 impl Reader {
@@ -86,13 +131,18 @@ impl Reader {
         #[allow(unsafe_code)]
         let mapped = unsafe { memmap2::Mmap::map(&file) }?;
         let layout = scan(&mapped)?;
-        Ok(Self { source: Source::Mapped(mapped), layout })
+        Ok(Self { source: Source::Mapped(mapped), layout, path: Some(path.to_path_buf()) })
     }
 
     /// Scan an in-memory file.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
         let layout = scan(&bytes)?;
-        Ok(Self { source: Source::Owned(bytes), layout })
+        Ok(Self { source: Source::Owned(bytes), layout, path: None })
+    }
+
+    /// The path this file was opened from, if it came from disk.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     /// The whole file's bytes.
@@ -302,13 +352,44 @@ impl Reader {
         }
     }
 
+    /// Resolve an external array `source` and read the data it names.
+    ///
+    /// The standard makes `source` a URI relative to the file's own, and
+    /// exploded form writes one array per file with the data in block 0.
+    ///
+    /// Resolution is deliberately narrow. The URI must be a relative path
+    /// with no `..` component and no scheme, so a file can only reach others
+    /// beneath its own directory: a tree is untrusted input, and following an
+    /// arbitrary path out of it would let a crafted file name anything on the
+    /// machine. A file read from memory has no directory to resolve against
+    /// and so resolves nothing.
+    pub fn external_block(&self, uri: &str) -> Result<Vec<u8>> {
+        let Some(base) = self.path.as_deref().and_then(Path::parent) else {
+            return Err(err!(
+                InvalidArgument,
+                "external source {uri:?} cannot be resolved: this file was not read from disk"
+            ));
+        };
+        let relative = external_relative_path(uri)?;
+        let target = base.join(relative);
+
+        let referenced = Reader::open(&target).map_err(|e| {
+            err!(InvalidArgument, "external source {uri:?} ({}): {e}", target.display())
+        })?;
+        if referenced.block_count() == 0 {
+            return Err(err!(InvalidArgument, "external source {uri:?} has no blocks"));
+        }
+        Ok(referenced.block_data(0)?.into_owned())
+    }
+
     /// Parse the tree with every block-backed `core/ndarray` replaced by its
     /// data inline.
     ///
     /// This is the transformation the ASDF Standard's reference corpus asks
-    /// for before comparing a file against its expected YAML. Arrays whose
-    /// data is not in this file -- an external `source`, used by exploded
-    /// form -- are left alone, and named in the returned list.
+    /// for before comparing a file against its expected YAML. An array whose
+    /// data lives in another file -- exploded form's external `source` -- is
+    /// resolved through [`Reader::external_block`], which needs this file to
+    /// have been read from disk.
     ///
     /// Returns the transformed tree and the paths of any arrays that could
     /// not be inlined.
@@ -333,16 +414,27 @@ impl Reader {
                 continue;
             }
 
-            let Some(index) = self.block_index_for(&nd.source) else {
-                skipped.push(format!("{id:?}: data is outside this file ({:?})", nd.source));
-                continue;
-            };
-
-            let data = match self.block_data(index) {
-                Ok(d) => d,
-                Err(e) => {
-                    skipped.push(format!("{id:?}: block {index}: {e}"));
+            // An external source names another file; its first block holds
+            // the data, which is how exploded form is written.
+            let data = if let crate::core::ndarray::Source::External(uri) = &nd.source {
+                match self.external_block(uri) {
+                    Ok(bytes) => Cow::Owned(bytes),
+                    Err(e) => {
+                        skipped.push(format!("{id:?}: {e}"));
+                        continue;
+                    }
+                }
+            } else {
+                let Some(index) = self.block_index_for(&nd.source) else {
+                    skipped.push(format!("{id:?}: data is outside this file ({:?})", nd.source));
                     continue;
+                };
+                match self.block_data(index) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        skipped.push(format!("{id:?}: block {index}: {e}"));
+                        continue;
+                    }
                 }
             };
 
@@ -394,6 +486,105 @@ mod tests {
         buf.extend_from_slice(&stored);
         buf.extend_from_slice(&write_block_index(&[offset]));
         buf
+    }
+
+    #[test]
+    fn external_source_uris_may_not_escape_the_directory() {
+        // The only shape the standard's exploded form uses.
+        assert!(external_relative_path("exploded0000.asdf").is_ok());
+        assert!(external_relative_path("data/block0.asdf").is_ok());
+        assert!(external_relative_path("./here.asdf").is_ok());
+
+        // Everything that could reach outside the referring file's tree.
+        for bad in [
+            "",
+            "/etc/passwd",
+            "../secrets.asdf",
+            "data/../../secrets.asdf",
+            "file:///etc/passwd",
+            "https://example.invalid/x.asdf",
+        ] {
+            assert!(
+                external_relative_path(bad).is_err(),
+                "{bad:?} should be rejected as an external source"
+            );
+        }
+    }
+
+    #[test]
+    fn a_memory_backed_file_resolves_no_external_sources() {
+        let file = build(b"whatever", Compression::None, None);
+        let r = Reader::from_bytes(file);
+        let r = r.unwrap();
+        assert!(r.path().is_none());
+        // There is no directory to resolve against, so this must fail rather
+        // than guess at the working directory.
+        assert!(r.external_block("other.asdf").is_err());
+    }
+
+    #[test]
+    fn an_external_source_is_read_from_the_neighbouring_file() {
+        let dir = std::env::temp_dir().join(format!("asdf-exploded-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The data file: one block holding four little-endian int32s.
+        let payload: Vec<u8> = [1i32, 2, 3, 4].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let data_file = dir.join("holder0000.asdf");
+        std::fs::write(&data_file, build(&payload, Compression::None, None)).unwrap();
+
+        // The referring file: a tree naming it, and no blocks of its own.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n");
+        buf.extend_from_slice(b"%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
+        buf.extend_from_slice(
+            b"data: !core/ndarray-1.1.0\n  source: holder0000.asdf\n  \
+              datatype: int32\n  byteorder: little\n  shape: [4]\n",
+        );
+        buf.extend_from_slice(b"...\n");
+        let referring = dir.join("holder.asdf");
+        std::fs::write(&referring, buf).unwrap();
+
+        let r = Reader::open(&referring).unwrap();
+        assert_eq!(r.block_count(), 0, "the referring file holds no blocks itself");
+        assert_eq!(r.external_block("holder0000.asdf").unwrap(), payload);
+
+        // And inlining follows the reference through to real values.
+        let (doc, skipped) = r.tree_inlined().unwrap().unwrap();
+        assert!(skipped.is_empty(), "nothing should be left un-inlined: {skipped:?}");
+        let root = doc.root().unwrap();
+        let array = doc.mapping_get(root, "data").unwrap();
+        let values = doc.mapping_get(array, "data").unwrap();
+        let items = doc.sequence_items(values).unwrap();
+        let read: Vec<&str> = items.iter().map(|i| doc.resolved(*i).as_str().unwrap()).collect();
+        assert_eq!(read, ["1", "2", "3", "4"]);
+        // `source` is replaced, as it is for an internal block.
+        assert!(doc.mapping_get(array, "source").is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_missing_external_file_is_reported_not_silently_skipped() {
+        let dir =
+            std::env::temp_dir().join(format!("asdf-exploded-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let referring = dir.join("dangling.asdf");
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n");
+        buf.extend_from_slice(b"%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
+        buf.extend_from_slice(
+            b"data: !core/ndarray-1.1.0\n  source: nowhere0000.asdf\n  \
+              datatype: int32\n  byteorder: little\n  shape: [4]\n",
+        );
+        buf.extend_from_slice(b"...\n");
+        std::fs::write(&referring, buf).unwrap();
+
+        let r = Reader::open(&referring).unwrap();
+        let (_, skipped) = r.tree_inlined().unwrap().unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains("nowhere0000.asdf"), "{skipped:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

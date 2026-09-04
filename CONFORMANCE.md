@@ -71,7 +71,8 @@ skip with a note when one is absent.
   against our headers and linked against our library. This is the highest-value
   gate in the project and its pass count is the real progress metric. It needs
   libasdf's `tests/` directory and its munit submodule.
-- **Differential testing** against the real libasdf and against Python asdf.
-  Blocked on building the C library locally, which needs `libfyaml`, `cmake`,
-  `libbz2`, `liblz4` and `libmd`, plus `git submodule update --init` in the
-  libasdf checkout.
+- **Differential testing against the real libasdf.** Blocked on building the C
+  library locally, which needs `libfyaml`, `cmake`, `libbz2`, `liblz4` and
+  `libmd`, plus `git submodule update --init` in the libasdf checkout.
+  Differential testing against Python asdf *is* wired up, in
+  `crates/asdf-core/tests/differential.rs`.

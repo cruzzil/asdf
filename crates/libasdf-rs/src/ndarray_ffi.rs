@@ -949,6 +949,10 @@ fn ndarray_from_value(value: *mut crate::file_ffi::AsdfValue) -> *mut asdf_ndarr
         let index = match parsed.source {
             Source::Block(index) => Some(index),
             Source::LastBlock => reader.block_count().checked_sub(1),
+            // An external `source` names another file. `asdf_core` resolves
+            // those, but upstream libasdf does not -- it logs a warning and
+            // hands back nothing -- so the C surface does not either. The
+            // idiomatic API is where exploded form is available.
             _ => None,
         };
         block_index = index;

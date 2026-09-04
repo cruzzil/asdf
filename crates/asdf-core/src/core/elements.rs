@@ -208,6 +208,9 @@ pub fn decode_all(nd: &Ndarray, shape: &[u64], bytes: &[u8]) -> Result<Vec<Eleme
     Ok(out)
 }
 
+/// The tag Python asdf puts on every inline complex value.
+const COMPLEX_TAG: &str = "tag:stsci.edu:asdf/core/complex-1.0.0";
+
 /// Format a float the way libasdf's emitter does.
 ///
 /// `%.17g` for doubles, with YAML's own spellings for the non-finite values.
@@ -238,8 +241,12 @@ fn element_to_node(doc: &mut Document, element: &Element) -> NodeId {
         // re-resolved as a number.
         Element::Text(s) => doc.add_scalar_styled(s.clone(), ScalarStyle::SingleQuoted),
         Element::Complex(re, im) => {
-            let sign = if *im < 0.0 || im.is_sign_negative() { "-" } else { "+" };
-            doc.add_scalar(format!("({}{}{}j)", format_float(*re), sign, format_float(im.abs())))
+            // The core/complex schema leaves the spelling open; Python asdf
+            // writes CPython's `repr(complex)` and tags each value, so that
+            // is the canonical form to reproduce.
+            let node = Node::scalar(crate::core::pyrepr::repr_complex(*re, *im))
+                .with_tag(asdf_yaml::Tag::parse(COMPLEX_TAG));
+            doc.add(node)
         }
         Element::Record(fields) => {
             let items: Vec<NodeId> = fields.iter().map(|f| element_to_node(doc, f)).collect();

@@ -548,3 +548,82 @@ mod serde_free {
         Some((key, after.trim().to_string()))
     }
 }
+
+/// Our `repr` for floats and complex numbers must be CPython's, exactly.
+///
+/// The `core/complex` schema leaves the spelling open, so the corpus's
+/// spelling is whatever Python produced. A unit test can only pin the values
+/// someone thought to write down; this asks the interpreter itself, across
+/// the values where the shortest-repr and fixed/exponent rules actually bite.
+#[test]
+fn float_and_complex_spellings_match_python() {
+    use asdf_core::core::pyrepr::{repr_complex, repr_f64};
+
+    let Some(interpreter) = python() else {
+        eprintln!("skipping: no Python with asdf available");
+        return;
+    };
+
+    // Chosen for the boundaries: the fixed/exponent switch at both ends, the
+    // signed zeros, the subnormals, and the extremes.
+    let floats: Vec<f64> = vec![
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        0.5,
+        0.1,
+        1.0 / 3.0,
+        1e-4,
+        1e-5,
+        9.999999999999999e-5,
+        1e15,
+        1e16,
+        1e17,
+        1.2345678901234567e16,
+        f64::MAX,
+        -f64::MAX,
+        f64::MIN_POSITIVE,
+        5e-324,
+        f64::EPSILON,
+        123456789012345678.0,
+        -2.5e-300,
+        6.02214076e23,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+    ];
+
+    // Passed as hex bit patterns so the transfer itself cannot round.
+    let bits: Vec<String> = floats.iter().map(|v| format!("{:016x}", v.to_bits())).collect();
+    let script = format!(
+        r#"
+import struct
+bits = {bits:?}
+for b in bits:
+    v = struct.unpack('>d', bytes.fromhex(b))[0]
+    print(repr(v))
+    print(repr(complex(0.0, v)))
+    print(repr(complex(v, v)))
+    print(repr(complex(-0.0, v)))
+"#
+    );
+    let out = run_python(&interpreter, &script).expect("python repr");
+    let mut lines = out.lines();
+
+    let mut checked = 0;
+    for v in &floats {
+        for (ours, label) in [
+            (repr_f64(*v), "float"),
+            (repr_complex(0.0, *v), "complex(0, v)"),
+            (repr_complex(*v, *v), "complex(v, v)"),
+            (repr_complex(-0.0, *v), "complex(-0, v)"),
+        ] {
+            let theirs = lines.next().expect("a line per value");
+            assert_eq!(ours, theirs, "{label} for {v:?} (bits {:016x})", v.to_bits());
+            checked += 1;
+        }
+    }
+    assert_eq!(lines.next(), None, "python produced more lines than we consumed");
+    eprintln!("{checked} float and complex spellings match CPython exactly");
+}

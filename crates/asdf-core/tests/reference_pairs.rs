@@ -202,17 +202,12 @@ fn inlined_reference_trees_equal_their_expected_yaml() {
     let pairs = reference_pairs(&refs);
     assert!(!pairs.is_empty());
 
-    // Features not yet implemented, with the reason. Each is a real gap, not
-    // a tolerated difference: when the feature lands the entry comes out.
-    let unsupported: &[(&str, &str)] = &[
-        // The array's data lives in another file, which needs external
-        // source resolution.
-        ("exploded.asdf", "external array sources (phase 9)"),
-        // Python tags each inline complex value !core/complex-1.0.0 and
-        // spells it `0j` rather than `(0.0+0.0j)`; both need the complex
-        // extension to reproduce.
-        ("complex.asdf", "the core/complex tag and its spelling (phase 9)"),
-    ];
+    // Features not yet implemented, with the reason. Each would be a real
+    // gap, not a tolerated difference -- and the list is now empty: every
+    // file in the corpus round-trips. Kept so a corpus update that adds a
+    // feature we lack has somewhere to record it rather than being silently
+    // dropped from the comparison.
+    let unsupported: &[(&str, &str)] = &[];
 
     let options = CompareOptions {
         ignore_key_order: true,
