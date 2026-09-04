@@ -184,6 +184,20 @@ pub(crate) fn file_document(file: *mut AsdfFile) -> Option<&'static Document> {
     unsafe { &*file }.document()
 }
 
+/// A file's tree, for mutation, creating it if the file has none yet.
+///
+/// `unsafe { &mut *file }` followed immediately by `document_for_values()`
+/// appeared at a dozen call sites across four modules. Making that judgement
+/// once is the point: the C contract has the file outlive every value taken
+/// from it, which is what licenses handing out a `'static` borrow, and it is
+/// stated here rather than re-asserted at each site.
+pub(crate) fn file_document_mut(file: *mut AsdfFile) -> Option<&'static mut Document> {
+    if file.is_null() {
+        return None;
+    }
+    unsafe { &mut *file }.document_for_values()
+}
+
 /// The document a value belongs to.
 pub(crate) fn value_document(value: *mut AsdfValue) -> Option<&'static Document> {
     let file = value_file(value)?;

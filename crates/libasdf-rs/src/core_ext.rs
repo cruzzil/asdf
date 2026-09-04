@@ -212,8 +212,7 @@ macro_rules! declare_extension {
                 if file.is_null() || obj.is_null() {
                     return std::ptr::null_mut();
                 }
-                let handle = unsafe { &mut *file };
-                let Some(doc) = handle.document_for_values() else {
+                let Some(doc) = $crate::file_ffi::file_document_mut(file) else {
                     return std::ptr::null_mut();
                 };
                 let Some(node) = $serialize(doc, unsafe { &*obj }) else {

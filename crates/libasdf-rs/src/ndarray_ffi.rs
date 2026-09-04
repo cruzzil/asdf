@@ -8,6 +8,7 @@
 //! reproduced field for field, and the trailing `_reserved` pointer is where
 //! this implementation keeps the state it needs.
 
+use crate::file_ffi::file_document_mut;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
 use asdf_core::compression::Compression;
@@ -420,17 +421,24 @@ fn ensure_state<'a>(array: *mut asdf_ndarray_t) -> Option<&'a mut NdarrayState> 
 /// `ndarray` must be null or a valid `asdf_ndarray_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_ndarray_size(ndarray: *const asdf_ndarray_t) -> u64 {
-    guard("asdf_ndarray_size", 0, || {
-        if ndarray.is_null() {
-            return 0;
-        }
-        let array = unsafe { &*ndarray };
-        if array.shape.is_null() || array.ndim == 0 {
-            return 0;
-        }
-        let shape = unsafe { std::slice::from_raw_parts(array.shape, array.ndim as usize) };
-        shape.iter().product()
-    })
+    guard("asdf_ndarray_size", 0, || ndarray_size(ndarray))
+}
+
+/// Safe internal form of [`asdf_ndarray_size`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn ndarray_size(ndarray: *const asdf_ndarray_t) -> u64 {
+    if ndarray.is_null() {
+        return 0;
+    }
+    let array = unsafe { &*ndarray };
+    if array.shape.is_null() || array.ndim == 0 {
+        return 0;
+    }
+    let shape = unsafe { std::slice::from_raw_parts(array.shape, array.ndim as usize) };
+    shape.iter().product()
 }
 
 /// The number of bytes the elements occupy.
@@ -439,13 +447,22 @@ pub unsafe extern "C" fn asdf_ndarray_size(ndarray: *const asdf_ndarray_t) -> u6
 /// `ndarray` must be null or a valid `asdf_ndarray_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_ndarray_nbytes(ndarray: *const asdf_ndarray_t) -> u64 {
-    guard("asdf_ndarray_nbytes", 0, || {
-        if ndarray.is_null() {
-            return 0;
-        }
-        let count = unsafe { asdf_ndarray_size(ndarray) };
-        count * unsafe { asdf_datatype_size(&raw const (*ndarray).datatype as *mut _) }
-    })
+    guard("asdf_ndarray_nbytes", 0, || ndarray_nbytes(ndarray))
+}
+
+/// Safe internal form of [`asdf_ndarray_nbytes`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn ndarray_nbytes(ndarray: *const asdf_ndarray_t) -> u64 {
+    if ndarray.is_null() {
+        return 0;
+    }
+    let count = ndarray_size(ndarray);
+    // Only the field projection needs the unsafe; the size call does not.
+    let datatype = unsafe { &raw const (*ndarray).datatype };
+    count * datatype_size(datatype.cast_mut())
 }
 
 /// The size of one element of a datatype, computing it when left at zero.
@@ -454,22 +471,29 @@ pub unsafe extern "C" fn asdf_ndarray_nbytes(ndarray: *const asdf_ndarray_t) -> 
 /// `datatype` must be null or a valid `asdf_datatype_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_datatype_size(datatype: *mut asdf_datatype_t) -> u64 {
-    guard("asdf_datatype_size", 0, || {
-        if datatype.is_null() {
-            return 0;
-        }
-        let dt = unsafe { &mut *datatype };
-        if dt.size != 0 {
-            return dt.size;
-        }
-        // A string type must carry its own size; zero there means an empty
-        // string, as the header documents. Numeric types are computed and
-        // written back.
-        let scalar = scalar_from_abi(dt.type_);
-        let computed = scalar.size();
-        dt.size = computed;
-        computed
-    })
+    guard("asdf_datatype_size", 0, || datatype_size(datatype))
+}
+
+/// Safe internal form of [`asdf_datatype_size`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn datatype_size(datatype: *mut asdf_datatype_t) -> u64 {
+    if datatype.is_null() {
+        return 0;
+    }
+    let dt = unsafe { &mut *datatype };
+    if dt.size != 0 {
+        return dt.size;
+    }
+    // A string type must carry its own size; zero there means an empty
+    // string, as the header documents. Numeric types are computed and
+    // written back.
+    let scalar = scalar_from_abi(dt.type_);
+    let computed = scalar.size();
+    dt.size = computed;
+    computed
 }
 
 /// The scalar type named by a string, or `UNKNOWN`.
@@ -526,19 +550,26 @@ pub extern "C" fn asdf_scalar_datatype_to_string(datatype: ScalarTypeAbi) -> *co
 /// `ndarray` must be null or a valid `asdf_ndarray_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_ndarray_data_alloc(ndarray: *mut asdf_ndarray_t) -> *mut c_void {
-    guard("asdf_ndarray_data_alloc", std::ptr::null_mut(), || {
-        let nbytes = unsafe { asdf_ndarray_nbytes(ndarray) };
-        let Some(state) = ensure_state(ndarray) else {
-            return std::ptr::null_mut();
-        };
-        let Ok(len) = usize::try_from(nbytes) else {
-            return std::ptr::null_mut();
-        };
-        if state.allocated.is_none() {
-            state.allocated = Some(AlignedBuf::zeroed(len));
-        }
-        state.allocated.as_mut().map_or(std::ptr::null_mut(), |b| b.as_mut_ptr().cast::<c_void>())
-    })
+    guard("asdf_ndarray_data_alloc", std::ptr::null_mut(), || ndarray_data_alloc(ndarray))
+}
+
+/// Safe internal form of [`asdf_ndarray_data_alloc`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn ndarray_data_alloc(ndarray: *mut asdf_ndarray_t) -> *mut c_void {
+    let nbytes = ndarray_nbytes(ndarray);
+    let Some(state) = ensure_state(ndarray) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(len) = usize::try_from(nbytes) else {
+        return std::ptr::null_mut();
+    };
+    if state.allocated.is_none() {
+        state.allocated = Some(AlignedBuf::zeroed(len));
+    }
+    state.allocated.as_mut().map_or(std::ptr::null_mut(), |b| b.as_mut_ptr().cast::<c_void>())
 }
 
 /// Free a buffer from [`asdf_ndarray_data_alloc`].
@@ -569,11 +600,11 @@ pub unsafe extern "C" fn asdf_ndarray_data_copy(
         if ndarray.is_null() || src.is_null() {
             return NdarrayErr::Inval;
         }
-        let nbytes = unsafe { asdf_ndarray_nbytes(ndarray) };
+        let nbytes = ndarray_nbytes(ndarray);
         let Ok(len) = usize::try_from(nbytes) else {
             return NdarrayErr::Inval;
         };
-        let destination = unsafe { asdf_ndarray_data_alloc(ndarray) };
+        let destination = ndarray_data_alloc(ndarray);
         if destination.is_null() {
             return NdarrayErr::Oom;
         }
@@ -594,29 +625,36 @@ pub unsafe extern "C" fn asdf_ndarray_data(
     ndarray: *mut asdf_ndarray_t,
     size: *mut usize,
 ) -> *const c_void {
-    guard("asdf_ndarray_data", std::ptr::null(), || {
-        let Some(state) = state_of(ndarray) else {
+    guard("asdf_ndarray_data", std::ptr::null(), || ndarray_data(ndarray, size))
+}
+
+/// Safe internal form of [`asdf_ndarray_data`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn ndarray_data(ndarray: *mut asdf_ndarray_t, size: *mut usize) -> *const c_void {
+    let Some(state) = state_of(ndarray) else {
+        if !size.is_null() {
+            unsafe { write_out(size, 0) };
+        }
+        return std::ptr::null();
+    };
+    // A buffer the caller built takes precedence: it is the array's data.
+    let bytes = match (&state.allocated, &state.data) {
+        (Some(buffer), _) => buffer,
+        (None, Some(data)) => data,
+        (None, None) => {
             if !size.is_null() {
                 unsafe { write_out(size, 0) };
             }
             return std::ptr::null();
-        };
-        // A buffer the caller built takes precedence: it is the array's data.
-        let bytes = match (&state.allocated, &state.data) {
-            (Some(buffer), _) => buffer,
-            (None, Some(data)) => data,
-            (None, None) => {
-                if !size.is_null() {
-                    unsafe { write_out(size, 0) };
-                }
-                return std::ptr::null();
-            }
-        };
-        if !size.is_null() {
-            unsafe { write_out(size, bytes.len()) };
         }
-        bytes.as_ptr().cast::<c_void>()
-    })
+    };
+    if !size.is_null() {
+        unsafe { write_out(size, bytes.len()) };
+    }
+    bytes.as_ptr().cast::<c_void>()
 }
 
 /// The array's data as stored, without decompressing.
@@ -630,7 +668,7 @@ pub unsafe extern "C" fn asdf_ndarray_data_raw(
 ) -> *const c_void {
     // The engine decompresses on read, so the two coincide for arrays we
     // hand out; a caller wanting the stored form uses the block API.
-    unsafe { asdf_ndarray_data(ndarray, size) }
+    ndarray_data(ndarray, size)
 }
 
 /// Set the compression used when the array is written.
@@ -1014,15 +1052,22 @@ pub unsafe extern "C" fn asdf_shim_ndarray_read_float16_bits_at(
 /// afterwards.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_ndarray_destroy(ndarray: *mut asdf_ndarray_t) {
-    guard("asdf_ndarray_destroy", (), || {
-        if ndarray.is_null() {
-            return;
-        }
-        let boxed = unsafe { Box::from_raw(ndarray) };
-        if !boxed._reserved.is_null() {
-            drop(unsafe { Box::from_raw(boxed._reserved.cast::<NdarrayState>()) });
-        }
-    })
+    guard("asdf_ndarray_destroy", (), || ndarray_destroy(ndarray))
+}
+
+/// Safe internal form of [`asdf_ndarray_destroy`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn ndarray_destroy(ndarray: *mut asdf_ndarray_t) {
+    if ndarray.is_null() {
+        return;
+    }
+    let boxed = unsafe { Box::from_raw(ndarray) };
+    if !boxed._reserved.is_null() {
+        drop(unsafe { Box::from_raw(boxed._reserved.cast::<NdarrayState>()) });
+    }
 }
 
 /// Attach data read from a file to an array handle.
@@ -1151,7 +1196,7 @@ pub unsafe extern "C" fn asdf_get_ndarray(
         if !out.is_null() {
             unsafe { write_out(out, array) };
         } else {
-            unsafe { asdf_ndarray_destroy(array) };
+            ndarray_destroy(array);
         }
         AsdfValueErr::Ok
     })
@@ -1177,7 +1222,7 @@ pub unsafe extern "C" fn asdf_value_as_ndarray(
         if !out.is_null() {
             unsafe { write_out(out, array) };
         } else {
-            unsafe { asdf_ndarray_destroy(array) };
+            ndarray_destroy(array);
         }
         AsdfValueErr::Ok
     })
@@ -1197,7 +1242,7 @@ pub unsafe extern "C" fn asdf_is_ndarray(
         if value.is_null() {
             return false;
         }
-        let is_array = unsafe { asdf_value_is_ndarray(value) };
+        let is_array = value_is_ndarray(value);
         unsafe { crate::file_ffi::asdf_value_destroy(value) };
         is_array
     })
@@ -1209,13 +1254,20 @@ pub unsafe extern "C" fn asdf_is_ndarray(
 /// `value` must be null or a valid value handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_is_ndarray(value: *mut crate::file_ffi::AsdfValue) -> bool {
-    guard("asdf_value_is_ndarray", false, || {
-        use crate::file_ffi::{value_document, value_node};
-        let (Some(doc), Some(node)) = (value_document(value), value_node(value)) else {
-            return false;
-        };
-        doc.tag_of(node).is_some_and(|t| t.split_version().0 == "core/ndarray")
-    })
+    guard("asdf_value_is_ndarray", false, || value_is_ndarray(value))
+}
+
+/// Safe internal form of [`asdf_value_is_ndarray`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn value_is_ndarray(value: *mut crate::file_ffi::AsdfValue) -> bool {
+    use crate::file_ffi::{value_document, value_node};
+    let (Some(doc), Some(node)) = (value_document(value), value_node(value)) else {
+        return false;
+    };
+    doc.tag_of(node).is_some_and(|t| t.split_version().0 == "core/ndarray")
 }
 
 // ---- The rest of the generated extension family ----------------------
@@ -1226,26 +1278,33 @@ pub unsafe extern "C" fn asdf_value_is_ndarray(value: *mut crate::file_ffi::Asdf
 /// `ndarray` must be null or a valid `asdf_ndarray_t`; safe on a zeroed one.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_ndarray_deinit(ndarray: *mut asdf_ndarray_t) {
-    guard("asdf_ndarray_deinit", (), || {
-        if ndarray.is_null() {
-            return;
+    guard("asdf_ndarray_deinit", (), || ndarray_deinit(ndarray))
+}
+
+/// Safe internal form of [`asdf_ndarray_deinit`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn ndarray_deinit(ndarray: *mut asdf_ndarray_t) {
+    if ndarray.is_null() {
+        return;
+    }
+    let array = unsafe { &mut *ndarray };
+    if !array._reserved.is_null() {
+        let state = unsafe { Box::from_raw(array._reserved.cast::<NdarrayState>()) };
+        if !state.block.is_null() {
+            unsafe { crate::block_ffi::asdf_block_close(state.block) };
         }
-        let array = unsafe { &mut *ndarray };
-        if !array._reserved.is_null() {
-            let state = unsafe { Box::from_raw(array._reserved.cast::<NdarrayState>()) };
-            if !state.block.is_null() {
-                unsafe { crate::block_ffi::asdf_block_close(state.block) };
-            }
-            drop(state);
-            array._reserved = std::ptr::null_mut();
-        }
-        // The public pointers all borrowed from the state that just went.
-        array.shape = std::ptr::null();
-        array.strides = std::ptr::null();
-        array.datatype.fields = std::ptr::null();
-        array.datatype.nfields = 0;
-        array.ndim = 0;
-    })
+        drop(state);
+        array._reserved = std::ptr::null_mut();
+    }
+    // The public pointers all borrowed from the state that just went.
+    array.shape = std::ptr::null();
+    array.strides = std::ptr::null();
+    array.datatype.fields = std::ptr::null();
+    array.datatype.nfields = 0;
+    array.ndim = 0;
 }
 
 /// Deep-copy an ndarray into caller-provided storage.
@@ -1261,33 +1320,44 @@ pub unsafe extern "C" fn asdf_ndarray_copy_into(
     src: *const asdf_ndarray_t,
     dst: *mut asdf_ndarray_t,
 ) -> bool {
-    guard("asdf_ndarray_copy_into", false, || {
-        let _ = file;
-        if src.is_null() || dst.is_null() {
-            return false;
-        }
-        let Some(state) = state_of(src.cast_mut()) else {
-            return false;
-        };
+    guard("asdf_ndarray_copy_into", false, || ndarray_copy_into(file, src, dst))
+}
 
-        // Rebuild from the engine's own view, so every buffer is fresh.
-        let rebuilt = make_ndarray(state.parsed.clone(), state.shape.clone());
-        if rebuilt.is_null() {
-            return false;
-        }
-        if let Some(data) = state.allocated.as_ref().or(state.data.as_ref()) {
-            set_data(rebuilt, data);
-        }
-        if let Some(fresh) = state_of(rebuilt) {
-            fresh.compression = state.compression;
-            fresh.storage = state.storage;
-        }
+/// Safe internal form of [`asdf_ndarray_copy_into`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn ndarray_copy_into(
+    file: *mut crate::file_ffi::AsdfFile,
+    src: *const asdf_ndarray_t,
+    dst: *mut asdf_ndarray_t,
+) -> bool {
+    let _ = file;
+    if src.is_null() || dst.is_null() {
+        return false;
+    }
+    let Some(state) = state_of(src.cast_mut()) else {
+        return false;
+    };
 
-        // Move the rebuilt value into the caller's storage.
-        let boxed = unsafe { Box::from_raw(rebuilt) };
-        unsafe { std::ptr::write(dst, *boxed) };
-        true
-    })
+    // Rebuild from the engine's own view, so every buffer is fresh.
+    let rebuilt = make_ndarray(state.parsed.clone(), state.shape.clone());
+    if rebuilt.is_null() {
+        return false;
+    }
+    if let Some(data) = state.allocated.as_ref().or(state.data.as_ref()) {
+        set_data(rebuilt, data);
+    }
+    if let Some(fresh) = state_of(rebuilt) {
+        fresh.compression = state.compression;
+        fresh.storage = state.storage;
+    }
+
+    // Move the rebuilt value into the caller's storage.
+    let boxed = unsafe { Box::from_raw(rebuilt) };
+    unsafe { std::ptr::write(dst, *boxed) };
+    true
 }
 
 /// Deep-copy an ndarray into fresh storage.
@@ -1300,36 +1370,46 @@ pub unsafe extern "C" fn asdf_ndarray_copy(
     file: *mut crate::file_ffi::AsdfFile,
     src: *const asdf_ndarray_t,
 ) -> *mut asdf_ndarray_t {
-    guard("asdf_ndarray_copy", std::ptr::null_mut(), || {
-        if src.is_null() {
-            return std::ptr::null_mut();
-        }
-        let raw = Box::into_raw(Box::new(asdf_ndarray_t {
-            source: 0,
+    guard("asdf_ndarray_copy", std::ptr::null_mut(), || ndarray_copy(file, src))
+}
+
+/// Safe internal form of [`asdf_ndarray_copy`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn ndarray_copy(
+    file: *mut crate::file_ffi::AsdfFile,
+    src: *const asdf_ndarray_t,
+) -> *mut asdf_ndarray_t {
+    if src.is_null() {
+        return std::ptr::null_mut();
+    }
+    let raw = Box::into_raw(Box::new(asdf_ndarray_t {
+        source: 0,
+        ndim: 0,
+        shape: std::ptr::null(),
+        datatype: asdf_datatype_t {
+            type_: 0,
+            size: 0,
+            name: std::ptr::null(),
+            byteorder: 0,
             ndim: 0,
             shape: std::ptr::null(),
-            datatype: asdf_datatype_t {
-                type_: 0,
-                size: 0,
-                name: std::ptr::null(),
-                byteorder: 0,
-                ndim: 0,
-                shape: std::ptr::null(),
-                nfields: 0,
-                fields: std::ptr::null(),
-            },
-            byteorder: 0,
-            offset: 0,
-            strides: std::ptr::null(),
-            _reserved: std::ptr::null_mut(),
-        }));
-        if unsafe { asdf_ndarray_copy_into(file, src, raw) } {
-            raw
-        } else {
-            drop(unsafe { Box::from_raw(raw) });
-            std::ptr::null_mut()
-        }
-    })
+            nfields: 0,
+            fields: std::ptr::null(),
+        },
+        byteorder: 0,
+        offset: 0,
+        strides: std::ptr::null(),
+        _reserved: std::ptr::null_mut(),
+    }));
+    if ndarray_copy_into(file, src, raw) {
+        raw
+    } else {
+        drop(unsafe { Box::from_raw(raw) });
+        std::ptr::null_mut()
+    }
 }
 
 /// Deep-copy a null-terminated array of ndarrays.
@@ -1352,11 +1432,13 @@ pub unsafe extern "C" fn asdf_ndarray_array_copy(
 
         let mut copies: Vec<*mut asdf_ndarray_t> = Vec::with_capacity(count as usize + 1);
         for index in 0..count {
-            let copy = unsafe { asdf_ndarray_copy(file, *src.offset(index)) };
+            // Reading the caller's NULL-terminated list is the unsafe part.
+            let entry = unsafe { *src.offset(index) };
+            let copy = ndarray_copy(file, entry);
             if copy.is_null() {
                 // Unwind rather than leak the copies already made.
                 for made in copies {
-                    unsafe { asdf_ndarray_destroy(made) };
+                    ndarray_destroy(made);
                 }
                 return std::ptr::null_mut();
             }
@@ -1442,8 +1524,7 @@ pub unsafe extern "C" fn asdf_value_of_ndarray(
         blocks.push(asdf_core::PendingBlock::compressed(payload, compression));
         let index = blocks.len() - 1;
 
-        let handle = unsafe { &mut *file };
-        let Some(doc) = handle.document_for_values() else {
+        let Some(doc) = file_document_mut(file) else {
             return std::ptr::null_mut();
         };
 
@@ -1565,8 +1646,7 @@ fn inline_value_of_ndarray(
         }
     };
 
-    let handle = unsafe { &mut *file };
-    let Some(doc) = handle.document_for_values() else {
+    let Some(doc) = file_document_mut(file) else {
         return std::ptr::null_mut();
     };
 
@@ -1770,97 +1850,112 @@ pub unsafe extern "C" fn asdf_ndarray_read_tile_ndim(
     dst: *mut *mut c_void,
 ) -> NdarrayErr {
     guard("asdf_ndarray_read_tile_ndim", NdarrayErr::Inval, || {
-        let Some(state) = state_of(ndarray) else {
-            return NdarrayErr::Inval;
-        };
-        if origin.is_null() || shape.is_null() {
-            return NdarrayErr::Inval;
-        }
-        let ndim = state.shape.len();
-        if ndim == 0 {
-            return NdarrayErr::Inval;
-        }
-        let origin = unsafe { std::slice::from_raw_parts(origin, ndim) }.to_vec();
-        let tile = unsafe { std::slice::from_raw_parts(shape, ndim) }.to_vec();
-
-        // Every corner of the tile has to land inside the array.
-        for axis in 0..ndim {
-            let Some(end) = origin[axis].checked_add(tile[axis]) else {
-                return NdarrayErr::OutOfBounds;
-            };
-            if end > state.shape[axis] {
-                return NdarrayErr::OutOfBounds;
-            }
-        }
-
-        let target = match scalar_from_abi(dst_t) {
-            ScalarType::Unknown => state.parsed.datatype.scalar,
-            other => other,
-        };
-        let Ok(width) = usize::try_from(target.size()) else {
-            return NdarrayErr::Inval;
-        };
-        if width == 0 {
-            return NdarrayErr::Conversion;
-        }
-
-        let mut count: u64 = 1;
-        for extent in &tile {
-            let Some(next) = count.checked_mul(*extent) else {
-                return NdarrayErr::Inval;
-            };
-            count = next;
-        }
-        let Ok(count) = usize::try_from(count) else {
-            return NdarrayErr::Inval;
-        };
-        if count == 0 {
-            return deliver(&[], dst);
-        }
-
-        let Some(elements) = elements_of(state) else {
-            return NdarrayErr::Inval;
-        };
-
-        // The tile is contiguous along the last axis only, so copy it one
-        // run at a time and step the outer indices by hand.
-        let run = tile[ndim - 1] as usize;
-        let mut buffer = vec![0u8; count * width];
-        let mut cursor = origin.clone();
-        let mut written = 0usize;
-        let mut overflowed = false;
-        loop {
-            let Some(flat) = flat_index(&state.shape, &cursor) else {
-                return NdarrayErr::OutOfBounds;
-            };
-            let slice = &mut buffer[written * width..(written + run) * width];
-            match write_elements(&elements, flat, run, target, width, slice) {
-                NdarrayErr::Ok => {}
-                NdarrayErr::Overflow => overflowed = true,
-                err => return err,
-            }
-            written += run;
-
-            // Advance the outer axes odometer-style; the last is the run.
-            let mut axis = ndim as isize - 2;
-            loop {
-                if axis < 0 {
-                    let delivered = deliver(&buffer, dst);
-                    if delivered != NdarrayErr::Ok {
-                        return delivered;
-                    }
-                    return if overflowed { NdarrayErr::Overflow } else { NdarrayErr::Ok };
-                }
-                let a = axis as usize;
-                cursor[a] += 1;
-                if cursor[a] < origin[a] + tile[a] {
-                    break;
-                }
-                cursor[a] = origin[a];
-                axis -= 1;
-            }
-        }
+        ndarray_read_tile_ndim(ndarray, origin, shape, dst_t, dst)
     })
+}
+
+/// Safe internal form of [`asdf_ndarray_read_tile_ndim`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn ndarray_read_tile_ndim(
+    ndarray: *mut asdf_ndarray_t,
+    origin: *const u64,
+    shape: *const u64,
+    dst_t: ScalarTypeAbi,
+    dst: *mut *mut c_void,
+) -> NdarrayErr {
+    let Some(state) = state_of(ndarray) else {
+        return NdarrayErr::Inval;
+    };
+    if origin.is_null() || shape.is_null() {
+        return NdarrayErr::Inval;
+    }
+    let ndim = state.shape.len();
+    if ndim == 0 {
+        return NdarrayErr::Inval;
+    }
+    let origin = unsafe { std::slice::from_raw_parts(origin, ndim) }.to_vec();
+    let tile = unsafe { std::slice::from_raw_parts(shape, ndim) }.to_vec();
+
+    // Every corner of the tile has to land inside the array.
+    for axis in 0..ndim {
+        let Some(end) = origin[axis].checked_add(tile[axis]) else {
+            return NdarrayErr::OutOfBounds;
+        };
+        if end > state.shape[axis] {
+            return NdarrayErr::OutOfBounds;
+        }
+    }
+
+    let target = match scalar_from_abi(dst_t) {
+        ScalarType::Unknown => state.parsed.datatype.scalar,
+        other => other,
+    };
+    let Ok(width) = usize::try_from(target.size()) else {
+        return NdarrayErr::Inval;
+    };
+    if width == 0 {
+        return NdarrayErr::Conversion;
+    }
+
+    let mut count: u64 = 1;
+    for extent in &tile {
+        let Some(next) = count.checked_mul(*extent) else {
+            return NdarrayErr::Inval;
+        };
+        count = next;
+    }
+    let Ok(count) = usize::try_from(count) else {
+        return NdarrayErr::Inval;
+    };
+    if count == 0 {
+        return deliver(&[], dst);
+    }
+
+    let Some(elements) = elements_of(state) else {
+        return NdarrayErr::Inval;
+    };
+
+    // The tile is contiguous along the last axis only, so copy it one
+    // run at a time and step the outer indices by hand.
+    let run = tile[ndim - 1] as usize;
+    let mut buffer = vec![0u8; count * width];
+    let mut cursor = origin.clone();
+    let mut written = 0usize;
+    let mut overflowed = false;
+    loop {
+        let Some(flat) = flat_index(&state.shape, &cursor) else {
+            return NdarrayErr::OutOfBounds;
+        };
+        let slice = &mut buffer[written * width..(written + run) * width];
+        match write_elements(&elements, flat, run, target, width, slice) {
+            NdarrayErr::Ok => {}
+            NdarrayErr::Overflow => overflowed = true,
+            err => return err,
+        }
+        written += run;
+
+        // Advance the outer axes odometer-style; the last is the run.
+        let mut axis = ndim as isize - 2;
+        loop {
+            if axis < 0 {
+                let delivered = deliver(&buffer, dst);
+                if delivered != NdarrayErr::Ok {
+                    return delivered;
+                }
+                return if overflowed { NdarrayErr::Overflow } else { NdarrayErr::Ok };
+            }
+            let a = axis as usize;
+            cursor[a] += 1;
+            if cursor[a] < origin[a] + tile[a] {
+                break;
+            }
+            cursor[a] = origin[a];
+            axis -= 1;
+        }
+    }
 }
 
 /// Read a 2-D tile, converting to `dst_t`.
@@ -1905,7 +2000,7 @@ pub unsafe extern "C" fn asdf_ndarray_read_tile_2d(
         tile[ndim - 2] = height;
         tile[ndim - 1] = width;
 
-        unsafe { asdf_ndarray_read_tile_ndim(ndarray, origin.as_ptr(), tile.as_ptr(), dst_t, dst) }
+        ndarray_read_tile_ndim(ndarray, origin.as_ptr(), tile.as_ptr(), dst_t, dst)
     })
 }
 
@@ -1965,7 +2060,7 @@ unsafe extern "C" fn ndarray_ext_copy(
 /// # Safety
 /// `obj` must be a valid `asdf_ndarray_t`.
 unsafe extern "C" fn ndarray_ext_deinit(obj: *mut c_void) {
-    unsafe { asdf_ndarray_deinit(obj.cast::<asdf_ndarray_t>()) };
+    ndarray_deinit(obj.cast::<asdf_ndarray_t>());
 }
 
 /// Build the ndarray extension's registry entry.

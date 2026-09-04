@@ -189,35 +189,45 @@ pub unsafe extern "C" fn asdf_extension_get(
     file: *mut crate::file_ffi::AsdfFile,
     tag: *const c_char,
 ) -> *const asdf_extension_t {
-    guard("asdf_extension_get", std::ptr::null(), || {
-        let _ = file;
-        if tag.is_null() {
-            return std::ptr::null();
-        }
-        let wanted = unsafe { crate::ffi::c_string_lossy(tag) }.unwrap_or_default();
-        let registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    guard("asdf_extension_get", std::ptr::null(), || extension_get(file, tag))
+}
 
-        for entry in registry.iter() {
-            // SAFETY: registration promised this outlives our use of it.
-            let extension = unsafe { &*entry.extension };
-            if extension.tags.is_null() {
-                continue;
-            }
-            let mut index = 0isize;
-            loop {
-                let tag_ptr = unsafe { *extension.tags.offset(index) };
-                if tag_ptr.is_null() {
-                    break;
-                }
-                let declared = unsafe { CStr::from_ptr(tag_ptr) }.to_string_lossy();
-                if tags_match(&declared, &wanted) {
-                    return entry.extension;
-                }
-                index += 1;
-            }
+/// Safe internal form of [`asdf_extension_get`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn extension_get(
+    file: *mut crate::file_ffi::AsdfFile,
+    tag: *const c_char,
+) -> *const asdf_extension_t {
+    let _ = file;
+    if tag.is_null() {
+        return std::ptr::null();
+    }
+    let wanted = unsafe { crate::ffi::c_string_lossy(tag) }.unwrap_or_default();
+    let registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+
+    for entry in registry.iter() {
+        // SAFETY: registration promised this outlives our use of it.
+        let extension = unsafe { &*entry.extension };
+        if extension.tags.is_null() {
+            continue;
         }
-        std::ptr::null()
-    })
+        let mut index = 0isize;
+        loop {
+            let tag_ptr = unsafe { *extension.tags.offset(index) };
+            if tag_ptr.is_null() {
+                break;
+            }
+            let declared = unsafe { CStr::from_ptr(tag_ptr) }.to_string_lossy();
+            if tags_match(&declared, &wanted) {
+                return entry.extension;
+            }
+            index += 1;
+        }
+    }
+    std::ptr::null()
 }
 
 /// How many times a particular extension is registered.
@@ -326,36 +336,46 @@ pub unsafe extern "C" fn asdf_value_is_extension_type(
     value: *mut crate::file_ffi::AsdfValue,
     ext: *const asdf_extension_t,
 ) -> bool {
-    guard("asdf_value_is_extension_type", false, || {
-        use crate::file_ffi::{value_document, value_node};
+    guard("asdf_value_is_extension_type", false, || value_is_extension_type(value, ext))
+}
 
-        if ext.is_null() {
-            return false;
-        }
-        let (Some(doc), Some(node)) = (value_document(value), value_node(value)) else {
-            return false;
-        };
-        let Some(tag) = doc.tag_of(node) else {
-            return false;
-        };
-        let full = tag.full();
+/// Safe internal form of [`asdf_value_is_extension_type`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn value_is_extension_type(
+    value: *mut crate::file_ffi::AsdfValue,
+    ext: *const asdf_extension_t,
+) -> bool {
+    use crate::file_ffi::{value_document, value_node};
 
-        let extension = unsafe { &*ext };
-        if extension.tags.is_null() {
+    if ext.is_null() {
+        return false;
+    }
+    let (Some(doc), Some(node)) = (value_document(value), value_node(value)) else {
+        return false;
+    };
+    let Some(tag) = doc.tag_of(node) else {
+        return false;
+    };
+    let full = tag.full();
+
+    let extension = unsafe { &*ext };
+    if extension.tags.is_null() {
+        return false;
+    }
+    let mut index = 0isize;
+    loop {
+        let tag_ptr = unsafe { *extension.tags.offset(index) };
+        if tag_ptr.is_null() {
             return false;
         }
-        let mut index = 0isize;
-        loop {
-            let tag_ptr = unsafe { *extension.tags.offset(index) };
-            if tag_ptr.is_null() {
-                return false;
-            }
-            if tags_match(&unsafe { CStr::from_ptr(tag_ptr) }.to_string_lossy(), &full) {
-                return true;
-            }
-            index += 1;
+        if tags_match(&unsafe { CStr::from_ptr(tag_ptr) }.to_string_lossy(), &full) {
+            return true;
         }
-    })
+        index += 1;
+    }
 }
 
 /// Whether the value at `path` is of this extension's type.
@@ -373,7 +393,7 @@ pub unsafe extern "C" fn asdf_is_extension_type(
         if value.is_null() {
             return false;
         }
-        let matched = unsafe { asdf_value_is_extension_type(value, ext) };
+        let matched = value_is_extension_type(value, ext);
         unsafe { crate::file_ffi::asdf_value_destroy(value) };
         matched
     })
@@ -396,7 +416,7 @@ pub unsafe extern "C" fn asdf_value_as_extension_type(
         if ext.is_null() || out.is_null() {
             return AsdfValueErr::Unknown;
         }
-        if !unsafe { asdf_value_is_extension_type(value, ext) } {
+        if !value_is_extension_type(value, ext) {
             return AsdfValueErr::TypeMismatch;
         }
         let extension = unsafe { &*ext };
@@ -495,51 +515,64 @@ pub unsafe extern "C" fn asdf_value_of_extension_type(
     ext: *const asdf_extension_t,
 ) -> *mut crate::file_ffi::AsdfValue {
     guard("asdf_value_of_extension_type", std::ptr::null_mut(), || {
-        if ext.is_null() {
-            return std::ptr::null_mut();
-        }
-        let extension = unsafe { &*ext };
-        if extension.vtab.is_null() {
-            return std::ptr::null_mut();
-        }
-        let Some(serialize) = (unsafe { &*extension.vtab }).serialize else {
-            // The header allows a null serializer, meaning the type cannot
-            // be written.
-            return std::ptr::null_mut();
-        };
-
-        // The first tag an extension registers is the one written for a
-        // newly serialized object; without it the value goes into the tree
-        // untagged and nothing can read it back as this type.
-        if extension.tags.is_null() {
-            return std::ptr::null_mut();
-        }
-        let first = unsafe { *extension.tags };
-        if first.is_null() {
-            return std::ptr::null_mut();
-        }
-        let tag = unsafe { CStr::from_ptr(first) }.to_string_lossy().into_owned();
-
-        let value = unsafe { serialize(file, obj, extension.userdata.cast_const()) };
-        if value.is_null() {
-            return value;
-        }
-
-        let (Some(owner), Some(node)) =
-            (crate::file_ffi::value_file(value), crate::file_ffi::value_node(value))
-        else {
-            return value;
-        };
-        // The tag may be registered without its `tag:` prefix; the tree
-        // always carries the full form.
-        let full = if tag.starts_with("tag:") { tag } else { format!("tag:{tag}") };
-        // SAFETY: the file outlives every value taken from it, by the C
-        // contract, and the serializer has already finished with the tree.
-        if let Some(doc) = unsafe { &mut *owner }.document_for_values() {
-            doc.node_mut(node).tag = Some(asdf_core::yaml::Tag::parse(&full));
-        }
-        value
+        value_of_extension_type(file, obj, ext)
     })
+}
+
+/// Safe internal form of [`asdf_value_of_extension_type`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn value_of_extension_type(
+    file: *mut crate::file_ffi::AsdfFile,
+    obj: *const c_void,
+    ext: *const asdf_extension_t,
+) -> *mut crate::file_ffi::AsdfValue {
+    if ext.is_null() {
+        return std::ptr::null_mut();
+    }
+    let extension = unsafe { &*ext };
+    if extension.vtab.is_null() {
+        return std::ptr::null_mut();
+    }
+    let Some(serialize) = (unsafe { &*extension.vtab }).serialize else {
+        // The header allows a null serializer, meaning the type cannot
+        // be written.
+        return std::ptr::null_mut();
+    };
+
+    // The first tag an extension registers is the one written for a
+    // newly serialized object; without it the value goes into the tree
+    // untagged and nothing can read it back as this type.
+    if extension.tags.is_null() {
+        return std::ptr::null_mut();
+    }
+    let first = unsafe { *extension.tags };
+    if first.is_null() {
+        return std::ptr::null_mut();
+    }
+    let tag = unsafe { CStr::from_ptr(first) }.to_string_lossy().into_owned();
+
+    let value = unsafe { serialize(file, obj, extension.userdata.cast_const()) };
+    if value.is_null() {
+        return value;
+    }
+
+    let (Some(owner), Some(node)) =
+        (crate::file_ffi::value_file(value), crate::file_ffi::value_node(value))
+    else {
+        return value;
+    };
+    // The tag may be registered without its `tag:` prefix; the tree
+    // always carries the full form.
+    let full = if tag.starts_with("tag:") { tag } else { format!("tag:{tag}") };
+    // SAFETY: the file outlives every value taken from it, by the C
+    // contract, and the serializer has already finished with the tree.
+    if let Some(doc) = unsafe { &mut *owner }.document_for_values() {
+        doc.node_mut(node).tag = Some(asdf_core::yaml::Tag::parse(&full));
+    }
+    value
 }
 
 /// Write a native object at `path` through an extension.
@@ -557,7 +590,7 @@ pub unsafe extern "C" fn asdf_set_extension_type(
     use crate::types::AsdfValueErr;
 
     guard("asdf_set_extension_type", AsdfValueErr::Unknown, || {
-        let value = unsafe { asdf_value_of_extension_type(file, obj, ext) };
+        let value = value_of_extension_type(file, obj, ext);
         if value.is_null() {
             // No serializer, or the serializer failed.
             return AsdfValueErr::EmitFailure;
@@ -638,8 +671,8 @@ unsafe fn get_property(
     // An extension type is matched by tag rather than by shape.
     if wanted == AsdfValueType::Extension && !tag.is_null() {
         let file = crate::file_ffi::value_file(mapping).unwrap_or(std::ptr::null_mut());
-        let ext = unsafe { asdf_extension_get(file, tag) };
-        if ext.is_null() || !unsafe { asdf_value_is_extension_type(prop, ext) } {
+        let ext = extension_get(file, tag);
+        if ext.is_null() || !value_is_extension_type(prop, ext) {
             release(prop);
             return AsdfValueErr::TypeMismatch;
         }

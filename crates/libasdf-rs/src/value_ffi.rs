@@ -19,6 +19,7 @@
 //! iterator owns.
 
 use crate::ffi::write_out;
+use crate::file_ffi::file_document_mut;
 use std::ffi::{CStr, CString, c_char, c_int};
 
 use asdf_core::yaml::{NodeData, NodeId, Resolved, ScalarStyle, Schema, resolve};
@@ -110,12 +111,19 @@ pub unsafe extern "C" fn asdf_value_is_container(value: *mut AsdfValue) -> bool 
 /// `container` must be null or a valid value handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_container_size(container: *mut AsdfValue) -> c_int {
-    guard("asdf_container_size", -1, || {
-        let (Some(doc), Some(node)) = (value_document(container), value_node(container)) else {
-            return -1;
-        };
-        doc.container_len(node).and_then(|n| c_int::try_from(n).ok()).unwrap_or(-1)
-    })
+    guard("asdf_container_size", -1, || container_size(container))
+}
+
+/// Safe internal form of [`asdf_container_size`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn container_size(container: *mut AsdfValue) -> c_int {
+    let (Some(doc), Some(node)) = (value_document(container), value_node(container)) else {
+        return -1;
+    };
+    doc.container_len(node).and_then(|n| c_int::try_from(n).ok()).unwrap_or(-1)
 }
 
 /// Whether a value matches a given type.
@@ -135,9 +143,9 @@ pub unsafe extern "C" fn asdf_value_is_type(value: *mut AsdfValue, value_type: c
             AsdfValueType::Unknown => false,
             // `Scalar` is the category, not a resolution: a string, a
             // boolean and an integer are all scalars.
-            AsdfValueType::Scalar => unsafe { asdf_value_is_scalar(value) },
-            AsdfValueType::Mapping => unsafe { asdf_value_is_mapping(value) },
-            AsdfValueType::Sequence => unsafe { asdf_value_is_sequence(value) },
+            AsdfValueType::Scalar => value_is_scalar(value),
+            AsdfValueType::Mapping => value_is_mapping(value),
+            AsdfValueType::Sequence => value_is_sequence(value),
             AsdfValueType::Bool => unsafe { asdf_value_is_bool(value) },
             AsdfValueType::Int8 => unsafe { asdf_value_is_int8(value) },
             AsdfValueType::Int16 => unsafe { asdf_value_is_int16(value) },
@@ -163,11 +171,18 @@ pub unsafe extern "C" fn asdf_value_is_type(value: *mut AsdfValue, value_type: c
 /// `value` must be null or a valid value handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_is_mapping(value: *mut AsdfValue) -> bool {
-    guard("asdf_value_is_mapping", false, || {
-        value_document(value)
-            .zip(value_node(value))
-            .is_some_and(|(doc, node)| doc.resolved(node).is_mapping())
-    })
+    guard("asdf_value_is_mapping", false, || value_is_mapping(value))
+}
+
+/// Safe internal form of [`asdf_value_is_mapping`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn value_is_mapping(value: *mut AsdfValue) -> bool {
+    value_document(value)
+        .zip(value_node(value))
+        .is_some_and(|(doc, node)| doc.resolved(node).is_mapping())
 }
 
 /// View a value as a mapping.
@@ -180,7 +195,7 @@ pub unsafe extern "C" fn asdf_value_as_mapping(
     out: *mut *mut AsdfMapping,
 ) -> AsdfValueErr {
     guard("asdf_value_as_mapping", AsdfValueErr::Unknown, || {
-        if !unsafe { asdf_value_is_mapping(value) } {
+        if !value_is_mapping(value) {
             return AsdfValueErr::TypeMismatch;
         }
         if !out.is_null() {
@@ -197,10 +212,10 @@ pub unsafe extern "C" fn asdf_value_as_mapping(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_mapping_size(mapping: *mut AsdfMapping) -> c_int {
     guard("asdf_mapping_size", -1, || {
-        if !unsafe { asdf_value_is_mapping(mapping) } {
+        if !value_is_mapping(mapping) {
             return -1;
         }
-        unsafe { asdf_container_size(mapping) }
+        container_size(mapping)
     })
 }
 
@@ -339,7 +354,7 @@ pub unsafe extern "C" fn asdf_mapping_iter_next(iter_ptr: *mut *mut asdf_mapping
         }
 
         if iter.position >= iter.entries.len() {
-            unsafe { asdf_mapping_iter_destroy(raw) };
+            mapping_iter_destroy(raw);
             unsafe { write_out(iter_ptr, std::ptr::null_mut()) };
             return false;
         }
@@ -362,16 +377,23 @@ pub unsafe extern "C" fn asdf_mapping_iter_next(iter_ptr: *mut *mut asdf_mapping
 /// `iter` must be null or an iterator that has not already been destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_mapping_iter_destroy(iter: *mut asdf_mapping_iter_t) {
-    guard("asdf_mapping_iter_destroy", (), || {
-        if iter.is_null() {
-            return;
-        }
-        let mut boxed = unsafe { Box::from_raw(iter.cast::<MappingIter>()) };
-        if !boxed.current_value.is_null() {
-            drop(unsafe { Box::from_raw(boxed.current_value) });
-            boxed.current_value = std::ptr::null_mut();
-        }
-    })
+    guard("asdf_mapping_iter_destroy", (), || mapping_iter_destroy(iter))
+}
+
+/// Safe internal form of [`asdf_mapping_iter_destroy`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn mapping_iter_destroy(iter: *mut asdf_mapping_iter_t) {
+    if iter.is_null() {
+        return;
+    }
+    let mut boxed = unsafe { Box::from_raw(iter.cast::<MappingIter>()) };
+    if !boxed.current_value.is_null() {
+        drop(unsafe { Box::from_raw(boxed.current_value) });
+        boxed.current_value = std::ptr::null_mut();
+    }
 }
 
 // ---- Sequences -------------------------------------------------------
@@ -382,11 +404,18 @@ pub unsafe extern "C" fn asdf_mapping_iter_destroy(iter: *mut asdf_mapping_iter_
 /// `value` must be null or a valid value handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_is_sequence(value: *mut AsdfValue) -> bool {
-    guard("asdf_value_is_sequence", false, || {
-        value_document(value)
-            .zip(value_node(value))
-            .is_some_and(|(doc, node)| doc.resolved(node).is_sequence())
-    })
+    guard("asdf_value_is_sequence", false, || value_is_sequence(value))
+}
+
+/// Safe internal form of [`asdf_value_is_sequence`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn value_is_sequence(value: *mut AsdfValue) -> bool {
+    value_document(value)
+        .zip(value_node(value))
+        .is_some_and(|(doc, node)| doc.resolved(node).is_sequence())
 }
 
 /// View a value as a sequence.
@@ -399,7 +428,7 @@ pub unsafe extern "C" fn asdf_value_as_sequence(
     out: *mut *mut AsdfSequence,
 ) -> AsdfValueErr {
     guard("asdf_value_as_sequence", AsdfValueErr::Unknown, || {
-        if !unsafe { asdf_value_is_sequence(value) } {
+        if !value_is_sequence(value) {
             return AsdfValueErr::TypeMismatch;
         }
         if !out.is_null() {
@@ -416,10 +445,10 @@ pub unsafe extern "C" fn asdf_value_as_sequence(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_sequence_size(sequence: *mut AsdfSequence) -> c_int {
     guard("asdf_sequence_size", -1, || {
-        if !unsafe { asdf_value_is_sequence(sequence) } {
+        if !value_is_sequence(sequence) {
             return -1;
         }
-        unsafe { asdf_container_size(sequence) }
+        container_size(sequence)
     })
 }
 
@@ -537,7 +566,7 @@ pub unsafe extern "C" fn asdf_sequence_iter_next(iter_ptr: *mut *mut asdf_sequen
         }
 
         if iter.position >= iter.items.len() {
-            unsafe { asdf_sequence_iter_destroy(raw) };
+            sequence_iter_destroy(raw);
             unsafe { write_out(iter_ptr, std::ptr::null_mut()) };
             return false;
         }
@@ -558,16 +587,23 @@ pub unsafe extern "C" fn asdf_sequence_iter_next(iter_ptr: *mut *mut asdf_sequen
 /// `iter` must be null or an iterator that has not already been destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_sequence_iter_destroy(iter: *mut asdf_sequence_iter_t) {
-    guard("asdf_sequence_iter_destroy", (), || {
-        if iter.is_null() {
-            return;
-        }
-        let mut boxed = unsafe { Box::from_raw(iter.cast::<SequenceIter>()) };
-        if !boxed.current_value.is_null() {
-            drop(unsafe { Box::from_raw(boxed.current_value) });
-            boxed.current_value = std::ptr::null_mut();
-        }
-    })
+    guard("asdf_sequence_iter_destroy", (), || sequence_iter_destroy(iter))
+}
+
+/// Safe internal form of [`asdf_sequence_iter_destroy`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn sequence_iter_destroy(iter: *mut asdf_sequence_iter_t) {
+    if iter.is_null() {
+        return;
+    }
+    let mut boxed = unsafe { Box::from_raw(iter.cast::<SequenceIter>()) };
+    if !boxed.current_value.is_null() {
+        drop(unsafe { Box::from_raw(boxed.current_value) });
+        boxed.current_value = std::ptr::null_mut();
+    }
 }
 
 // ---- Typed accessors on a value --------------------------------------
@@ -653,18 +689,25 @@ pub unsafe extern "C" fn asdf_value_as_double(
     value: *mut AsdfValue,
     out: *mut f64,
 ) -> AsdfValueErr {
-    guard("asdf_value_as_double", AsdfValueErr::Unknown, || {
-        let converted = match resolved_of(value) {
-            Some(Resolved::Double(d)) => d,
-            Some(Resolved::Uint(v, _)) => v as f64,
-            Some(Resolved::Int(v, _)) => v as f64,
-            _ => return AsdfValueErr::TypeMismatch,
-        };
-        if !out.is_null() {
-            unsafe { write_out(out, converted) };
-        }
-        AsdfValueErr::Ok
-    })
+    guard("asdf_value_as_double", AsdfValueErr::Unknown, || value_as_double(value, out))
+}
+
+/// Safe internal form of [`asdf_value_as_double`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn value_as_double(value: *mut AsdfValue, out: *mut f64) -> AsdfValueErr {
+    let converted = match resolved_of(value) {
+        Some(Resolved::Double(d)) => d,
+        Some(Resolved::Uint(v, _)) => v as f64,
+        Some(Resolved::Int(v, _)) => v as f64,
+        _ => return AsdfValueErr::TypeMismatch,
+    };
+    if !out.is_null() {
+        unsafe { write_out(out, converted) };
+    }
+    AsdfValueErr::Ok
 }
 
 /// Read the value as a `float`.
@@ -675,7 +718,7 @@ pub unsafe extern "C" fn asdf_value_as_double(
 pub unsafe extern "C" fn asdf_value_as_float(value: *mut AsdfValue, out: *mut f32) -> AsdfValueErr {
     guard("asdf_value_as_float", AsdfValueErr::Unknown, || {
         let mut wide = 0f64;
-        let err = unsafe { asdf_value_as_double(value, &mut wide) };
+        let err = value_as_double(value, &mut wide);
         if err != AsdfValueErr::Ok {
             return err;
         }
@@ -798,11 +841,18 @@ pub unsafe extern "C" fn asdf_value_as_string0(
 /// `value` must be null or a valid value handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_is_scalar(value: *mut AsdfValue) -> bool {
-    guard("asdf_value_is_scalar", false, || {
-        value_document(value)
-            .zip(value_node(value))
-            .is_some_and(|(doc, node)| doc.resolved(node).is_scalar())
-    })
+    guard("asdf_value_is_scalar", false, || value_is_scalar(value))
+}
+
+/// Safe internal form of [`asdf_value_is_scalar`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn value_is_scalar(value: *mut AsdfValue) -> bool {
+    value_document(value)
+        .zip(value_node(value))
+        .is_some_and(|(doc, node)| doc.resolved(node).is_scalar())
 }
 
 /// Read a scalar's raw text, whatever its resolved type.
@@ -819,7 +869,7 @@ pub unsafe extern "C" fn asdf_value_as_scalar0(
         if value.is_null() {
             return AsdfValueErr::Unknown;
         }
-        if !unsafe { asdf_value_is_scalar(value) } {
+        if !value_is_scalar(value) {
             return AsdfValueErr::TypeMismatch;
         }
         intern_scalar(value, out)
@@ -966,7 +1016,7 @@ pub unsafe extern "C" fn asdf_container_iter_next(
         }
 
         if iter.position >= iter.entries.len() {
-            unsafe { asdf_container_iter_destroy(raw) };
+            container_iter_destroy(raw);
             unsafe { write_out(iter_ptr, std::ptr::null_mut()) };
             return false;
         }
@@ -998,16 +1048,23 @@ pub unsafe extern "C" fn asdf_container_iter_next(
 /// `iter` must be null or an iterator that has not already been destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_container_iter_destroy(iter: *mut asdf_container_iter_t) {
-    guard("asdf_container_iter_destroy", (), || {
-        if iter.is_null() {
-            return;
-        }
-        let mut boxed = unsafe { Box::from_raw(iter.cast::<ContainerIter>()) };
-        if !boxed.current_value.is_null() {
-            drop(unsafe { Box::from_raw(boxed.current_value) });
-            boxed.current_value = std::ptr::null_mut();
-        }
-    })
+    guard("asdf_container_iter_destroy", (), || container_iter_destroy(iter))
+}
+
+/// Safe internal form of [`asdf_container_iter_destroy`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn container_iter_destroy(iter: *mut asdf_container_iter_t) {
+    if iter.is_null() {
+        return;
+    }
+    let mut boxed = unsafe { Box::from_raw(iter.cast::<ContainerIter>()) };
+    if !boxed.current_value.is_null() {
+        drop(unsafe { Box::from_raw(boxed.current_value) });
+        boxed.current_value = std::ptr::null_mut();
+    }
 }
 
 // ---- Building values -------------------------------------------------
@@ -1020,8 +1077,7 @@ fn add_node(
     if file.is_null() {
         return std::ptr::null_mut();
     }
-    let handle = unsafe { &mut *file };
-    let Some(doc) = handle.document_for_values() else {
+    let Some(doc) = file_document_mut(file) else {
         return std::ptr::null_mut();
     };
     let node = make(doc);
@@ -1095,9 +1151,16 @@ pub unsafe extern "C" fn asdf_value_of_bool(file: *mut AsdfFile, value: bool) ->
 /// See the integer constructors.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_of_null(file: *mut AsdfFile) -> *mut AsdfValue {
-    guard("asdf_value_of_null", std::ptr::null_mut(), || {
-        add_node(file, |doc| doc.add_scalar("null"))
-    })
+    guard("asdf_value_of_null", std::ptr::null_mut(), || value_of_null(file))
+}
+
+/// Safe internal form of [`asdf_value_of_null`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn value_of_null(file: *mut AsdfFile) -> *mut AsdfValue {
+    add_node(file, |doc| doc.add_scalar("null"))
 }
 
 /// Build a value holding a NUL-terminated string.
@@ -1112,18 +1175,25 @@ pub unsafe extern "C" fn asdf_value_of_string0(
     file: *mut AsdfFile,
     value: *const c_char,
 ) -> *mut AsdfValue {
-    guard("asdf_value_of_string0", std::ptr::null_mut(), || {
-        if value.is_null() {
-            return std::ptr::null_mut();
-        }
-        let text = unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned();
-        add_node(file, |doc| {
-            let style = match resolve(&text, ScalarStyle::Plain, Schema::Libasdf) {
-                Resolved::String => ScalarStyle::Plain,
-                _ => ScalarStyle::SingleQuoted,
-            };
-            doc.add_scalar_styled(text, style)
-        })
+    guard("asdf_value_of_string0", std::ptr::null_mut(), || value_of_string0(file, value))
+}
+
+/// Safe internal form of [`asdf_value_of_string0`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn value_of_string0(file: *mut AsdfFile, value: *const c_char) -> *mut AsdfValue {
+    if value.is_null() {
+        return std::ptr::null_mut();
+    }
+    let text = unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned();
+    add_node(file, |doc| {
+        let style = match resolve(&text, ScalarStyle::Plain, Schema::Libasdf) {
+            Resolved::String => ScalarStyle::Plain,
+            _ => ScalarStyle::SingleQuoted,
+        };
+        doc.add_scalar_styled(text, style)
     })
 }
 
@@ -1137,19 +1207,30 @@ pub unsafe extern "C" fn asdf_value_of_string(
     value: *const c_char,
     len: usize,
 ) -> *mut AsdfValue {
-    guard("asdf_value_of_string", std::ptr::null_mut(), || {
-        if value.is_null() {
-            return std::ptr::null_mut();
-        }
-        let bytes = unsafe { std::slice::from_raw_parts(value.cast::<u8>(), len) };
-        let text = String::from_utf8_lossy(bytes).into_owned();
-        add_node(file, |doc| {
-            let style = match resolve(&text, ScalarStyle::Plain, Schema::Libasdf) {
-                Resolved::String => ScalarStyle::Plain,
-                _ => ScalarStyle::SingleQuoted,
-            };
-            doc.add_scalar_styled(text, style)
-        })
+    guard("asdf_value_of_string", std::ptr::null_mut(), || value_of_string(file, value, len))
+}
+
+/// Safe internal form of [`asdf_value_of_string`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn value_of_string(
+    file: *mut AsdfFile,
+    value: *const c_char,
+    len: usize,
+) -> *mut AsdfValue {
+    if value.is_null() {
+        return std::ptr::null_mut();
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(value.cast::<u8>(), len) };
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    add_node(file, |doc| {
+        let style = match resolve(&text, ScalarStyle::Plain, Schema::Libasdf) {
+            Resolved::String => ScalarStyle::Plain,
+            _ => ScalarStyle::SingleQuoted,
+        };
+        doc.add_scalar_styled(text, style)
     })
 }
 
@@ -1172,9 +1253,16 @@ pub unsafe extern "C" fn asdf_mapping_create(file: *mut AsdfFile) -> *mut AsdfMa
 /// `asdf_sequence_destroy`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_sequence_create(file: *mut AsdfFile) -> *mut AsdfSequence {
-    guard("asdf_sequence_create", std::ptr::null_mut(), || {
-        add_node(file, |doc| doc.add(asdf_core::yaml::Node::sequence()))
-    })
+    guard("asdf_sequence_create", std::ptr::null_mut(), || sequence_create(file))
+}
+
+/// Safe internal form of [`asdf_sequence_create`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn sequence_create(file: *mut AsdfFile) -> *mut AsdfSequence {
+    add_node(file, |doc| doc.add(asdf_core::yaml::Node::sequence()))
 }
 
 /// Release a mapping handle.
@@ -1225,8 +1313,7 @@ fn set_collection_style(value: *mut AsdfValue, style: crate::types::AsdfYamlNode
 
     let Some(file) = value_file(value) else { return };
     let Some(node) = value_node(value) else { return };
-    let handle = unsafe { &mut *file };
-    let Some(doc) = handle.document_for_values() else { return };
+    let Some(doc) = file_document_mut(file) else { return };
 
     let target = doc.resolve(node);
     let wanted = match style {
@@ -1251,28 +1338,38 @@ pub unsafe extern "C" fn asdf_mapping_set(
     key: *const c_char,
     value: *mut AsdfValue,
 ) -> AsdfValueErr {
-    guard("asdf_mapping_set", AsdfValueErr::Unknown, || {
-        if key.is_null() {
-            return AsdfValueErr::Unknown;
-        }
-        let (Some(file), Some(target)) = (value_file(mapping), value_node(mapping)) else {
-            return AsdfValueErr::Unknown;
-        };
-        let Some(child) = value_node(value) else {
-            return AsdfValueErr::Unknown;
-        };
-        let key = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
+    guard("asdf_mapping_set", AsdfValueErr::Unknown, || mapping_set(mapping, key, value))
+}
 
-        let handle = unsafe { &mut *file };
-        let Some(doc) = handle.document_for_values() else {
-            return AsdfValueErr::Unknown;
-        };
-        if !doc.resolved(target).is_mapping() {
-            return AsdfValueErr::TypeMismatch;
-        }
-        doc.mapping_set(target, &key, child);
-        AsdfValueErr::Ok
-    })
+/// Safe internal form of [`asdf_mapping_set`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn mapping_set(
+    mapping: *mut AsdfMapping,
+    key: *const c_char,
+    value: *mut AsdfValue,
+) -> AsdfValueErr {
+    if key.is_null() {
+        return AsdfValueErr::Unknown;
+    }
+    let (Some(file), Some(target)) = (value_file(mapping), value_node(mapping)) else {
+        return AsdfValueErr::Unknown;
+    };
+    let Some(child) = value_node(value) else {
+        return AsdfValueErr::Unknown;
+    };
+    let key = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
+
+    let Some(doc) = file_document_mut(file) else {
+        return AsdfValueErr::Unknown;
+    };
+    if !doc.resolved(target).is_mapping() {
+        return AsdfValueErr::TypeMismatch;
+    }
+    doc.mapping_set(target, &key, child);
+    AsdfValueErr::Ok
 }
 
 /// Remove an entry from a mapping, returning it.
@@ -1294,8 +1391,7 @@ pub unsafe extern "C" fn asdf_mapping_pop(
         };
         let key = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
 
-        let handle = unsafe { &mut *file };
-        let Some(doc) = handle.document_for_values() else {
+        let Some(doc) = file_document_mut(file) else {
             return std::ptr::null_mut();
         };
         match doc.mapping_remove(target, &key) {
@@ -1314,30 +1410,36 @@ pub unsafe extern "C" fn asdf_sequence_append(
     sequence: *mut AsdfSequence,
     value: *mut AsdfValue,
 ) -> AsdfValueErr {
-    guard("asdf_sequence_append", AsdfValueErr::Unknown, || {
-        let (Some(file), Some(target)) = (value_file(sequence), value_node(sequence)) else {
-            return AsdfValueErr::Unknown;
-        };
-        let Some(child) = value_node(value) else {
-            return AsdfValueErr::Unknown;
-        };
-        let handle = unsafe { &mut *file };
-        let Some(doc) = handle.document_for_values() else {
-            return AsdfValueErr::Unknown;
-        };
+    guard("asdf_sequence_append", AsdfValueErr::Unknown, || sequence_append(sequence, value))
+}
 
-        let resolved = doc.resolve(target);
-        if !doc.node(resolved).is_sequence() {
-            return AsdfValueErr::TypeMismatch;
+/// Safe internal form of [`asdf_sequence_append`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn sequence_append(sequence: *mut AsdfSequence, value: *mut AsdfValue) -> AsdfValueErr {
+    let (Some(file), Some(target)) = (value_file(sequence), value_node(sequence)) else {
+        return AsdfValueErr::Unknown;
+    };
+    let Some(child) = value_node(value) else {
+        return AsdfValueErr::Unknown;
+    };
+    let Some(doc) = file_document_mut(file) else {
+        return AsdfValueErr::Unknown;
+    };
+
+    let resolved = doc.resolve(target);
+    if !doc.node(resolved).is_sequence() {
+        return AsdfValueErr::TypeMismatch;
+    }
+    match &mut doc.node_mut(resolved).data {
+        NodeData::Sequence { items, .. } => {
+            items.push(child);
+            AsdfValueErr::Ok
         }
-        match &mut doc.node_mut(resolved).data {
-            NodeData::Sequence { items, .. } => {
-                items.push(child);
-                AsdfValueErr::Ok
-            }
-            _ => AsdfValueErr::TypeMismatch,
-        }
-    })
+        _ => AsdfValueErr::TypeMismatch,
+    }
 }
 
 /// Remove an item from a sequence, returning it.
@@ -1354,8 +1456,7 @@ pub unsafe extern "C" fn asdf_sequence_pop(
         let (Some(file), Some(target)) = (value_file(sequence), value_node(sequence)) else {
             return std::ptr::null_mut();
         };
-        let handle = unsafe { &mut *file };
-        let Some(doc) = handle.document_for_values() else {
+        let Some(doc) = file_document_mut(file) else {
             return std::ptr::null_mut();
         };
         match doc.sequence_remove(target, i64::from(index)) {
@@ -1393,7 +1494,7 @@ macro_rules! container_setters {
                 if node.is_null() {
                     return AsdfValueErr::Unknown;
                 }
-                let result = unsafe { asdf_mapping_set(mapping, key, node) };
+                let result = mapping_set(mapping, key, node);
                 unsafe { crate::file_ffi::asdf_value_destroy(node) };
                 result
             })
@@ -1413,7 +1514,7 @@ macro_rules! container_setters {
                 if node.is_null() {
                     return AsdfValueErr::Unknown;
                 }
-                let result = unsafe { asdf_sequence_append(sequence, node) };
+                let result = sequence_append(sequence, node);
                 unsafe { crate::file_ffi::asdf_value_destroy(node) };
                 result
             })
@@ -1435,7 +1536,7 @@ macro_rules! container_setters {
                 if arr.is_null() || size < 0 {
                     return std::ptr::null_mut();
                 }
-                let sequence = unsafe { asdf_sequence_create(file) };
+                let sequence = sequence_create(file);
                 if sequence.is_null() {
                     return std::ptr::null_mut();
                 }
@@ -1544,11 +1645,11 @@ pub unsafe extern "C" fn asdf_mapping_set_string0(
         let Some(file) = value_file(mapping) else {
             return AsdfValueErr::Unknown;
         };
-        let node = unsafe { asdf_value_of_string0(file, value) };
+        let node = value_of_string0(file, value);
         if node.is_null() {
             return AsdfValueErr::Unknown;
         }
-        let result = unsafe { asdf_mapping_set(mapping, key, node) };
+        let result = mapping_set(mapping, key, node);
         unsafe { crate::file_ffi::asdf_value_destroy(node) };
         result
     })
@@ -1569,11 +1670,11 @@ pub unsafe extern "C" fn asdf_mapping_set_string(
         let Some(file) = value_file(mapping) else {
             return AsdfValueErr::Unknown;
         };
-        let node = unsafe { asdf_value_of_string(file, value, len) };
+        let node = value_of_string(file, value, len);
         if node.is_null() {
             return AsdfValueErr::Unknown;
         }
-        let result = unsafe { asdf_mapping_set(mapping, key, node) };
+        let result = mapping_set(mapping, key, node);
         unsafe { crate::file_ffi::asdf_value_destroy(node) };
         result
     })
@@ -1592,11 +1693,11 @@ pub unsafe extern "C" fn asdf_mapping_set_null(
         let Some(file) = value_file(mapping) else {
             return AsdfValueErr::Unknown;
         };
-        let node = unsafe { asdf_value_of_null(file) };
+        let node = value_of_null(file);
         if node.is_null() {
             return AsdfValueErr::Unknown;
         }
-        let result = unsafe { asdf_mapping_set(mapping, key, node) };
+        let result = mapping_set(mapping, key, node);
         unsafe { crate::file_ffi::asdf_value_destroy(node) };
         result
     })
@@ -1612,7 +1713,7 @@ pub unsafe extern "C" fn asdf_mapping_set_mapping(
     key: *const c_char,
     value: *mut AsdfMapping,
 ) -> AsdfValueErr {
-    unsafe { asdf_mapping_set(mapping, key, value) }
+    mapping_set(mapping, key, value)
 }
 
 /// Put a sequence into a mapping.
@@ -1625,7 +1726,7 @@ pub unsafe extern "C" fn asdf_mapping_set_sequence(
     key: *const c_char,
     value: *mut AsdfSequence,
 ) -> AsdfValueErr {
-    unsafe { asdf_mapping_set(mapping, key, value) }
+    mapping_set(mapping, key, value)
 }
 
 /// Append a NUL-terminated string to a sequence.
@@ -1638,17 +1739,29 @@ pub unsafe extern "C" fn asdf_sequence_append_string0(
     value: *const c_char,
 ) -> AsdfValueErr {
     guard("asdf_sequence_append_string0", AsdfValueErr::Unknown, || {
-        let Some(file) = value_file(sequence) else {
-            return AsdfValueErr::Unknown;
-        };
-        let node = unsafe { asdf_value_of_string0(file, value) };
-        if node.is_null() {
-            return AsdfValueErr::Unknown;
-        }
-        let result = unsafe { asdf_sequence_append(sequence, node) };
-        unsafe { crate::file_ffi::asdf_value_destroy(node) };
-        result
+        sequence_append_string0(sequence, value)
     })
+}
+
+/// Safe internal form of [`asdf_sequence_append_string0`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn sequence_append_string0(
+    sequence: *mut AsdfSequence,
+    value: *const c_char,
+) -> AsdfValueErr {
+    let Some(file) = value_file(sequence) else {
+        return AsdfValueErr::Unknown;
+    };
+    let node = value_of_string0(file, value);
+    if node.is_null() {
+        return AsdfValueErr::Unknown;
+    }
+    let result = sequence_append(sequence, node);
+    unsafe { crate::file_ffi::asdf_value_destroy(node) };
+    result
 }
 
 /// Append a counted string to a sequence.
@@ -1662,17 +1775,30 @@ pub unsafe extern "C" fn asdf_sequence_append_string(
     len: usize,
 ) -> AsdfValueErr {
     guard("asdf_sequence_append_string", AsdfValueErr::Unknown, || {
-        let Some(file) = value_file(sequence) else {
-            return AsdfValueErr::Unknown;
-        };
-        let node = unsafe { asdf_value_of_string(file, value, len) };
-        if node.is_null() {
-            return AsdfValueErr::Unknown;
-        }
-        let result = unsafe { asdf_sequence_append(sequence, node) };
-        unsafe { crate::file_ffi::asdf_value_destroy(node) };
-        result
+        sequence_append_string(sequence, value, len)
     })
+}
+
+/// Safe internal form of [`asdf_sequence_append_string`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn sequence_append_string(
+    sequence: *mut AsdfSequence,
+    value: *const c_char,
+    len: usize,
+) -> AsdfValueErr {
+    let Some(file) = value_file(sequence) else {
+        return AsdfValueErr::Unknown;
+    };
+    let node = value_of_string(file, value, len);
+    if node.is_null() {
+        return AsdfValueErr::Unknown;
+    }
+    let result = sequence_append(sequence, node);
+    unsafe { crate::file_ffi::asdf_value_destroy(node) };
+    result
 }
 
 /// Append a null to a sequence.
@@ -1681,18 +1807,25 @@ pub unsafe extern "C" fn asdf_sequence_append_string(
 /// `sequence` must be a valid handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_sequence_append_null(sequence: *mut AsdfSequence) -> AsdfValueErr {
-    guard("asdf_sequence_append_null", AsdfValueErr::Unknown, || {
-        let Some(file) = value_file(sequence) else {
-            return AsdfValueErr::Unknown;
-        };
-        let node = unsafe { asdf_value_of_null(file) };
-        if node.is_null() {
-            return AsdfValueErr::Unknown;
-        }
-        let result = unsafe { asdf_sequence_append(sequence, node) };
-        unsafe { crate::file_ffi::asdf_value_destroy(node) };
-        result
-    })
+    guard("asdf_sequence_append_null", AsdfValueErr::Unknown, || sequence_append_null(sequence))
+}
+
+/// Safe internal form of [`asdf_sequence_append_null`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn sequence_append_null(sequence: *mut AsdfSequence) -> AsdfValueErr {
+    let Some(file) = value_file(sequence) else {
+        return AsdfValueErr::Unknown;
+    };
+    let node = value_of_null(file);
+    if node.is_null() {
+        return AsdfValueErr::Unknown;
+    }
+    let result = sequence_append(sequence, node);
+    unsafe { crate::file_ffi::asdf_value_destroy(node) };
+    result
 }
 
 /// Append a mapping to a sequence.
@@ -1704,7 +1837,7 @@ pub unsafe extern "C" fn asdf_sequence_append_mapping(
     sequence: *mut AsdfSequence,
     value: *mut AsdfMapping,
 ) -> AsdfValueErr {
-    unsafe { asdf_sequence_append(sequence, value) }
+    sequence_append(sequence, value)
 }
 
 /// Append a nested sequence to a sequence.
@@ -1716,7 +1849,7 @@ pub unsafe extern "C" fn asdf_sequence_append_sequence(
     sequence: *mut AsdfSequence,
     value: *mut AsdfSequence,
 ) -> AsdfValueErr {
-    unsafe { asdf_sequence_append(sequence, value) }
+    sequence_append(sequence, value)
 }
 
 /// Build a sequence of nulls.
@@ -1732,12 +1865,12 @@ pub unsafe extern "C" fn asdf_sequence_of_null(
         if size < 0 {
             return std::ptr::null_mut();
         }
-        let sequence = unsafe { asdf_sequence_create(file) };
+        let sequence = sequence_create(file);
         if sequence.is_null() {
             return std::ptr::null_mut();
         }
         for _ in 0..size {
-            if unsafe { asdf_sequence_append_null(sequence) } != AsdfValueErr::Ok {
+            if sequence_append_null(sequence) != AsdfValueErr::Ok {
                 unsafe { asdf_sequence_destroy(sequence) };
                 return std::ptr::null_mut();
             }
@@ -1760,13 +1893,13 @@ pub unsafe extern "C" fn asdf_sequence_of_string0(
         if arr.is_null() || size < 0 {
             return std::ptr::null_mut();
         }
-        let sequence = unsafe { asdf_sequence_create(file) };
+        let sequence = sequence_create(file);
         if sequence.is_null() {
             return std::ptr::null_mut();
         }
         for index in 0..size as isize {
             let text = unsafe { *arr.offset(index) };
-            if unsafe { asdf_sequence_append_string0(sequence, text) } != AsdfValueErr::Ok {
+            if sequence_append_string0(sequence, text) != AsdfValueErr::Ok {
                 unsafe { asdf_sequence_destroy(sequence) };
                 return std::ptr::null_mut();
             }
@@ -1790,14 +1923,14 @@ pub unsafe extern "C" fn asdf_sequence_of_string(
         if arr.is_null() || lens.is_null() || size < 0 {
             return std::ptr::null_mut();
         }
-        let sequence = unsafe { asdf_sequence_create(file) };
+        let sequence = sequence_create(file);
         if sequence.is_null() {
             return std::ptr::null_mut();
         }
         for index in 0..size as isize {
             let text = unsafe { *arr.offset(index) };
             let len = unsafe { *lens.offset(index) };
-            if unsafe { asdf_sequence_append_string(sequence, text, len) } != AsdfValueErr::Ok {
+            if sequence_append_string(sequence, text, len) != AsdfValueErr::Ok {
                 unsafe { asdf_sequence_destroy(sequence) };
                 return std::ptr::null_mut();
             }
@@ -1819,8 +1952,7 @@ pub unsafe extern "C" fn asdf_mapping_copy(mapping: *mut AsdfMapping) -> *mut As
         let (Some(file), Some(source)) = (value_file(mapping), value_node(mapping)) else {
             return std::ptr::null_mut();
         };
-        let handle = unsafe { &mut *file };
-        let Some(doc) = handle.document_for_values() else {
+        let Some(doc) = file_document_mut(file) else {
             return std::ptr::null_mut();
         };
         let Some(entries) = doc.mapping_entries(source).map(<[_]>::to_vec) else {
@@ -1850,8 +1982,7 @@ pub unsafe extern "C" fn asdf_mapping_update(
         let Some(source) = value_node(update) else {
             return AsdfValueErr::Unknown;
         };
-        let handle = unsafe { &mut *file };
-        let Some(doc) = handle.document_for_values() else {
+        let Some(doc) = file_document_mut(file) else {
             return AsdfValueErr::Unknown;
         };
         if !doc.resolved(target).is_mapping() || !doc.resolved(source).is_mapping() {
@@ -1935,7 +2066,7 @@ pub unsafe extern "C" fn asdf_value_as_scalar(
         if value.is_null() {
             return AsdfValueErr::Unknown;
         }
-        if !unsafe { asdf_value_is_scalar(value) } {
+        if !value_is_scalar(value) {
             return AsdfValueErr::TypeMismatch;
         }
         scalar_with_len(value, out, out_len)
@@ -2230,7 +2361,7 @@ pub unsafe extern "C" fn asdf_value_find(
     root: *mut AsdfValue,
     pred: AsdfValuePred,
 ) -> *mut AsdfValue {
-    unsafe { asdf_value_find_ex(root, pred, false, None, -1) }
+    value_find_ex(root, pred, false, None, -1)
 }
 
 /// Find the first match with control over traversal order and depth.
@@ -2249,19 +2380,34 @@ pub unsafe extern "C" fn asdf_value_find_ex(
     max_depth: isize,
 ) -> *mut AsdfValue {
     guard("asdf_value_find_ex", std::ptr::null_mut(), || {
-        let iter = find_iter_new(root, pred, depth_first, descend_pred, max_depth);
-        if iter.is_null() {
-            return std::ptr::null_mut();
-        }
-        let mut boxed = unsafe { Box::from_raw(iter) };
-        if !boxed.step() {
-            return std::ptr::null_mut();
-        }
-        // Hand the match to the caller rather than letting the drop free it.
-        let found = boxed.public.value.cast::<AsdfValue>();
-        boxed.public.value = std::ptr::null_mut();
-        found
+        value_find_ex(root, pred, depth_first, descend_pred, max_depth)
     })
+}
+
+/// Safe internal form of [`asdf_value_find_ex`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn value_find_ex(
+    root: *mut AsdfValue,
+    pred: AsdfValuePred,
+    depth_first: bool,
+    descend_pred: AsdfValuePred,
+    max_depth: isize,
+) -> *mut AsdfValue {
+    let iter = find_iter_new(root, pred, depth_first, descend_pred, max_depth);
+    if iter.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mut boxed = unsafe { Box::from_raw(iter) };
+    if !boxed.step() {
+        return std::ptr::null_mut();
+    }
+    // Hand the match to the caller rather than letting the drop free it.
+    let found = boxed.public.value.cast::<AsdfValue>();
+    boxed.public.value = std::ptr::null_mut();
+    found
 }
 
 /// Start a breadth-first search yielding every value matching `pred`.
@@ -2274,7 +2420,7 @@ pub unsafe extern "C" fn asdf_find_iter_init(
     root: *mut AsdfValue,
     pred: AsdfValuePred,
 ) -> *mut crate::types::asdf_find_iter_t {
-    unsafe { asdf_find_iter_init_ex(root, pred, false, None, -1) }
+    find_iter_init_ex(root, pred, false, None, -1)
 }
 
 /// Start a search with control over traversal order and depth.
@@ -2290,9 +2436,24 @@ pub unsafe extern "C" fn asdf_find_iter_init_ex(
     max_depth: isize,
 ) -> *mut crate::types::asdf_find_iter_t {
     guard("asdf_find_iter_init_ex", std::ptr::null_mut(), || {
-        find_iter_new(root, pred, depth_first, descend_pred, max_depth)
-            .cast::<crate::types::asdf_find_iter_t>()
+        find_iter_init_ex(root, pred, depth_first, descend_pred, max_depth)
     })
+}
+
+/// Safe internal form of [`asdf_find_iter_init_ex`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn find_iter_init_ex(
+    root: *mut AsdfValue,
+    pred: AsdfValuePred,
+    depth_first: bool,
+    descend_pred: AsdfValuePred,
+    max_depth: isize,
+) -> *mut crate::types::asdf_find_iter_t {
+    find_iter_new(root, pred, depth_first, descend_pred, max_depth)
+        .cast::<crate::types::asdf_find_iter_t>()
 }
 
 /// Advance a find iterator.
@@ -2318,7 +2479,7 @@ pub unsafe extern "C" fn asdf_value_find_iter_next(
         if state.step() {
             return true;
         }
-        unsafe { asdf_find_iter_destroy(current) };
+        find_iter_destroy(current);
         unsafe { write_out(iter, std::ptr::null_mut()) };
         false
     })
@@ -2331,13 +2492,20 @@ pub unsafe extern "C" fn asdf_value_find_iter_next(
 /// already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_find_iter_destroy(iter: *mut crate::types::asdf_find_iter_t) {
-    guard("asdf_find_iter_destroy", (), || {
-        if iter.is_null() {
-            return;
-        }
-        let mut boxed = unsafe { Box::from_raw(iter.cast::<FindIter>()) };
-        boxed.clear_current();
-    })
+    guard("asdf_find_iter_destroy", (), || find_iter_destroy(iter))
+}
+
+/// Safe internal form of [`asdf_find_iter_destroy`].
+///
+/// The exported entry point is `unsafe extern "C"`, so calling it from
+/// inside the crate would need an `unsafe` block at every site to assert a
+/// contract the crate itself is upholding. Callers use this instead.
+pub(crate) fn find_iter_destroy(iter: *mut crate::types::asdf_find_iter_t) {
+    if iter.is_null() {
+        return;
+    }
+    let mut boxed = unsafe { Box::from_raw(iter.cast::<FindIter>()) };
+    boxed.clear_current();
 }
 
 #[cfg(test)]
