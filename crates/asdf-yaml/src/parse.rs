@@ -260,9 +260,126 @@ pub fn parse_document(input: &str) -> Result<Document, ParseError> {
     Ok(doc)
 }
 
+/// A YAML parse event, as the low-level event API surfaces it.
+///
+/// This is deliberately flat rather than a tree: it exists for the streaming
+/// API, which reports what the scanner saw in the order it saw it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum YamlEventKind {
+    StreamStart,
+    StreamEnd,
+    DocumentStart,
+    DocumentEnd,
+    MappingStart,
+    MappingEnd,
+    SequenceStart,
+    SequenceEnd,
+    Scalar,
+    Alias,
+}
+
+/// One event from [`scan_events`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct YamlEvent {
+    pub kind: YamlEventKind,
+    /// The node's tag in full URI form, when it carried one.
+    pub tag: Option<String>,
+    /// The scalar's text, for [`YamlEventKind::Scalar`].
+    pub value: Option<String>,
+}
+
+/// Collects the raw event stream without building a tree.
+#[derive(Default)]
+struct EventCollector {
+    events: Vec<YamlEvent>,
+}
+
+impl EventCollector {
+    fn push(&mut self, kind: YamlEventKind, tag: Option<String>, value: Option<String>) {
+        self.events.push(YamlEvent { kind, tag, value });
+    }
+}
+
+impl<'i> SpannedEventReceiver<'i> for EventCollector {
+    fn on_event(&mut self, ev: Event<'i>, _span: SapSpan) {
+        let tag_of = |tag: Option<std::borrow::Cow<'_, saphyr_parser::Tag>>| {
+            tag.map(|t| Tag::new(t.handle.clone(), t.suffix.clone()).full())
+        };
+        match ev {
+            Event::Nothing => {}
+            Event::StreamStart => self.push(YamlEventKind::StreamStart, None, None),
+            Event::StreamEnd => self.push(YamlEventKind::StreamEnd, None, None),
+            Event::DocumentStart(_) => self.push(YamlEventKind::DocumentStart, None, None),
+            Event::DocumentEnd => self.push(YamlEventKind::DocumentEnd, None, None),
+            Event::MappingStart(_, tag) => {
+                self.push(YamlEventKind::MappingStart, tag_of(tag), None);
+            }
+            Event::MappingEnd => self.push(YamlEventKind::MappingEnd, None, None),
+            Event::SequenceStart(_, tag) => {
+                self.push(YamlEventKind::SequenceStart, tag_of(tag), None);
+            }
+            Event::SequenceEnd => self.push(YamlEventKind::SequenceEnd, None, None),
+            Event::Scalar(value, _, _, tag) => {
+                self.push(YamlEventKind::Scalar, tag_of(tag), Some(value.into_owned()));
+            }
+            Event::Alias(_) => self.push(YamlEventKind::Alias, None, None),
+        }
+    }
+}
+
+/// The raw YAML event stream for a document, without building a tree.
+///
+/// Used by the low-level event API, which reports YAML sub-events as the
+/// scanner produces them.
+pub fn scan_events(input: &str) -> Result<Vec<YamlEvent>, ParseError> {
+    let mut collector = EventCollector::default();
+    Parser::new_from_str(input).load(&mut collector, true)?;
+    Ok(collector.events)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_events_carry_tags_and_scalars() {
+        let events = scan_events(
+            "%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\nk: v\nl: [1]\n",
+        )
+        .unwrap();
+
+        let kinds: Vec<YamlEventKind> = events.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                YamlEventKind::StreamStart,
+                YamlEventKind::DocumentStart,
+                YamlEventKind::MappingStart,
+                YamlEventKind::Scalar,
+                YamlEventKind::Scalar,
+                YamlEventKind::Scalar,
+                YamlEventKind::SequenceStart,
+                YamlEventKind::Scalar,
+                YamlEventKind::SequenceEnd,
+                YamlEventKind::MappingEnd,
+                YamlEventKind::DocumentEnd,
+                YamlEventKind::StreamEnd,
+            ]
+        );
+
+        // The root's tag is reported expanded through the `%TAG` directive.
+        assert_eq!(events[2].tag.as_deref(), Some("tag:stsci.edu:asdf/core/asdf-1.1.0"));
+        assert_eq!(events[3].value.as_deref(), Some("k"));
+        assert_eq!(events[4].value.as_deref(), Some("v"));
+        assert!(events[3].tag.is_none());
+    }
+
+    #[test]
+    fn raw_events_report_aliases_without_expanding_them() {
+        let events = scan_events("a: &x 1\nb: *x\n").unwrap();
+        assert_eq!(events.iter().filter(|e| e.kind == YamlEventKind::Alias).count(), 1);
+    }
+
     use crate::tag::ASDF_STANDARD_TAG_PREFIX;
 
     #[test]

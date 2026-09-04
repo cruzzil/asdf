@@ -113,6 +113,12 @@ struct NdarrayState {
     compression: Compression,
     /// Where the data will be written.
     storage: AsdfArrayStorage,
+    /// The file the array was read from, for `asdf_ndarray_block`.
+    file: *mut crate::file_ffi::AsdfFile,
+    /// The index of the block holding the data, when it is not inline.
+    block_index: Option<usize>,
+    /// The block view handed out by `asdf_ndarray_block`, owned here.
+    block: *mut crate::block_ffi::AsdfBlock,
 }
 
 fn scalar_abi(t: ScalarType) -> ScalarTypeAbi {
@@ -200,6 +206,9 @@ pub(crate) fn make_ndarray(parsed: Ndarray, shape: Vec<u64>) -> *mut asdf_ndarra
         allocated: None,
         compression: Compression::None,
         storage: AsdfArrayStorage::Internal,
+        file: std::ptr::null_mut(),
+        block_index: None,
+        block: std::ptr::null_mut(),
     });
 
     // The compound-field storage must be sized before any pointer into it is
@@ -295,6 +304,9 @@ fn ensure_state<'a>(array: *mut asdf_ndarray_t) -> Option<&'a mut NdarrayState> 
         allocated: None,
         compression: Compression::None,
         storage: AsdfArrayStorage::Internal,
+        file: std::ptr::null_mut(),
+        block_index: None,
+        block: std::ptr::null_mut(),
     });
     unsafe { (*array)._reserved = Box::into_raw(state).cast::<c_void>() };
     state_of(array)
@@ -930,6 +942,7 @@ fn ndarray_from_value(value: *mut crate::file_ffi::AsdfValue) -> *mut asdf_ndarr
     // is usable for as long as the handle is.
     let mut data = None;
     let mut block_len = None;
+    let mut block_index = None;
     if let Some(file) = value_file(value)
         && let Some(reader) = file_reader(file)
     {
@@ -938,6 +951,7 @@ fn ndarray_from_value(value: *mut crate::file_ffi::AsdfValue) -> *mut asdf_ndarr
             Source::LastBlock => reader.block_count().checked_sub(1),
             _ => None,
         };
+        block_index = index;
         if let Some(index) = index
             && let Ok(bytes) = reader.block_data(index)
         {
@@ -952,6 +966,12 @@ fn ndarray_from_value(value: *mut crate::file_ffi::AsdfValue) -> *mut asdf_ndarr
     let array = make_ndarray(parsed, shape);
     if let Some(bytes) = data {
         set_data(array, bytes);
+    }
+    // Remember where the data came from so `asdf_ndarray_block` can hand
+    // back a view of the underlying block.
+    if let Some(state) = state_of(array) {
+        state.file = value_file(value).unwrap_or(std::ptr::null_mut());
+        state.block_index = block_index;
     }
     array
 }
@@ -1065,7 +1085,11 @@ pub unsafe extern "C" fn asdf_ndarray_deinit(ndarray: *mut asdf_ndarray_t) {
         }
         let array = unsafe { &mut *ndarray };
         if !array._reserved.is_null() {
-            drop(unsafe { Box::from_raw(array._reserved.cast::<NdarrayState>()) });
+            let state = unsafe { Box::from_raw(array._reserved.cast::<NdarrayState>()) };
+            if !state.block.is_null() {
+                unsafe { crate::block_ffi::asdf_block_close(state.block) };
+            }
+            drop(state);
             array._reserved = std::ptr::null_mut();
         }
         // The public pointers all borrowed from the state that just went.
@@ -1317,6 +1341,285 @@ pub unsafe extern "C" fn asdf_set_ndarray(
     })
 }
 
+// ---- Blocks and tiles ------------------------------------------------
+
+/// The block underlying an array, or null when its data is inline.
+///
+/// The view is opened on first use and owned by the array, so it must not be
+/// closed by the caller; it is released with the array.
+///
+/// # Safety
+/// `ndarray` must be null or a valid `asdf_ndarray_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_ndarray_block(
+    ndarray: *mut asdf_ndarray_t,
+) -> *mut crate::block_ffi::AsdfBlock {
+    guard("asdf_ndarray_block", std::ptr::null_mut(), || {
+        let Some(state) = state_of(ndarray) else {
+            return std::ptr::null_mut();
+        };
+        if !state.block.is_null() {
+            return state.block;
+        }
+        let (Some(index), false) = (state.block_index, state.file.is_null()) else {
+            return std::ptr::null_mut();
+        };
+        state.block = unsafe { crate::block_ffi::asdf_block_open(state.file, index) };
+        state.block
+    })
+}
+
+/// Copy `count` elements starting at `flat` into `dst`, converting to `target`.
+fn write_elements(
+    elements: &[Element],
+    flat: usize,
+    count: usize,
+    target: ScalarType,
+    width: usize,
+    dst: &mut [u8],
+) -> NdarrayErr {
+    for step in 0..count {
+        let Some(element) = elements.get(flat + step) else {
+            return NdarrayErr::OutOfBounds;
+        };
+        let slot = &mut dst[step * width..(step + 1) * width];
+        let err = write_converted(element, target, slot);
+        if err != NdarrayErr::Ok {
+            return err;
+        }
+    }
+    NdarrayErr::Ok
+}
+
+/// Hand a buffer back through `dst`, allocating with `malloc` if asked.
+///
+/// libasdf lets the caller either supply storage or take a fresh allocation
+/// by pointing `dst` at a null pointer, in which case the caller frees it
+/// with `free` -- so `malloc` rather than Rust's allocator.
+fn deliver(buffer: &[u8], dst: *mut *mut c_void) -> NdarrayErr {
+    if dst.is_null() {
+        return NdarrayErr::Inval;
+    }
+    let existing = unsafe { *dst };
+    if existing.is_null() {
+        let allocation = unsafe { libc::malloc(buffer.len().max(1)) };
+        if allocation.is_null() {
+            return NdarrayErr::Oom;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(buffer.as_ptr(), allocation.cast::<u8>(), buffer.len());
+            *dst = allocation;
+        }
+    } else {
+        unsafe {
+            std::ptr::copy_nonoverlapping(buffer.as_ptr(), existing.cast::<u8>(), buffer.len());
+        }
+    }
+    NdarrayErr::Ok
+}
+
+/// Read one element, converting to `dst_t`.
+///
+/// # Safety
+/// `ndarray` must be a valid `asdf_ndarray_t`; `indices` must point to `ndim`
+/// values; `dst` must have room for one value of `dst_t`. `dst` need not be
+/// aligned.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_ndarray_read_at(
+    ndarray: *mut asdf_ndarray_t,
+    indices: *const u64,
+    dst_t: ScalarTypeAbi,
+    dst: *mut c_void,
+) -> NdarrayErr {
+    guard("asdf_ndarray_read_at", NdarrayErr::Inval, || {
+        let Some(state) = state_of(ndarray) else {
+            return NdarrayErr::Inval;
+        };
+        if indices.is_null() || dst.is_null() {
+            return NdarrayErr::Inval;
+        }
+        let idx = unsafe { std::slice::from_raw_parts(indices, state.shape.len()) };
+        let Some(flat) = flat_index(&state.shape, idx) else {
+            return NdarrayErr::OutOfBounds;
+        };
+        let Some(elements) = elements_of(state) else {
+            return NdarrayErr::Inval;
+        };
+        let Some(element) = elements.get(flat) else {
+            return NdarrayErr::OutOfBounds;
+        };
+
+        let target = match scalar_from_abi(dst_t) {
+            ScalarType::Unknown => state.parsed.datatype.scalar,
+            other => other,
+        };
+        let Ok(width) = usize::try_from(target.size()) else {
+            return NdarrayErr::Inval;
+        };
+        if width == 0 {
+            return NdarrayErr::Conversion;
+        }
+        // Written into a local first because `dst` carries no alignment
+        // guarantee, then copied out byte by byte.
+        let mut scratch = vec![0u8; width];
+        let err = write_converted(element, target, &mut scratch);
+        if err != NdarrayErr::Ok {
+            return err;
+        }
+        unsafe { std::ptr::copy_nonoverlapping(scratch.as_ptr(), dst.cast::<u8>(), width) };
+        NdarrayErr::Ok
+    })
+}
+
+/// Read an N-dimensional tile, converting to `dst_t`.
+///
+/// # Safety
+/// `origin` and `shape` must each point to `ndim` values; `dst` must be
+/// writable, pointing either at storage large enough for the tile or at a
+/// null pointer, in which case a buffer is allocated for the caller to
+/// `free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_ndarray_read_tile_ndim(
+    ndarray: *mut asdf_ndarray_t,
+    origin: *const u64,
+    shape: *const u64,
+    dst_t: ScalarTypeAbi,
+    dst: *mut *mut c_void,
+) -> NdarrayErr {
+    guard("asdf_ndarray_read_tile_ndim", NdarrayErr::Inval, || {
+        let Some(state) = state_of(ndarray) else {
+            return NdarrayErr::Inval;
+        };
+        if origin.is_null() || shape.is_null() {
+            return NdarrayErr::Inval;
+        }
+        let ndim = state.shape.len();
+        if ndim == 0 {
+            return NdarrayErr::Inval;
+        }
+        let origin = unsafe { std::slice::from_raw_parts(origin, ndim) }.to_vec();
+        let tile = unsafe { std::slice::from_raw_parts(shape, ndim) }.to_vec();
+
+        // Every corner of the tile has to land inside the array.
+        for axis in 0..ndim {
+            let Some(end) = origin[axis].checked_add(tile[axis]) else {
+                return NdarrayErr::OutOfBounds;
+            };
+            if end > state.shape[axis] {
+                return NdarrayErr::OutOfBounds;
+            }
+        }
+
+        let target = match scalar_from_abi(dst_t) {
+            ScalarType::Unknown => state.parsed.datatype.scalar,
+            other => other,
+        };
+        let Ok(width) = usize::try_from(target.size()) else {
+            return NdarrayErr::Inval;
+        };
+        if width == 0 {
+            return NdarrayErr::Conversion;
+        }
+
+        let mut count: u64 = 1;
+        for extent in &tile {
+            let Some(next) = count.checked_mul(*extent) else {
+                return NdarrayErr::Inval;
+            };
+            count = next;
+        }
+        let Ok(count) = usize::try_from(count) else {
+            return NdarrayErr::Inval;
+        };
+        if count == 0 {
+            return deliver(&[], dst);
+        }
+
+        let Some(elements) = elements_of(state) else {
+            return NdarrayErr::Inval;
+        };
+
+        // The tile is contiguous along the last axis only, so copy it one
+        // run at a time and step the outer indices by hand.
+        let run = tile[ndim - 1] as usize;
+        let mut buffer = vec![0u8; count * width];
+        let mut cursor = origin.clone();
+        let mut written = 0usize;
+        loop {
+            let Some(flat) = flat_index(&state.shape, &cursor) else {
+                return NdarrayErr::OutOfBounds;
+            };
+            let slice = &mut buffer[written * width..(written + run) * width];
+            let err = write_elements(&elements, flat, run, target, width, slice);
+            if err != NdarrayErr::Ok {
+                return err;
+            }
+            written += run;
+
+            // Advance the outer axes odometer-style; the last is the run.
+            let mut axis = ndim as isize - 2;
+            loop {
+                if axis < 0 {
+                    return deliver(&buffer, dst);
+                }
+                let a = axis as usize;
+                cursor[a] += 1;
+                if cursor[a] < origin[a] + tile[a] {
+                    break;
+                }
+                cursor[a] = origin[a];
+                axis -= 1;
+            }
+        }
+    })
+}
+
+/// Read a 2-D tile, converting to `dst_t`.
+///
+/// For an array of more than two dimensions, `plane_origin` gives the
+/// `ndim - 2` outer coordinates; null selects the first plane. `x`/`width`
+/// index the last axis and `y`/`height` the one before it.
+///
+/// # Safety
+/// See [`asdf_ndarray_read_tile_ndim`]; `plane_origin`, when not null, must
+/// point to `ndim - 2` values.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn asdf_ndarray_read_tile_2d(
+    ndarray: *mut asdf_ndarray_t,
+    x: u64,
+    y: u64,
+    width: u64,
+    height: u64,
+    plane_origin: *const u64,
+    dst_t: ScalarTypeAbi,
+    dst: *mut *mut c_void,
+) -> NdarrayErr {
+    guard("asdf_ndarray_read_tile_2d", NdarrayErr::Inval, || {
+        let Some(state) = state_of(ndarray) else {
+            return NdarrayErr::Inval;
+        };
+        let ndim = state.shape.len();
+        if ndim < 2 {
+            return NdarrayErr::Inval;
+        }
+        let planes = ndim - 2;
+
+        let mut origin = vec![0u64; ndim];
+        let mut tile = vec![1u64; ndim];
+        if planes > 0 && !plane_origin.is_null() {
+            let outer = unsafe { std::slice::from_raw_parts(plane_origin, planes) };
+            origin[..planes].copy_from_slice(outer);
+        }
+        origin[ndim - 2] = y;
+        origin[ndim - 1] = x;
+        tile[ndim - 2] = height;
+        tile[ndim - 1] = width;
+
+        unsafe { asdf_ndarray_read_tile_ndim(ndarray, origin.as_ptr(), tile.as_ptr(), dst_t, dst) }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1338,6 +1641,150 @@ mod tests {
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         set_data(array, bytes);
         array
+    }
+
+    /// A 3x4 little-endian int32 array holding 0..12 in row-major order.
+    fn int32_grid() -> *mut asdf_ndarray_t {
+        let doc = parse_document(
+            "a:\n  source: 0\n  shape: [3, 4]\n  datatype: int32\n  byteorder: little\n",
+        )
+        .unwrap();
+        let root = doc.root().unwrap();
+        let parsed = CoreNdarray::parse(&doc, doc.mapping_get(root, "a").unwrap()).unwrap();
+        let array = make_ndarray(parsed, vec![3, 4]);
+        let bytes: Vec<u8> = (0i32..12).flat_map(i32::to_le_bytes).collect();
+        set_data(array, bytes);
+        array
+    }
+
+    #[test]
+    fn reads_one_element_at_indices() {
+        let array = int32_grid();
+        let indices: [u64; 2] = [2, 1];
+        let mut out: i32 = 0;
+        assert_eq!(
+            unsafe {
+                asdf_ndarray_read_at(
+                    array,
+                    indices.as_ptr(),
+                    ScalarType::Int32 as ScalarTypeAbi,
+                    std::ptr::from_mut(&mut out).cast(),
+                )
+            },
+            NdarrayErr::Ok
+        );
+        assert_eq!(out, 9, "row 2, column 1 of a 3x4 array holding 0..12");
+
+        // Converting on the way out is allowed.
+        let mut wide: f64 = 0.0;
+        assert_eq!(
+            unsafe {
+                asdf_ndarray_read_at(
+                    array,
+                    indices.as_ptr(),
+                    ScalarType::Float64 as ScalarTypeAbi,
+                    std::ptr::from_mut(&mut wide).cast(),
+                )
+            },
+            NdarrayErr::Ok
+        );
+        assert!((wide - 9.0).abs() < f64::EPSILON);
+
+        let past_end: [u64; 2] = [3, 0];
+        assert_eq!(
+            unsafe {
+                asdf_ndarray_read_at(
+                    array,
+                    past_end.as_ptr(),
+                    ScalarType::Int32 as ScalarTypeAbi,
+                    std::ptr::from_mut(&mut out).cast(),
+                )
+            },
+            NdarrayErr::OutOfBounds
+        );
+        unsafe { asdf_ndarray_destroy(array) };
+    }
+
+    #[test]
+    fn reads_a_2d_tile() {
+        let array = int32_grid();
+        // A 2x2 tile whose origin is (x=1, y=1): rows 1-2, columns 1-2.
+        let mut buffer = [0i32; 4];
+        let mut dst = buffer.as_mut_ptr().cast::<c_void>();
+        assert_eq!(
+            unsafe {
+                asdf_ndarray_read_tile_2d(
+                    array,
+                    1,
+                    1,
+                    2,
+                    2,
+                    std::ptr::null(),
+                    ScalarType::Int32 as ScalarTypeAbi,
+                    &mut dst,
+                )
+            },
+            NdarrayErr::Ok
+        );
+        assert_eq!(buffer, [5, 6, 9, 10]);
+        unsafe { asdf_ndarray_destroy(array) };
+    }
+
+    #[test]
+    fn a_tile_may_not_run_past_the_edge() {
+        let array = int32_grid();
+        let mut buffer = [0i32; 4];
+        let mut dst = buffer.as_mut_ptr().cast::<c_void>();
+        assert_eq!(
+            unsafe {
+                asdf_ndarray_read_tile_2d(
+                    array,
+                    3,
+                    1,
+                    2,
+                    2,
+                    std::ptr::null(),
+                    ScalarType::Int32 as ScalarTypeAbi,
+                    &mut dst,
+                )
+            },
+            NdarrayErr::OutOfBounds
+        );
+        unsafe { asdf_ndarray_destroy(array) };
+    }
+
+    #[test]
+    fn an_ndim_tile_can_allocate_its_own_buffer() {
+        let array = int32_grid();
+        let origin: [u64; 2] = [0, 2];
+        let shape: [u64; 2] = [3, 2];
+        // A null destination asks the library to allocate.
+        let mut dst: *mut c_void = std::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                asdf_ndarray_read_tile_ndim(
+                    array,
+                    origin.as_ptr(),
+                    shape.as_ptr(),
+                    ScalarType::Int32 as ScalarTypeAbi,
+                    &mut dst,
+                )
+            },
+            NdarrayErr::Ok
+        );
+        assert!(!dst.is_null());
+        let got = unsafe { std::slice::from_raw_parts(dst.cast::<i32>(), 6) };
+        assert_eq!(got, [2, 3, 6, 7, 10, 11]);
+        unsafe { libc::free(dst) };
+        unsafe { asdf_ndarray_destroy(array) };
+    }
+
+    #[test]
+    fn an_inline_array_has_no_block() {
+        let array = int32_grid();
+        // Built without a file behind it, so there is no block to hand back.
+        assert!(unsafe { asdf_ndarray_block(array) }.is_null());
+        unsafe { asdf_ndarray_destroy(array) };
     }
 
     #[test]

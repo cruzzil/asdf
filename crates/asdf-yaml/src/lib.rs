@@ -29,7 +29,7 @@ pub use compare::{CompareOptions, Comparison, Difference, compare, compare_from}
 pub use document::{Document, YamlVersion};
 pub use emit::{EmitError, EmitOptions, emit, emit_with};
 pub use node::{CollectionStyle, Entry, Node, NodeData, NodeId, ScalarStyle, Span};
-pub use parse::{ParseError, parse_document};
+pub use parse::{ParseError, YamlEvent, YamlEventKind, parse_document, scan_events};
 pub use path::{Component, Path, PathError};
 pub use scalar::{Resolved, Schema, ValueType, resolve, resolve_tagged};
 pub use tag::{ASDF_CORE_TAG_PREFIX, ASDF_STANDARD_TAG_PREFIX, Tag, TagHandle};

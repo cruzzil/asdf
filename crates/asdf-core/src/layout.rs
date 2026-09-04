@@ -101,6 +101,11 @@ pub struct Layout {
     pub blocks: Vec<BlockLocation>,
     /// Byte offset of the block index header, if one was found.
     pub block_index_pos: Option<u64>,
+    /// The offsets listed in the block index, whether or not it was accepted.
+    ///
+    /// Kept even when the index is rejected: the low-level event API reports
+    /// what the file says, and leaves judging it to the reader.
+    pub block_index_offsets: Vec<u64>,
     /// Why the block index was not used, if it was found but rejected.
     pub index_rejection: Option<IndexRejection>,
 }
@@ -339,6 +344,7 @@ fn scan_block_index(buf: &[u8], out: &mut Layout) {
         out.index_rejection = Some(IndexRejection::Unparseable);
         return;
     };
+    out.block_index_offsets.clone_from(&offsets);
 
     if offsets.windows(2).any(|w| w[1] <= w[0]) {
         out.index_rejection = Some(IndexRejection::NotMonotonic);
@@ -381,6 +387,7 @@ pub fn scan(buf: &[u8]) -> Result<Layout> {
         tree: None,
         blocks: Vec::new(),
         block_index_pos: None,
+        block_index_offsets: Vec::new(),
         index_rejection: None,
     };
 

@@ -1020,3 +1020,286 @@ fn shim_entry_points_are_exported() {
         assert!(text.contains(sym), "{sym} is missing from the shared library's dynamic symbols");
     }
 }
+
+/// Every `ASDF_EXPORT` declaration in the headers must resolve at link time.
+///
+/// The complement of [`exports_only_the_asdf_namespace`]: that one catches
+/// symbols we export and should not, this one catches symbols upstream's
+/// headers promise and we do not provide. A C program that compiles against
+/// the vendored headers can call any of them, so a missing one is a link
+/// error in a consumer rather than anything the Rust build would notice.
+///
+/// The list is taken from the preprocessed headers rather than a checked-in
+/// file, so re-vendoring upstream's headers moves the goalposts by itself.
+#[test]
+fn every_declared_export_is_defined() {
+    if !have_c_compiler() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let Some(lib) = shared_library() else {
+        eprintln!("skipping: shared library not built");
+        return;
+    };
+
+    let declared = declared_exports();
+    assert!(
+        declared.len() > 300,
+        "only {} exports found in the headers; the scan is probably broken",
+        declared.len()
+    );
+
+    let defined = defined_symbols(&lib);
+    if defined.is_empty() {
+        eprintln!("skipping: nm unavailable");
+        return;
+    }
+
+    let mut missing: Vec<&String> = declared.iter().filter(|s| !defined.contains(*s)).collect();
+    missing.sort();
+    assert!(
+        missing.is_empty(),
+        "{} of {} declared exports are missing from {}:\n    {}",
+        missing.len(),
+        declared.len(),
+        lib.display(),
+        missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n    ")
+    );
+    eprintln!("all {} declared exports are defined", declared.len());
+}
+
+/// Every symbol the vendored headers declare with `ASDF_EXPORT`.
+///
+/// Read out of the preprocessed headers: `ASDF_EXPORT` expands to the
+/// visibility attribute, so each declaration is the identifier just before
+/// the first `(` that follows one.
+fn declared_exports() -> std::collections::BTreeSet<String> {
+    const MARKER: &str = r#"__attribute__((visibility("default")))"#;
+
+    let out_dir = target_dir().join("abi-tests");
+    std::fs::create_dir_all(&out_dir).expect("create abi-tests dir");
+    let src = out_dir.join("declared_exports.c");
+    std::fs::write(&src, "#include <asdf.h>\n").expect("write probe source");
+
+    let mut cmd = Command::new(c_compiler());
+    cmd.arg("-E").arg(&src);
+    for dir in include_dirs() {
+        cmd.arg("-I").arg(dir);
+    }
+    let out = cmd.output().expect("run the preprocessor");
+    assert!(
+        out.status.success(),
+        "preprocessing failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    let mut names = std::collections::BTreeSet::new();
+    for chunk in text.split(MARKER).skip(1) {
+        // The declarator runs up to the parameter list for a function, or to
+        // the semicolon for an `extern` variable such as `libasdf_version`.
+        let paren = chunk.find('(').unwrap_or(usize::MAX);
+        let semi = chunk.find(';').unwrap_or(usize::MAX);
+        let stop = paren.min(semi);
+        if stop == usize::MAX {
+            continue;
+        }
+        let head = &chunk[..stop];
+        let name: String = head
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if name.starts_with("asdf_") || name.starts_with("ASDF_") {
+            names.insert(name);
+        }
+    }
+    names
+}
+
+/// The dynamic symbols a shared library defines, version suffixes stripped.
+fn defined_symbols(lib: &Path) -> std::collections::BTreeSet<String> {
+    let Ok(out) = Command::new("nm").arg("-D").arg("--defined-only").arg(lib).output() else {
+        return std::collections::BTreeSet::new();
+    };
+    if !out.status.success() {
+        return std::collections::BTreeSet::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(2))
+        .map(|sym| sym.split("@@").next().unwrap_or(sym).to_string())
+        .collect()
+}
+
+/// The asdf-standard reference corpus, if it is available.
+fn standard_dir() -> Option<PathBuf> {
+    let path = std::env::var_os("ASDF_STANDARD_DIR").map(PathBuf::from).or_else(|| {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("code/asdf-standard"))
+    })?;
+    path.is_dir().then_some(path)
+}
+
+/// The low-level event API, walked from C over a reference file.
+///
+/// This is upstream's `tests/test-event.c` reduced to what the *public*
+/// headers expose: its own version reaches into the internal `asdf_event_t`
+/// definition, which a drop-in consumer cannot. The event sequence, the YAML
+/// sub-events and their tags, and the block header values are all taken from
+/// that test, so this checks the same facts through the supported surface.
+#[test]
+fn c_caller_can_walk_the_event_stream() {
+    if !have_c_compiler() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    if shared_library().is_none() {
+        eprintln!("skipping: shared library not built");
+        return;
+    }
+    let Some(standard) = standard_dir() else {
+        eprintln!("skipping: asdf-standard corpus not found");
+        return;
+    };
+    let basic = standard.join("reference_files/1.6.0/basic.asdf");
+    if !basic.is_file() {
+        eprintln!("skipping: {} not found", basic.display());
+        return;
+    }
+
+    let src = format!(
+        r##"
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <asdf.h>
+
+static asdf_parser_t *parser;
+static asdf_event_t *event;
+
+static void next(asdf_event_type_t expected) {{
+    event = asdf_event_iterate(parser);
+    if (!event) {{
+        printf("FAIL: stream ended, wanted %s\n", asdf_event_type_name(expected));
+        exit(1);
+    }}
+    asdf_event_type_t got = asdf_event_type(event);
+    if (got != expected) {{
+        printf("FAIL: wanted %s, got %s\n",
+               asdf_event_type_name(expected), asdf_event_type_name(got));
+        exit(1);
+    }}
+}}
+
+/* Check the next event is a YAML sub-event of the given type, tag and value.
+   NULL tag or value means "must be absent". */
+static void next_yaml(asdf_yaml_event_type_t kind, const char *tag, const char *value) {{
+    next(ASDF_YAML_EVENT);
+    if (asdf_yaml_event_type(event) != kind) {{
+        printf("FAIL: yaml event %d, wanted %d\n", asdf_yaml_event_type(event), kind);
+        exit(1);
+    }}
+    size_t len = 0;
+    const char *got = asdf_yaml_event_tag(event, &len);
+    if (tag == NULL) {{
+        if (len != 0) {{ printf("FAIL: unexpected tag %.*s\n", (int)len, got); exit(1); }}
+    }} else {{
+        if (len != strlen(tag) || 0 != memcmp(got, tag, len)) {{
+            printf("FAIL: tag %.*s, wanted %s\n", (int)len, got ? got : "", tag);
+            exit(1);
+        }}
+    }}
+    len = 0;
+    got = asdf_yaml_event_scalar_value(event, &len);
+    if (value == NULL) {{
+        if (len != 0) {{ printf("FAIL: unexpected value %.*s\n", (int)len, got); exit(1); }}
+    }} else {{
+        if (len != strlen(value) || 0 != memcmp(got, value, len)) {{
+            printf("FAIL: value %.*s, wanted %s\n", (int)len, got ? got : "", value);
+            exit(1);
+        }}
+    }}
+}}
+
+int main(void) {{
+    asdf_parser_cfg_t cfg = {{ .flags = ASDF_PARSER_OPT_EMIT_YAML_EVENTS }};
+    parser = asdf_parser_create(&cfg);
+    assert(parser);
+
+    if (asdf_parser_set_input_file(parser, "{path}") != 0) {{
+        printf("FAIL: %s\n", asdf_parser_get_error(parser));
+        return 1;
+    }}
+    assert(!asdf_parser_has_error(parser));
+
+    next(ASDF_ASDF_VERSION_EVENT);
+    next(ASDF_STANDARD_VERSION_EVENT);
+
+    next(ASDF_BLOCK_INDEX_EVENT);
+    /* A non-tree event has no tree info. */
+    assert(asdf_event_tree_info(event) == NULL);
+
+    next(ASDF_TREE_START_EVENT);
+    const asdf_tree_info_t *tree = asdf_event_tree_info(event);
+    assert(tree != NULL);
+
+    next_yaml(ASDF_YAML_STREAM_START_EVENT, NULL, NULL);
+    next_yaml(ASDF_YAML_DOCUMENT_START_EVENT, NULL, NULL);
+    next_yaml(ASDF_YAML_MAPPING_START_EVENT, "tag:stsci.edu:asdf/core/asdf-1.1.0", NULL);
+    next_yaml(ASDF_YAML_SCALAR_EVENT, NULL, "asdf_library");
+    next_yaml(ASDF_YAML_MAPPING_START_EVENT, "tag:stsci.edu:asdf/core/software-1.0.0", NULL);
+    next_yaml(ASDF_YAML_SCALAR_EVENT, NULL, "author");
+    next_yaml(ASDF_YAML_SCALAR_EVENT, NULL, "The ASDF Developers");
+
+    /* Skip ahead to the ndarray, checking only that the stream stays
+       well-formed; the middle of the tree is covered by the tree tests. */
+    int mapping_start_count = 1;
+    int saw_ndarray_tag = 0;
+    while (1) {{
+        event = asdf_event_iterate(parser);
+        assert(event);
+        asdf_event_type_t type = asdf_event_type(event);
+        if (type == ASDF_TREE_END_EVENT)
+            break;
+        assert(type == ASDF_YAML_EVENT);
+        asdf_yaml_event_type_t kind = asdf_yaml_event_type(event);
+        if (kind == ASDF_YAML_MAPPING_START_EVENT) {{
+            mapping_start_count++;
+            size_t len = 0;
+            const char *tag = asdf_yaml_event_tag(event, &len);
+            if (len == strlen("tag:stsci.edu:asdf/core/ndarray-1.1.0") &&
+                0 == memcmp(tag, "tag:stsci.edu:asdf/core/ndarray-1.1.0", len))
+                saw_ndarray_tag = 1;
+        }}
+    }}
+    assert(saw_ndarray_tag);
+    assert(mapping_start_count == 6);
+
+    tree = asdf_event_tree_info(event);
+    assert(tree != NULL);
+
+    next(ASDF_BLOCK_EVENT);
+    const asdf_block_info_t *block = asdf_event_block_info(event);
+    assert(block != NULL);
+
+    next(ASDF_END_EVENT);
+
+    /* Past the end the parser reports nothing further. */
+    assert(asdf_event_iterate(parser) == NULL);
+
+    asdf_parser_destroy(parser);
+    printf("OK\n");
+    return 0;
+}}
+"##,
+        path = basic.display()
+    );
+
+    let out = compile_and_run("event_stream", &src, true).unwrap();
+    assert!(out.contains("OK"), "event walk failed:\n{out}");
+}

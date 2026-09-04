@@ -76,6 +76,12 @@ fn main() {
 /// 2. Upstream enforces the namespace with `tests/test-symbol-leakage.sh`,
 ///    after a vendored third-party copy once clobbered libasdf-gwcs. Anything
 ///    outside `asdf_` / `ASDF_` / `libasdf_` must stay local.
+///
+/// The `asdf_shim_*` helpers `shim.c` calls into are exported along with the
+/// rest of the `asdf_` namespace. A version script cannot exclude them: when
+/// a symbol matches wildcards in both `global` and `local`, GNU ld takes the
+/// global one. They are inside the namespace upstream reserves for itself, so
+/// they collide with nothing; see KNOWN-DIVERGENCES.md.
 fn emit_version_script(out_dir: &Path) {
     // Only GNU-style linkers take a version script; Mach-O uses a different
     // mechanism, and the namespace there is enforced by the test alone.

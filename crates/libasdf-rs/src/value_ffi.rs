@@ -122,13 +122,15 @@ pub unsafe extern "C" fn asdf_container_size(container: *mut AsdfValue) -> c_int
 /// # Safety
 /// `value` must be null or a valid value handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn asdf_value_is_type(
-    value: *mut AsdfValue,
-    value_type: AsdfValueType,
-) -> bool {
+pub unsafe extern "C" fn asdf_value_is_type(value: *mut AsdfValue, value_type: c_int) -> bool {
     guard("asdf_value_is_type", false, || {
+        // Taken as an `int`: C may pass anything, and an out-of-range value
+        // in a Rust enum is undefined behaviour. See `AsdfValueType::from_i32`.
+        let Some(wanted) = AsdfValueType::from_i32(value_type) else {
+            return false;
+        };
         let actual = unsafe { crate::file_ffi::asdf_value_get_type(value) };
-        actual == value_type
+        actual == wanted
     })
 }
 
@@ -795,298 +797,6 @@ fn intern_scalar(value: *mut AsdfValue, out: *mut *const c_char) -> AsdfValueErr
     AsdfValueErr::Ok
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::file_ffi::{asdf_close, asdf_get_value, asdf_open_mem_ex, asdf_value_destroy};
-
-    fn sample() -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n");
-        buf.extend_from_slice(b"%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
-        buf.extend_from_slice(
-            b"a: 1\nb: two\nc: 3.5\nflag: true\nnothing: null\n\
-              list: [10, 20, 30]\nnested:\n  inner: deep\n",
-        );
-        buf.extend_from_slice(b"...\n");
-        buf
-    }
-
-    struct Handle(*mut AsdfFile);
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            unsafe { asdf_close(self.0) };
-        }
-    }
-
-    fn open() -> Handle {
-        let bytes = sample();
-        let f =
-            unsafe { asdf_open_mem_ex(bytes.as_ptr().cast(), bytes.len(), std::ptr::null_mut()) };
-        assert!(!f.is_null());
-        Handle(f)
-    }
-
-    fn value_at(h: &Handle, path: &str) -> *mut AsdfValue {
-        let c = CString::new(path).unwrap();
-        let v = unsafe { asdf_get_value(h.0, c.as_ptr()) };
-        assert!(!v.is_null(), "no value at {path}");
-        v
-    }
-
-    #[test]
-    fn recognises_containers() {
-        let h = open();
-        let root = value_at(&h, "");
-        assert!(unsafe { asdf_value_is_mapping(root) });
-        assert!(unsafe { asdf_value_is_container(root) });
-        assert_eq!(unsafe { asdf_mapping_size(root) }, 7);
-
-        let list = value_at(&h, "list");
-        assert!(unsafe { asdf_value_is_sequence(list) });
-        assert_eq!(unsafe { asdf_sequence_size(list) }, 3);
-
-        let scalar = value_at(&h, "a");
-        assert!(!unsafe { asdf_value_is_container(scalar) });
-        assert_eq!(unsafe { asdf_mapping_size(scalar) }, -1);
-        assert_eq!(unsafe { asdf_sequence_size(scalar) }, -1);
-
-        for v in [root, list, scalar] {
-            unsafe { asdf_value_destroy(v) };
-        }
-    }
-
-    #[test]
-    fn mapping_lookup_and_typed_reads() {
-        let h = open();
-        let root = value_at(&h, "");
-
-        let key = CString::new("a").unwrap();
-        let a = unsafe { asdf_mapping_get(root, key.as_ptr()) };
-        assert!(!a.is_null());
-        let mut n: i64 = 0;
-        assert_eq!(unsafe { asdf_value_as_int64(a, &mut n) }, AsdfValueErr::Ok);
-        assert_eq!(n, 1);
-        assert!(unsafe { asdf_value_is_int(a) });
-
-        let missing = CString::new("nope").unwrap();
-        assert!(unsafe { asdf_mapping_get(root, missing.as_ptr()) }.is_null());
-
-        unsafe { asdf_value_destroy(a) };
-        unsafe { asdf_value_destroy(root) };
-    }
-
-    #[test]
-    fn iterates_a_mapping_in_order() {
-        let h = open();
-        let root = value_at(&h, "");
-
-        let mut iter = unsafe { asdf_mapping_iter_init(root) };
-        assert!(!iter.is_null());
-
-        let mut keys = Vec::new();
-        while unsafe { asdf_mapping_iter_next(&mut iter) } {
-            let head = unsafe { &*iter };
-            assert!(!head.key.is_null());
-            keys.push(unsafe { CStr::from_ptr(head.key) }.to_str().unwrap().to_string());
-            assert!(!head.value.is_null());
-        }
-        // The loop's end nulls the caller's pointer, so cleanup is a no-op.
-        assert!(iter.is_null(), "the iterator must null itself at the end");
-        unsafe { asdf_mapping_iter_destroy(iter) };
-
-        assert_eq!(keys, ["a", "b", "c", "flag", "nothing", "list", "nested"]);
-        unsafe { asdf_value_destroy(root) };
-    }
-
-    #[test]
-    fn iterates_a_mapping_in_reverse() {
-        let h = open();
-        let root = value_at(&h, "");
-
-        let mut iter = unsafe { asdf_mapping_reverse_iter_init(root) };
-        let mut keys = Vec::new();
-        while unsafe { asdf_mapping_iter_next(&mut iter) } {
-            let head = unsafe { &*iter };
-            keys.push(unsafe { CStr::from_ptr(head.key) }.to_str().unwrap().to_string());
-        }
-        assert_eq!(keys, ["nested", "list", "nothing", "flag", "c", "b", "a"]);
-        unsafe { asdf_value_destroy(root) };
-    }
-
-    #[test]
-    fn iterates_a_sequence_with_indices() {
-        let h = open();
-        let list = value_at(&h, "list");
-
-        let mut iter = unsafe { asdf_sequence_iter_init(list) };
-        let mut seen = Vec::new();
-        while unsafe { asdf_sequence_iter_next(&mut iter) } {
-            let head = unsafe { &*iter };
-            let mut n: i64 = 0;
-            unsafe { asdf_value_as_int64(head.value.cast(), &mut n) };
-            seen.push((head.index, n));
-        }
-        assert_eq!(seen, [(0, 10), (1, 20), (2, 30)]);
-        assert!(iter.is_null());
-        unsafe { asdf_value_destroy(list) };
-    }
-
-    #[test]
-    fn a_reversed_sequence_keeps_original_indices() {
-        let h = open();
-        let list = value_at(&h, "list");
-
-        let mut iter = unsafe { asdf_sequence_reverse_iter_init(list) };
-        let mut seen = Vec::new();
-        while unsafe { asdf_sequence_iter_next(&mut iter) } {
-            let head = unsafe { &*iter };
-            seen.push(head.index);
-        }
-        assert_eq!(seen, [2, 1, 0]);
-        unsafe { asdf_value_destroy(list) };
-    }
-
-    #[test]
-    fn breaking_out_of_a_loop_leaves_the_iterator_to_destroy() {
-        let h = open();
-        let root = value_at(&h, "");
-
-        let mut iter = unsafe { asdf_mapping_iter_init(root) };
-        let mut count = 0;
-        while unsafe { asdf_mapping_iter_next(&mut iter) } {
-            count += 1;
-            if count == 2 {
-                break;
-            }
-        }
-        // The early break leaves a live iterator; destroying it must be
-        // clean, including the value handle it still owns.
-        assert!(!iter.is_null());
-        unsafe { asdf_mapping_iter_destroy(iter) };
-        unsafe { asdf_value_destroy(root) };
-    }
-
-    #[test]
-    fn sequence_indexing_accepts_negatives() {
-        let h = open();
-        let list = value_at(&h, "list");
-
-        let last = unsafe { asdf_sequence_get(list, -1) };
-        assert!(!last.is_null());
-        let mut n: i64 = 0;
-        unsafe { asdf_value_as_int64(last, &mut n) };
-        assert_eq!(n, 30);
-
-        assert!(unsafe { asdf_sequence_get(list, 3) }.is_null());
-        unsafe { asdf_value_destroy(last) };
-        unsafe { asdf_value_destroy(list) };
-    }
-
-    #[test]
-    fn typed_predicates_and_reads() {
-        let h = open();
-
-        let b = value_at(&h, "b");
-        assert!(unsafe { asdf_value_is_string(b) });
-        let mut s: *const c_char = std::ptr::null();
-        assert_eq!(unsafe { asdf_value_as_string0(b, &mut s) }, AsdfValueErr::Ok);
-        assert_eq!(unsafe { CStr::from_ptr(s) }.to_str().unwrap(), "two");
-
-        let c = value_at(&h, "c");
-        assert!(unsafe { asdf_value_is_double(c) });
-        let mut d = 0f64;
-        assert_eq!(unsafe { asdf_value_as_double(c, &mut d) }, AsdfValueErr::Ok);
-        assert_eq!(d, 3.5);
-
-        let flag = value_at(&h, "flag");
-        assert!(unsafe { asdf_value_is_bool(flag) });
-        let mut bl = false;
-        assert_eq!(unsafe { asdf_value_as_bool(flag, &mut bl) }, AsdfValueErr::Ok);
-        assert!(bl);
-
-        let nothing = value_at(&h, "nothing");
-        assert!(unsafe { asdf_value_is_null(nothing) });
-
-        for v in [b, c, flag, nothing] {
-            unsafe { asdf_value_destroy(v) };
-        }
-    }
-
-    #[test]
-    fn reading_the_wrong_type_is_a_mismatch_not_a_guess() {
-        let h = open();
-        let b = value_at(&h, "b");
-        let mut n: i64 = 0;
-        assert_eq!(unsafe { asdf_value_as_int64(b, &mut n) }, AsdfValueErr::TypeMismatch);
-        unsafe { asdf_value_destroy(b) };
-    }
-
-    #[test]
-    fn as_mapping_and_as_sequence_check_the_type() {
-        let h = open();
-        let root = value_at(&h, "");
-        let list = value_at(&h, "list");
-
-        let mut out: *mut AsdfMapping = std::ptr::null_mut();
-        assert_eq!(unsafe { asdf_value_as_mapping(root, &mut out) }, AsdfValueErr::Ok);
-        assert_eq!(out, root);
-        assert_eq!(unsafe { asdf_value_as_mapping(list, &mut out) }, AsdfValueErr::TypeMismatch);
-
-        let mut seq: *mut AsdfSequence = std::ptr::null_mut();
-        assert_eq!(unsafe { asdf_value_as_sequence(list, &mut seq) }, AsdfValueErr::Ok);
-        assert_eq!(unsafe { asdf_value_as_sequence(root, &mut seq) }, AsdfValueErr::TypeMismatch);
-
-        unsafe { asdf_value_destroy(root) };
-        unsafe { asdf_value_destroy(list) };
-    }
-
-    #[test]
-    fn copies_are_independent_handles_to_the_same_node() {
-        let h = open();
-        let a = value_at(&h, "a");
-        let copy = unsafe { asdf_value_copy(a) };
-        assert!(!copy.is_null());
-        assert_ne!(copy, a);
-
-        // Destroying one must leave the other usable.
-        unsafe { asdf_value_destroy(a) };
-        let mut n: i64 = 0;
-        assert_eq!(unsafe { asdf_value_as_int64(copy, &mut n) }, AsdfValueErr::Ok);
-        assert_eq!(n, 1);
-        unsafe { asdf_value_destroy(copy) };
-    }
-
-    #[test]
-    fn null_handles_are_tolerated_everywhere() {
-        let null = std::ptr::null_mut();
-        assert!(!unsafe { asdf_value_is_mapping(null) });
-        assert!(!unsafe { asdf_value_is_sequence(null) });
-        assert!(!unsafe { asdf_value_is_container(null) });
-        assert_eq!(unsafe { asdf_container_size(null) }, -1);
-        assert_eq!(unsafe { asdf_mapping_size(null) }, -1);
-        assert_eq!(unsafe { asdf_sequence_size(null) }, -1);
-        assert!(unsafe { asdf_mapping_iter_init(null) }.is_null());
-        assert!(unsafe { asdf_sequence_iter_init(null) }.is_null());
-        assert!(!unsafe { asdf_mapping_iter_next(std::ptr::null_mut()) });
-        assert!(!unsafe { asdf_sequence_iter_next(std::ptr::null_mut()) });
-        unsafe { asdf_mapping_iter_destroy(std::ptr::null_mut()) };
-        unsafe { asdf_sequence_iter_destroy(std::ptr::null_mut()) };
-        assert!(unsafe { asdf_value_copy(null) }.is_null());
-        assert!(unsafe { asdf_value_file(null) }.is_null());
-    }
-
-    /// The cast between the public head and the implementation is only
-    /// sound while the head sits at offset 0. Pin it, so removing the
-    /// `repr(C)` fails here rather than corrupting a C caller's read.
-    #[test]
-    fn iterator_public_heads_sit_at_offset_zero() {
-        use std::mem::offset_of;
-        assert_eq!(offset_of!(MappingIter, public), 0);
-        assert_eq!(offset_of!(SequenceIter, public), 0);
-    }
-}
-
 // ---- Container iteration --------------------------------------------
 
 /// An iterator over either kind of container.
@@ -1611,6 +1321,1498 @@ pub unsafe extern "C" fn asdf_sequence_pop(
     })
 }
 
+// ---- Typed setters on containers -------------------------------------
+
+/// Generate `asdf_mapping_set_<type>` and `asdf_sequence_append_<type>` for
+/// one scalar type, along with `asdf_sequence_of_<type>`.
+///
+/// Each is the composition of the matching `asdf_value_of_<type>` with
+/// `asdf_mapping_set` / `asdf_sequence_append`, which is how the C header
+/// documents them.
+macro_rules! container_setters {
+    ($set:ident, $append:ident, $of:ident, $ctor:ident, $ty:ty) => {
+        /// Put a scalar into a mapping under `key`.
+        ///
+        /// # Safety
+        /// `mapping` must be a valid handle and `key` a valid string.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $set(
+            mapping: *mut AsdfMapping,
+            key: *const c_char,
+            value: $ty,
+        ) -> AsdfValueErr {
+            guard(stringify!($set), AsdfValueErr::Unknown, || {
+                let Some(file) = value_file(mapping) else {
+                    return AsdfValueErr::Unknown;
+                };
+                let node = unsafe { $ctor(file, value) };
+                if node.is_null() {
+                    return AsdfValueErr::Unknown;
+                }
+                let result = unsafe { asdf_mapping_set(mapping, key, node) };
+                unsafe { crate::file_ffi::asdf_value_destroy(node) };
+                result
+            })
+        }
+
+        /// Append a scalar to a sequence.
+        ///
+        /// # Safety
+        /// `sequence` must be a valid handle.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $append(sequence: *mut AsdfSequence, value: $ty) -> AsdfValueErr {
+            guard(stringify!($append), AsdfValueErr::Unknown, || {
+                let Some(file) = value_file(sequence) else {
+                    return AsdfValueErr::Unknown;
+                };
+                let node = unsafe { $ctor(file, value) };
+                if node.is_null() {
+                    return AsdfValueErr::Unknown;
+                }
+                let result = unsafe { asdf_sequence_append(sequence, node) };
+                unsafe { crate::file_ffi::asdf_value_destroy(node) };
+                result
+            })
+        }
+
+        /// Build a sequence from a C array of scalars.
+        ///
+        /// # Safety
+        /// `file` must be a valid file handle and `arr` must point to at
+        /// least `size` readable values. The result must be released with
+        /// `asdf_sequence_destroy`.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $of(
+            file: *mut AsdfFile,
+            arr: *const $ty,
+            size: c_int,
+        ) -> *mut AsdfSequence {
+            guard(stringify!($of), std::ptr::null_mut(), || {
+                if arr.is_null() || size < 0 {
+                    return std::ptr::null_mut();
+                }
+                let sequence = unsafe { asdf_sequence_create(file) };
+                if sequence.is_null() {
+                    return std::ptr::null_mut();
+                }
+                let items = unsafe { std::slice::from_raw_parts(arr, size as usize) };
+                for value in items {
+                    if unsafe { $append(sequence, *value) } != AsdfValueErr::Ok {
+                        unsafe { asdf_sequence_destroy(sequence) };
+                        return std::ptr::null_mut();
+                    }
+                }
+                sequence
+            })
+        }
+    };
+}
+
+container_setters!(
+    asdf_mapping_set_int8,
+    asdf_sequence_append_int8,
+    asdf_sequence_of_int8,
+    asdf_value_of_int8,
+    i8
+);
+container_setters!(
+    asdf_mapping_set_int16,
+    asdf_sequence_append_int16,
+    asdf_sequence_of_int16,
+    asdf_value_of_int16,
+    i16
+);
+container_setters!(
+    asdf_mapping_set_int32,
+    asdf_sequence_append_int32,
+    asdf_sequence_of_int32,
+    asdf_value_of_int32,
+    i32
+);
+container_setters!(
+    asdf_mapping_set_int64,
+    asdf_sequence_append_int64,
+    asdf_sequence_of_int64,
+    asdf_value_of_int64,
+    i64
+);
+container_setters!(
+    asdf_mapping_set_uint8,
+    asdf_sequence_append_uint8,
+    asdf_sequence_of_uint8,
+    asdf_value_of_uint8,
+    u8
+);
+container_setters!(
+    asdf_mapping_set_uint16,
+    asdf_sequence_append_uint16,
+    asdf_sequence_of_uint16,
+    asdf_value_of_uint16,
+    u16
+);
+container_setters!(
+    asdf_mapping_set_uint32,
+    asdf_sequence_append_uint32,
+    asdf_sequence_of_uint32,
+    asdf_value_of_uint32,
+    u32
+);
+container_setters!(
+    asdf_mapping_set_uint64,
+    asdf_sequence_append_uint64,
+    asdf_sequence_of_uint64,
+    asdf_value_of_uint64,
+    u64
+);
+container_setters!(
+    asdf_mapping_set_float,
+    asdf_sequence_append_float,
+    asdf_sequence_of_float,
+    asdf_value_of_float,
+    f32
+);
+container_setters!(
+    asdf_mapping_set_double,
+    asdf_sequence_append_double,
+    asdf_sequence_of_double,
+    asdf_value_of_double,
+    f64
+);
+container_setters!(
+    asdf_mapping_set_bool,
+    asdf_sequence_append_bool,
+    asdf_sequence_of_bool,
+    asdf_value_of_bool,
+    bool
+);
+
+/// Put a NUL-terminated string into a mapping.
+///
+/// # Safety
+/// `mapping` must be a valid handle; `key` and `value` valid strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_mapping_set_string0(
+    mapping: *mut AsdfMapping,
+    key: *const c_char,
+    value: *const c_char,
+) -> AsdfValueErr {
+    guard("asdf_mapping_set_string0", AsdfValueErr::Unknown, || {
+        let Some(file) = value_file(mapping) else {
+            return AsdfValueErr::Unknown;
+        };
+        let node = unsafe { asdf_value_of_string0(file, value) };
+        if node.is_null() {
+            return AsdfValueErr::Unknown;
+        }
+        let result = unsafe { asdf_mapping_set(mapping, key, node) };
+        unsafe { crate::file_ffi::asdf_value_destroy(node) };
+        result
+    })
+}
+
+/// Put a counted string into a mapping.
+///
+/// # Safety
+/// `value` must point to at least `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_mapping_set_string(
+    mapping: *mut AsdfMapping,
+    key: *const c_char,
+    value: *const c_char,
+    len: usize,
+) -> AsdfValueErr {
+    guard("asdf_mapping_set_string", AsdfValueErr::Unknown, || {
+        let Some(file) = value_file(mapping) else {
+            return AsdfValueErr::Unknown;
+        };
+        let node = unsafe { asdf_value_of_string(file, value, len) };
+        if node.is_null() {
+            return AsdfValueErr::Unknown;
+        }
+        let result = unsafe { asdf_mapping_set(mapping, key, node) };
+        unsafe { crate::file_ffi::asdf_value_destroy(node) };
+        result
+    })
+}
+
+/// Put a null into a mapping.
+///
+/// # Safety
+/// `mapping` must be a valid handle and `key` a valid string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_mapping_set_null(
+    mapping: *mut AsdfMapping,
+    key: *const c_char,
+) -> AsdfValueErr {
+    guard("asdf_mapping_set_null", AsdfValueErr::Unknown, || {
+        let Some(file) = value_file(mapping) else {
+            return AsdfValueErr::Unknown;
+        };
+        let node = unsafe { asdf_value_of_null(file) };
+        if node.is_null() {
+            return AsdfValueErr::Unknown;
+        }
+        let result = unsafe { asdf_mapping_set(mapping, key, node) };
+        unsafe { crate::file_ffi::asdf_value_destroy(node) };
+        result
+    })
+}
+
+/// Put a nested mapping into a mapping.
+///
+/// # Safety
+/// Both handles must belong to the same file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_mapping_set_mapping(
+    mapping: *mut AsdfMapping,
+    key: *const c_char,
+    value: *mut AsdfMapping,
+) -> AsdfValueErr {
+    unsafe { asdf_mapping_set(mapping, key, value) }
+}
+
+/// Put a sequence into a mapping.
+///
+/// # Safety
+/// Both handles must belong to the same file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_mapping_set_sequence(
+    mapping: *mut AsdfMapping,
+    key: *const c_char,
+    value: *mut AsdfSequence,
+) -> AsdfValueErr {
+    unsafe { asdf_mapping_set(mapping, key, value) }
+}
+
+/// Append a NUL-terminated string to a sequence.
+///
+/// # Safety
+/// `sequence` must be a valid handle and `value` a valid string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_sequence_append_string0(
+    sequence: *mut AsdfSequence,
+    value: *const c_char,
+) -> AsdfValueErr {
+    guard("asdf_sequence_append_string0", AsdfValueErr::Unknown, || {
+        let Some(file) = value_file(sequence) else {
+            return AsdfValueErr::Unknown;
+        };
+        let node = unsafe { asdf_value_of_string0(file, value) };
+        if node.is_null() {
+            return AsdfValueErr::Unknown;
+        }
+        let result = unsafe { asdf_sequence_append(sequence, node) };
+        unsafe { crate::file_ffi::asdf_value_destroy(node) };
+        result
+    })
+}
+
+/// Append a counted string to a sequence.
+///
+/// # Safety
+/// `value` must point to at least `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_sequence_append_string(
+    sequence: *mut AsdfSequence,
+    value: *const c_char,
+    len: usize,
+) -> AsdfValueErr {
+    guard("asdf_sequence_append_string", AsdfValueErr::Unknown, || {
+        let Some(file) = value_file(sequence) else {
+            return AsdfValueErr::Unknown;
+        };
+        let node = unsafe { asdf_value_of_string(file, value, len) };
+        if node.is_null() {
+            return AsdfValueErr::Unknown;
+        }
+        let result = unsafe { asdf_sequence_append(sequence, node) };
+        unsafe { crate::file_ffi::asdf_value_destroy(node) };
+        result
+    })
+}
+
+/// Append a null to a sequence.
+///
+/// # Safety
+/// `sequence` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_sequence_append_null(sequence: *mut AsdfSequence) -> AsdfValueErr {
+    guard("asdf_sequence_append_null", AsdfValueErr::Unknown, || {
+        let Some(file) = value_file(sequence) else {
+            return AsdfValueErr::Unknown;
+        };
+        let node = unsafe { asdf_value_of_null(file) };
+        if node.is_null() {
+            return AsdfValueErr::Unknown;
+        }
+        let result = unsafe { asdf_sequence_append(sequence, node) };
+        unsafe { crate::file_ffi::asdf_value_destroy(node) };
+        result
+    })
+}
+
+/// Append a mapping to a sequence.
+///
+/// # Safety
+/// Both handles must belong to the same file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_sequence_append_mapping(
+    sequence: *mut AsdfSequence,
+    value: *mut AsdfMapping,
+) -> AsdfValueErr {
+    unsafe { asdf_sequence_append(sequence, value) }
+}
+
+/// Append a nested sequence to a sequence.
+///
+/// # Safety
+/// Both handles must belong to the same file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_sequence_append_sequence(
+    sequence: *mut AsdfSequence,
+    value: *mut AsdfSequence,
+) -> AsdfValueErr {
+    unsafe { asdf_sequence_append(sequence, value) }
+}
+
+/// Build a sequence of nulls.
+///
+/// # Safety
+/// `file` must be a valid file handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_sequence_of_null(
+    file: *mut AsdfFile,
+    size: c_int,
+) -> *mut AsdfSequence {
+    guard("asdf_sequence_of_null", std::ptr::null_mut(), || {
+        if size < 0 {
+            return std::ptr::null_mut();
+        }
+        let sequence = unsafe { asdf_sequence_create(file) };
+        if sequence.is_null() {
+            return std::ptr::null_mut();
+        }
+        for _ in 0..size {
+            if unsafe { asdf_sequence_append_null(sequence) } != AsdfValueErr::Ok {
+                unsafe { asdf_sequence_destroy(sequence) };
+                return std::ptr::null_mut();
+            }
+        }
+        sequence
+    })
+}
+
+/// Build a sequence from an array of NUL-terminated strings.
+///
+/// # Safety
+/// `arr` must point to at least `size` valid string pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_sequence_of_string0(
+    file: *mut AsdfFile,
+    arr: *const *const c_char,
+    size: c_int,
+) -> *mut AsdfSequence {
+    guard("asdf_sequence_of_string0", std::ptr::null_mut(), || {
+        if arr.is_null() || size < 0 {
+            return std::ptr::null_mut();
+        }
+        let sequence = unsafe { asdf_sequence_create(file) };
+        if sequence.is_null() {
+            return std::ptr::null_mut();
+        }
+        for index in 0..size as isize {
+            let text = unsafe { *arr.offset(index) };
+            if unsafe { asdf_sequence_append_string0(sequence, text) } != AsdfValueErr::Ok {
+                unsafe { asdf_sequence_destroy(sequence) };
+                return std::ptr::null_mut();
+            }
+        }
+        sequence
+    })
+}
+
+/// Build a sequence from an array of counted strings.
+///
+/// # Safety
+/// `arr` and `lens` must each point to at least `size` readable entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_sequence_of_string(
+    file: *mut AsdfFile,
+    arr: *const *const c_char,
+    lens: *const usize,
+    size: c_int,
+) -> *mut AsdfSequence {
+    guard("asdf_sequence_of_string", std::ptr::null_mut(), || {
+        if arr.is_null() || lens.is_null() || size < 0 {
+            return std::ptr::null_mut();
+        }
+        let sequence = unsafe { asdf_sequence_create(file) };
+        if sequence.is_null() {
+            return std::ptr::null_mut();
+        }
+        for index in 0..size as isize {
+            let text = unsafe { *arr.offset(index) };
+            let len = unsafe { *lens.offset(index) };
+            if unsafe { asdf_sequence_append_string(sequence, text, len) } != AsdfValueErr::Ok {
+                unsafe { asdf_sequence_destroy(sequence) };
+                return std::ptr::null_mut();
+            }
+        }
+        sequence
+    })
+}
+
+/// Copy a mapping's entries into a new mapping.
+///
+/// A shallow copy: the entries refer to the same value nodes.
+///
+/// # Safety
+/// `mapping` must be a valid handle. The result must be released with
+/// `asdf_mapping_destroy`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_mapping_copy(mapping: *mut AsdfMapping) -> *mut AsdfMapping {
+    guard("asdf_mapping_copy", std::ptr::null_mut(), || {
+        let (Some(file), Some(source)) = (value_file(mapping), value_node(mapping)) else {
+            return std::ptr::null_mut();
+        };
+        let handle = unsafe { &mut *file };
+        let Some(doc) = handle.document_for_values() else {
+            return std::ptr::null_mut();
+        };
+        let Some(entries) = doc.mapping_entries(source).map(<[_]>::to_vec) else {
+            return std::ptr::null_mut();
+        };
+        let pairs: Vec<_> = entries.iter().map(|e| (e.key, e.value)).collect();
+        let fresh = doc.add_mapping(pairs);
+        make_value(file, fresh)
+    })
+}
+
+/// Merge one mapping's entries into another.
+///
+/// Existing keys are replaced and new ones appended, in the update's order.
+///
+/// # Safety
+/// Both handles must be valid and belong to the same file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_mapping_update(
+    mapping: *mut AsdfMapping,
+    update: *mut AsdfMapping,
+) -> AsdfValueErr {
+    guard("asdf_mapping_update", AsdfValueErr::Unknown, || {
+        let (Some(file), Some(target)) = (value_file(mapping), value_node(mapping)) else {
+            return AsdfValueErr::Unknown;
+        };
+        let Some(source) = value_node(update) else {
+            return AsdfValueErr::Unknown;
+        };
+        let handle = unsafe { &mut *file };
+        let Some(doc) = handle.document_for_values() else {
+            return AsdfValueErr::Unknown;
+        };
+        if !doc.resolved(target).is_mapping() || !doc.resolved(source).is_mapping() {
+            return AsdfValueErr::TypeMismatch;
+        }
+
+        let entries = doc.mapping_entries(source).map(<[_]>::to_vec).unwrap_or_default();
+        for entry in entries {
+            let Some(key) = doc.resolved(entry.key).as_str().map(str::to_string) else {
+                continue;
+            };
+            doc.mapping_set(target, &key, entry.value);
+        }
+        AsdfValueErr::Ok
+    })
+}
+
+// ---- Counted-string and generic accessors ----------------------------
+
+/// Hand out a scalar's text and its length.
+fn scalar_with_len(
+    value: *mut AsdfValue,
+    out: *mut *const c_char,
+    out_len: *mut usize,
+) -> AsdfValueErr {
+    let (Some(doc), Some(node), Some(file)) =
+        (value_document(value), value_node(value), value_file(value))
+    else {
+        return AsdfValueErr::Unknown;
+    };
+    let Some(text) = doc.resolved(node).as_str() else {
+        return AsdfValueErr::TypeMismatch;
+    };
+    let ptr = unsafe { &*file }.intern(text);
+    if ptr.is_null() {
+        return AsdfValueErr::Oom;
+    }
+    if !out.is_null() {
+        unsafe { *out = ptr };
+    }
+    if !out_len.is_null() {
+        unsafe { *out_len = text.len() };
+    }
+    AsdfValueErr::Ok
+}
+
+/// Read the value as a counted string.
+///
+/// The text is NUL-terminated as well, so `out_len` is a convenience rather
+/// than the only way to know where it ends.
+///
+/// # Safety
+/// `value` must be null or a valid value handle; `out` and `out_len` writable
+/// or null. The string is owned by the value's file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_value_as_string(
+    value: *mut AsdfValue,
+    out: *mut *const c_char,
+    out_len: *mut usize,
+) -> AsdfValueErr {
+    guard("asdf_value_as_string", AsdfValueErr::Unknown, || {
+        if !matches!(resolved_of(value), Some(Resolved::String)) {
+            return AsdfValueErr::TypeMismatch;
+        }
+        scalar_with_len(value, out, out_len)
+    })
+}
+
+/// Read a scalar's raw text and length, whatever its resolved type.
+///
+/// # Safety
+/// See [`asdf_value_as_string`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_value_as_scalar(
+    value: *mut AsdfValue,
+    out: *mut *const c_char,
+    out_len: *mut usize,
+) -> AsdfValueErr {
+    guard("asdf_value_as_scalar", AsdfValueErr::Unknown, || {
+        if !unsafe { asdf_value_is_scalar(value) } {
+            return AsdfValueErr::TypeMismatch;
+        }
+        scalar_with_len(value, out, out_len)
+    })
+}
+
+/// Read a value as the type named by `value_type`.
+///
+/// `out` points at storage of the C type matching `value_type`; for
+/// `ASDF_VALUE_STRING` and `ASDF_VALUE_SCALAR` that is a `const char *`,
+/// holding a NUL-terminated string.
+///
+/// # Safety
+/// `out` must point at writable storage of the right type and size for
+/// `value_type`, or be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_value_as_type(
+    value: *mut AsdfValue,
+    value_type: c_int,
+    out: *mut std::ffi::c_void,
+) -> AsdfValueErr {
+    guard("asdf_value_as_type", AsdfValueErr::Unknown, || unsafe {
+        // See `asdf_value_is_type` on why this arrives as an `int`.
+        let Some(value_type) = AsdfValueType::from_i32(value_type) else {
+            return AsdfValueErr::TypeMismatch;
+        };
+        match value_type {
+            AsdfValueType::Int8 => asdf_value_as_int8(value, out.cast()),
+            AsdfValueType::Int16 => asdf_value_as_int16(value, out.cast()),
+            AsdfValueType::Int32 => asdf_value_as_int32(value, out.cast()),
+            AsdfValueType::Int64 => asdf_value_as_int64(value, out.cast()),
+            AsdfValueType::Uint8 => asdf_value_as_uint8(value, out.cast()),
+            AsdfValueType::Uint16 => asdf_value_as_uint16(value, out.cast()),
+            AsdfValueType::Uint32 => asdf_value_as_uint32(value, out.cast()),
+            AsdfValueType::Uint64 => asdf_value_as_uint64(value, out.cast()),
+            AsdfValueType::Float => asdf_value_as_float(value, out.cast()),
+            AsdfValueType::Double => asdf_value_as_double(value, out.cast()),
+            AsdfValueType::Bool => asdf_value_as_bool(value, out.cast()),
+            AsdfValueType::String => asdf_value_as_string0(value, out.cast()),
+            AsdfValueType::Scalar => asdf_value_as_scalar0(value, out.cast()),
+            AsdfValueType::Mapping => asdf_value_as_mapping(value, out.cast()),
+            AsdfValueType::Sequence => asdf_value_as_sequence(value, out.cast()),
+            // Null carries no data: report only whether it matches.
+            AsdfValueType::Null => {
+                if asdf_value_is_null(value) {
+                    AsdfValueErr::Ok
+                } else {
+                    AsdfValueErr::TypeMismatch
+                }
+            }
+            AsdfValueType::Unknown | AsdfValueType::Extension => AsdfValueErr::TypeMismatch,
+        }
+    })
+}
+
+/// View a mapping as a generic value.
+///
+/// The two share a representation, so this is the identity; it exists for
+/// type-checking on the C side.
+///
+/// # Safety
+/// `mapping` must be null or a valid mapping handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_value_of_mapping(mapping: *mut AsdfMapping) -> *mut AsdfValue {
+    mapping
+}
+
+/// View a sequence as a generic value. See [`asdf_value_of_mapping`].
+///
+/// # Safety
+/// `sequence` must be null or a valid sequence handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_value_of_sequence(sequence: *mut AsdfSequence) -> *mut AsdfValue {
+    sequence
+}
+
+/// The YAML-pointer path of a value within its document.
+///
+/// Null for a value that is not reachable from the root -- one built with
+/// `asdf_value_of_*` and not yet attached, for instance.
+///
+/// # Safety
+/// `value` must be null or a valid value handle. The string is owned by the
+/// value's file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_value_path(value: *mut AsdfValue) -> *const c_char {
+    guard("asdf_value_path", std::ptr::null(), || {
+        let (Some(doc), Some(node), Some(file)) =
+            (value_document(value), value_node(value), value_file(value))
+        else {
+            return std::ptr::null();
+        };
+        match doc.path_of(node) {
+            Some(path) => unsafe { &*file }.intern(&path),
+            None => std::ptr::null(),
+        }
+    })
+}
+
+/// The container holding a value, or null for the root or a detached value.
+///
+/// # Safety
+/// `value` must be null or a valid value handle. The result must be released
+/// with `asdf_value_destroy`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_value_parent(value: *mut AsdfValue) -> *mut AsdfValue {
+    guard("asdf_value_parent", std::ptr::null_mut(), || {
+        let (Some(doc), Some(node), Some(file)) =
+            (value_document(value), value_node(value), value_file(value))
+        else {
+            return std::ptr::null_mut();
+        };
+        match doc.parent_of(node) {
+            Some(parent) => make_value(file, parent),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+// ---- Tree traversal --------------------------------------------------
+
+/// A predicate over a value, as C passes it in.
+pub type AsdfValuePred = Option<unsafe extern "C" fn(*mut AsdfValue) -> bool>;
+
+/// A find iterator. The public head must stay first; see [`MappingIter`].
+#[repr(C)]
+struct FindIter {
+    /// The public head, which C casts to.
+    public: crate::types::asdf_find_iter_t,
+    file: *mut AsdfFile,
+    /// Nodes still to visit, each with the depth at which it was reached.
+    queue: std::collections::VecDeque<(NodeId, isize)>,
+    pred: AsdfValuePred,
+    descend_pred: AsdfValuePred,
+    depth_first: bool,
+    max_depth: isize,
+    /// Nodes already queued, so an aliased subtree is visited once.
+    seen: Vec<NodeId>,
+}
+
+impl FindIter {
+    /// Push a node's children in the order the traversal wants them.
+    fn enqueue_children(&mut self, doc: &asdf_core::yaml::Document, node: NodeId, depth: isize) {
+        if self.max_depth >= 0 && depth >= self.max_depth {
+            return;
+        }
+        let resolved = doc.resolve(node);
+        let mut children: Vec<NodeId> = Vec::new();
+        match &doc.node(resolved).data {
+            NodeData::Mapping { entries, .. } => {
+                children.extend(entries.iter().map(|e| e.value));
+            }
+            NodeData::Sequence { items, .. } => children.extend(items.iter().copied()),
+            _ => return,
+        }
+        if self.depth_first {
+            // Pushed onto the front, so reverse to keep document order.
+            for child in children.into_iter().rev() {
+                self.queue.push_front((child, depth + 1));
+            }
+        } else {
+            for child in children {
+                self.queue.push_back((child, depth + 1));
+            }
+        }
+    }
+
+    /// Whether the traversal should descend into this container.
+    fn should_descend(&self, node: NodeId) -> bool {
+        let Some(pred) = self.descend_pred else {
+            return true;
+        };
+        // The predicate takes a value handle, so one is made for the call and
+        // released straight after.
+        let handle = make_value(self.file, node);
+        let verdict = unsafe { pred(handle) };
+        unsafe { crate::file_ffi::asdf_value_destroy(handle) };
+        verdict
+    }
+
+    /// Release the value handed out for the previous step.
+    fn clear_current(&mut self) {
+        if !self.public.value.is_null() {
+            unsafe { crate::file_ffi::asdf_value_destroy(self.public.value.cast::<AsdfValue>()) };
+            self.public.value = std::ptr::null_mut();
+        }
+    }
+
+    /// Advance to the next match, or `false` when the traversal is done.
+    fn step(&mut self) -> bool {
+        self.clear_current();
+        let Some(doc) = crate::file_ffi::file_document(self.file) else {
+            return false;
+        };
+        while let Some((node, depth)) = self.queue.pop_front() {
+            let resolved = doc.resolve(node);
+            if self.seen.contains(&resolved) {
+                continue;
+            }
+            self.seen.push(resolved);
+
+            let is_container = doc.node(resolved).is_mapping() || doc.node(resolved).is_sequence();
+            if is_container && self.should_descend(node) {
+                self.enqueue_children(doc, node, depth);
+            }
+
+            let matched = match self.pred {
+                Some(pred) => {
+                    let handle = make_value(self.file, node);
+                    let verdict = unsafe { pred(handle) };
+                    if verdict {
+                        self.public.value = handle.cast();
+                        return true;
+                    }
+                    unsafe { crate::file_ffi::asdf_value_destroy(handle) };
+                    false
+                }
+                // A null predicate matches everything, as C's convention has
+                // it for an omitted filter.
+                None => {
+                    self.public.value = make_value(self.file, node).cast();
+                    return true;
+                }
+            };
+            let _ = matched;
+        }
+        false
+    }
+}
+
+/// Build a find iterator over `root`.
+fn find_iter_new(
+    root: *mut AsdfValue,
+    pred: AsdfValuePred,
+    depth_first: bool,
+    descend_pred: AsdfValuePred,
+    max_depth: isize,
+) -> *mut FindIter {
+    let (Some(file), Some(node)) = (value_file(root), value_node(root)) else {
+        return std::ptr::null_mut();
+    };
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back((node, 0isize));
+    Box::into_raw(Box::new(FindIter {
+        public: crate::types::asdf_find_iter_t { value: std::ptr::null_mut() },
+        file,
+        queue,
+        pred,
+        descend_pred,
+        depth_first,
+        max_depth,
+        seen: Vec::new(),
+    }))
+}
+
+/// Find the first value at or below `root` matching `pred`, breadth-first.
+///
+/// # Safety
+/// `root` must be a valid value handle. The result must be released with
+/// `asdf_value_destroy`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_value_find(
+    root: *mut AsdfValue,
+    pred: AsdfValuePred,
+) -> *mut AsdfValue {
+    unsafe { asdf_value_find_ex(root, pred, false, None, -1) }
+}
+
+/// Find the first match with control over traversal order and depth.
+///
+/// `depth_first` selects the order, `descend_pred` filters which containers
+/// are entered (null enters all), and `max_depth` of -1 means no limit.
+///
+/// # Safety
+/// See [`asdf_value_find`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_value_find_ex(
+    root: *mut AsdfValue,
+    pred: AsdfValuePred,
+    depth_first: bool,
+    descend_pred: AsdfValuePred,
+    max_depth: isize,
+) -> *mut AsdfValue {
+    guard("asdf_value_find_ex", std::ptr::null_mut(), || {
+        let iter = find_iter_new(root, pred, depth_first, descend_pred, max_depth);
+        if iter.is_null() {
+            return std::ptr::null_mut();
+        }
+        let mut boxed = unsafe { Box::from_raw(iter) };
+        if !boxed.step() {
+            return std::ptr::null_mut();
+        }
+        // Hand the match to the caller rather than letting the drop free it.
+        let found = boxed.public.value.cast::<AsdfValue>();
+        boxed.public.value = std::ptr::null_mut();
+        found
+    })
+}
+
+/// Start a breadth-first search yielding every value matching `pred`.
+///
+/// # Safety
+/// `root` must be a valid container value handle. The iterator is released by
+/// running it to exhaustion or with [`asdf_find_iter_destroy`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_find_iter_init(
+    root: *mut AsdfValue,
+    pred: AsdfValuePred,
+) -> *mut crate::types::asdf_find_iter_t {
+    unsafe { asdf_find_iter_init_ex(root, pred, false, None, -1) }
+}
+
+/// Start a search with control over traversal order and depth.
+///
+/// # Safety
+/// See [`asdf_find_iter_init`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_find_iter_init_ex(
+    root: *mut AsdfValue,
+    pred: AsdfValuePred,
+    depth_first: bool,
+    descend_pred: AsdfValuePred,
+    max_depth: isize,
+) -> *mut crate::types::asdf_find_iter_t {
+    guard("asdf_find_iter_init_ex", std::ptr::null_mut(), || {
+        find_iter_new(root, pred, depth_first, descend_pred, max_depth)
+            .cast::<crate::types::asdf_find_iter_t>()
+    })
+}
+
+/// Advance a find iterator.
+///
+/// On exhaustion the iterator is freed and `*iter` set to null, so the
+/// trailing `destroy` only matters when the loop breaks early.
+///
+/// # Safety
+/// `iter` must point at a handle from [`asdf_find_iter_init`], or be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_value_find_iter_next(
+    iter: *mut *mut crate::types::asdf_find_iter_t,
+) -> bool {
+    guard("asdf_value_find_iter_next", false, || {
+        if iter.is_null() {
+            return false;
+        }
+        let current = unsafe { *iter };
+        if current.is_null() {
+            return false;
+        }
+        let state = unsafe { &mut *current.cast::<FindIter>() };
+        if state.step() {
+            return true;
+        }
+        unsafe { asdf_find_iter_destroy(current) };
+        unsafe { *iter = std::ptr::null_mut() };
+        false
+    })
+}
+
+/// Release an iterator abandoned before exhaustion.
+///
+/// # Safety
+/// `iter` must be null or a handle from [`asdf_find_iter_init`] that has not
+/// already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_find_iter_destroy(iter: *mut crate::types::asdf_find_iter_t) {
+    guard("asdf_find_iter_destroy", (), || {
+        if iter.is_null() {
+            return;
+        }
+        let mut boxed = unsafe { Box::from_raw(iter.cast::<FindIter>()) };
+        boxed.clear_current();
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_ffi::{asdf_close, asdf_get_value, asdf_open_mem_ex, asdf_value_destroy};
+
+    fn sample() -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n");
+        buf.extend_from_slice(b"%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
+        buf.extend_from_slice(
+            b"a: 1\nb: two\nc: 3.5\nflag: true\nnothing: null\n\
+              list: [10, 20, 30]\nnested:\n  inner: deep\n",
+        );
+        buf.extend_from_slice(b"...\n");
+        buf
+    }
+
+    struct Handle(*mut AsdfFile);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            unsafe { asdf_close(self.0) };
+        }
+    }
+
+    fn open() -> Handle {
+        let bytes = sample();
+        let f =
+            unsafe { asdf_open_mem_ex(bytes.as_ptr().cast(), bytes.len(), std::ptr::null_mut()) };
+        assert!(!f.is_null());
+        Handle(f)
+    }
+
+    fn value_at(h: &Handle, path: &str) -> *mut AsdfValue {
+        let c = CString::new(path).unwrap();
+        let v = unsafe { asdf_get_value(h.0, c.as_ptr()) };
+        assert!(!v.is_null(), "no value at {path}");
+        v
+    }
+
+    /// A predicate for the find tests: matches any string scalar.
+    unsafe extern "C" fn is_a_string(value: *mut AsdfValue) -> bool {
+        unsafe { asdf_value_is_string(value) }
+    }
+
+    /// Matches the scalar `deep`, which sits two levels down.
+    unsafe extern "C" fn is_deep(value: *mut AsdfValue) -> bool {
+        let mut out = std::ptr::null();
+        if unsafe { asdf_value_as_string0(value, &mut out) } != AsdfValueErr::Ok {
+            return false;
+        }
+        let text = unsafe { CStr::from_ptr(out) };
+        text == c"deep"
+    }
+
+    #[test]
+    fn find_walks_breadth_first_by_default() {
+        let h = open();
+        let root = value_at(&h, "");
+        // `b: two` is at depth 1; `nested/inner: deep` at depth 2. A
+        // breadth-first walk reaches the shallower one first.
+        let found = unsafe { asdf_value_find(root, Some(is_a_string)) };
+        assert!(!found.is_null());
+        let mut text = std::ptr::null();
+        assert_eq!(unsafe { asdf_value_as_string0(found, &mut text) }, AsdfValueErr::Ok);
+        assert_eq!(unsafe { CStr::from_ptr(text) }, c"two");
+        unsafe { asdf_value_destroy(found) };
+        unsafe { asdf_value_destroy(root) };
+    }
+
+    #[test]
+    fn find_respects_max_depth() {
+        let h = open();
+        let root = value_at(&h, "");
+        // `deep` lives below `nested`, so a depth-1 search cannot reach it.
+        let shallow = unsafe { asdf_value_find_ex(root, Some(is_deep), false, None, 1) };
+        assert!(shallow.is_null());
+        let deep = unsafe { asdf_value_find_ex(root, Some(is_deep), false, None, -1) };
+        assert!(!deep.is_null());
+        unsafe { asdf_value_destroy(deep) };
+        unsafe { asdf_value_destroy(root) };
+    }
+
+    #[test]
+    fn find_iterates_every_match() {
+        let h = open();
+        let root = value_at(&h, "");
+
+        let mut iter = unsafe { asdf_find_iter_init(root, Some(is_a_string)) };
+        let mut seen = Vec::new();
+        while unsafe { asdf_value_find_iter_next(&mut iter) } {
+            let current = unsafe { &*iter }.value.cast::<AsdfValue>();
+            let mut text = std::ptr::null();
+            assert_eq!(unsafe { asdf_value_as_string0(current, &mut text) }, AsdfValueErr::Ok);
+            seen.push(unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned());
+        }
+        // The iterator frees itself on exhaustion.
+        assert!(iter.is_null());
+
+        // Keys are not visited, only values: `two` and `deep`.
+        assert_eq!(seen, vec!["two".to_string(), "deep".to_string()]);
+        unsafe { asdf_value_destroy(root) };
+    }
+
+    #[test]
+    fn abandoning_a_find_iterator_is_safe() {
+        let h = open();
+        let root = value_at(&h, "");
+        let mut iter = unsafe { asdf_find_iter_init(root, None) };
+        assert!(unsafe { asdf_value_find_iter_next(&mut iter) });
+        // Break out early, which is exactly when `destroy` has work to do.
+        unsafe { asdf_find_iter_destroy(iter) };
+        unsafe { asdf_value_destroy(root) };
+    }
+
+    #[test]
+    fn values_report_their_path_and_parent() {
+        let h = open();
+        let inner = value_at(&h, "nested/inner");
+        let path = unsafe { asdf_value_path(inner) };
+        assert!(!path.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(path) }, c"nested/inner");
+
+        let parent = unsafe { asdf_value_parent(inner) };
+        assert!(!parent.is_null());
+        let parent_path = unsafe { asdf_value_path(parent) };
+        assert_eq!(unsafe { CStr::from_ptr(parent_path) }, c"nested");
+
+        // The root has no parent, and its path is `/`.
+        let root = value_at(&h, "");
+        assert!(unsafe { asdf_value_parent(root) }.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(asdf_value_path(root)) }, c"/");
+
+        for v in [inner, parent, root] {
+            unsafe { asdf_value_destroy(v) };
+        }
+    }
+
+    #[test]
+    fn sequence_elements_report_bracketed_paths() {
+        let h = open();
+        let item = value_at(&h, "list/1");
+        assert_eq!(unsafe { CStr::from_ptr(asdf_value_path(item)) }, c"list/[1]");
+        unsafe { asdf_value_destroy(item) };
+    }
+
+    #[test]
+    fn counted_string_accessors_report_lengths() {
+        let h = open();
+        let b = value_at(&h, "b");
+        let mut text = std::ptr::null();
+        let mut len = 0usize;
+        assert_eq!(unsafe { asdf_value_as_string(b, &mut text, &mut len) }, AsdfValueErr::Ok);
+        assert_eq!(len, 3);
+        assert_eq!(unsafe { CStr::from_ptr(text) }, c"two");
+
+        // `as_scalar` works on a value that is not a string, `as_string` does
+        // not.
+        let a = value_at(&h, "a");
+        assert_eq!(
+            unsafe { asdf_value_as_string(a, &mut text, &mut len) },
+            AsdfValueErr::TypeMismatch
+        );
+        assert_eq!(unsafe { asdf_value_as_scalar(a, &mut text, &mut len) }, AsdfValueErr::Ok);
+        assert_eq!(len, 1);
+        assert_eq!(unsafe { CStr::from_ptr(text) }, c"1");
+
+        for v in [a, b] {
+            unsafe { asdf_value_destroy(v) };
+        }
+    }
+
+    #[test]
+    fn as_type_dispatches_on_the_requested_type() {
+        let h = open();
+        let a = value_at(&h, "a");
+        let mut narrow: i32 = 0;
+        assert_eq!(
+            unsafe {
+                asdf_value_as_type(
+                    a,
+                    AsdfValueType::Int32 as c_int,
+                    std::ptr::from_mut(&mut narrow).cast(),
+                )
+            },
+            AsdfValueErr::Ok
+        );
+        assert_eq!(narrow, 1);
+
+        // A string request against an integer is a type mismatch.
+        let mut text = std::ptr::null::<c_char>();
+        assert_eq!(
+            unsafe {
+                asdf_value_as_type(
+                    a,
+                    AsdfValueType::String as c_int,
+                    std::ptr::from_mut(&mut text).cast(),
+                )
+            },
+            AsdfValueErr::TypeMismatch
+        );
+
+        let nothing = value_at(&h, "nothing");
+        assert_eq!(
+            unsafe {
+                asdf_value_as_type(nothing, AsdfValueType::Null as c_int, std::ptr::null_mut())
+            },
+            AsdfValueErr::Ok
+        );
+
+        for v in [a, nothing] {
+            unsafe { asdf_value_destroy(v) };
+        }
+    }
+
+    #[test]
+    fn typed_container_setters_build_a_tree() {
+        use crate::file_ffi::asdf_value_destroy as destroy;
+
+        // `asdf_open(NULL)` -- a new, empty file open for writing.
+        let file = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        assert!(!file.is_null());
+        let handle = Handle(file);
+
+        let mapping = unsafe { asdf_mapping_create(handle.0) };
+        assert!(!mapping.is_null());
+        let key = CString::new("count").unwrap();
+        assert_eq!(unsafe { asdf_mapping_set_int32(mapping, key.as_ptr(), -7) }, AsdfValueErr::Ok);
+        let name = CString::new("name").unwrap();
+        let value = CString::new("probe").unwrap();
+        assert_eq!(
+            unsafe { asdf_mapping_set_string0(mapping, name.as_ptr(), value.as_ptr()) },
+            AsdfValueErr::Ok
+        );
+        let missing = CString::new("missing").unwrap();
+        assert_eq!(unsafe { asdf_mapping_set_null(mapping, missing.as_ptr()) }, AsdfValueErr::Ok);
+        assert_eq!(unsafe { asdf_mapping_size(mapping) }, 3);
+
+        let read_back = unsafe { asdf_mapping_get(mapping, key.as_ptr()) };
+        assert!(!read_back.is_null());
+        let mut got: i32 = 0;
+        assert_eq!(unsafe { asdf_value_as_int32(read_back, &mut got) }, AsdfValueErr::Ok);
+        assert_eq!(got, -7);
+        unsafe { destroy(read_back) };
+
+        let numbers: [f64; 3] = [1.5, 2.5, 3.5];
+        let sequence = unsafe { asdf_sequence_of_double(handle.0, numbers.as_ptr(), 3) };
+        assert!(!sequence.is_null());
+        assert_eq!(unsafe { asdf_sequence_size(sequence) }, 3);
+        let second = unsafe { asdf_sequence_get(sequence, 1) };
+        let mut d = 0.0f64;
+        assert_eq!(unsafe { asdf_value_as_double(second, &mut d) }, AsdfValueErr::Ok);
+        assert!((d - 2.5).abs() < f64::EPSILON);
+        unsafe { destroy(second) };
+
+        assert_eq!(unsafe { asdf_sequence_append_bool(sequence, true) }, AsdfValueErr::Ok);
+        assert_eq!(unsafe { asdf_sequence_size(sequence) }, 4);
+
+        unsafe { destroy(sequence) };
+        unsafe { destroy(mapping) };
+    }
+
+    #[test]
+    fn mapping_update_merges_and_replaces() {
+        use crate::file_ffi::asdf_value_destroy as destroy;
+
+        let file = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let handle = Handle(file);
+
+        let target = unsafe { asdf_mapping_create(handle.0) };
+        let update = unsafe { asdf_mapping_create(handle.0) };
+        let shared = CString::new("shared").unwrap();
+        let only_target = CString::new("target-only").unwrap();
+        let only_update = CString::new("update-only").unwrap();
+
+        unsafe { asdf_mapping_set_int32(target, shared.as_ptr(), 1) };
+        unsafe { asdf_mapping_set_int32(target, only_target.as_ptr(), 2) };
+        unsafe { asdf_mapping_set_int32(update, shared.as_ptr(), 99) };
+        unsafe { asdf_mapping_set_int32(update, only_update.as_ptr(), 3) };
+
+        assert_eq!(unsafe { asdf_mapping_update(target, update) }, AsdfValueErr::Ok);
+        assert_eq!(unsafe { asdf_mapping_size(target) }, 3);
+
+        let merged = unsafe { asdf_mapping_get(target, shared.as_ptr()) };
+        let mut got: i32 = 0;
+        assert_eq!(unsafe { asdf_value_as_int32(merged, &mut got) }, AsdfValueErr::Ok);
+        assert_eq!(got, 99, "the update's value should replace the target's");
+        unsafe { destroy(merged) };
+
+        // A shallow copy carries the same entries.
+        let copy = unsafe { asdf_mapping_copy(target) };
+        assert!(!copy.is_null());
+        assert_eq!(unsafe { asdf_mapping_size(copy) }, 3);
+
+        for v in [copy, update, target] {
+            unsafe { destroy(v) };
+        }
+    }
+
+    #[test]
+    fn recognises_containers() {
+        let h = open();
+        let root = value_at(&h, "");
+        assert!(unsafe { asdf_value_is_mapping(root) });
+        assert!(unsafe { asdf_value_is_container(root) });
+        assert_eq!(unsafe { asdf_mapping_size(root) }, 7);
+
+        let list = value_at(&h, "list");
+        assert!(unsafe { asdf_value_is_sequence(list) });
+        assert_eq!(unsafe { asdf_sequence_size(list) }, 3);
+
+        let scalar = value_at(&h, "a");
+        assert!(!unsafe { asdf_value_is_container(scalar) });
+        assert_eq!(unsafe { asdf_mapping_size(scalar) }, -1);
+        assert_eq!(unsafe { asdf_sequence_size(scalar) }, -1);
+
+        for v in [root, list, scalar] {
+            unsafe { asdf_value_destroy(v) };
+        }
+    }
+
+    #[test]
+    fn mapping_lookup_and_typed_reads() {
+        let h = open();
+        let root = value_at(&h, "");
+
+        let key = CString::new("a").unwrap();
+        let a = unsafe { asdf_mapping_get(root, key.as_ptr()) };
+        assert!(!a.is_null());
+        let mut n: i64 = 0;
+        assert_eq!(unsafe { asdf_value_as_int64(a, &mut n) }, AsdfValueErr::Ok);
+        assert_eq!(n, 1);
+        assert!(unsafe { asdf_value_is_int(a) });
+
+        let missing = CString::new("nope").unwrap();
+        assert!(unsafe { asdf_mapping_get(root, missing.as_ptr()) }.is_null());
+
+        unsafe { asdf_value_destroy(a) };
+        unsafe { asdf_value_destroy(root) };
+    }
+
+    #[test]
+    fn iterates_a_mapping_in_order() {
+        let h = open();
+        let root = value_at(&h, "");
+
+        let mut iter = unsafe { asdf_mapping_iter_init(root) };
+        assert!(!iter.is_null());
+
+        let mut keys = Vec::new();
+        while unsafe { asdf_mapping_iter_next(&mut iter) } {
+            let head = unsafe { &*iter };
+            assert!(!head.key.is_null());
+            keys.push(unsafe { CStr::from_ptr(head.key) }.to_str().unwrap().to_string());
+            assert!(!head.value.is_null());
+        }
+        // The loop's end nulls the caller's pointer, so cleanup is a no-op.
+        assert!(iter.is_null(), "the iterator must null itself at the end");
+        unsafe { asdf_mapping_iter_destroy(iter) };
+
+        assert_eq!(keys, ["a", "b", "c", "flag", "nothing", "list", "nested"]);
+        unsafe { asdf_value_destroy(root) };
+    }
+
+    #[test]
+    fn iterates_a_mapping_in_reverse() {
+        let h = open();
+        let root = value_at(&h, "");
+
+        let mut iter = unsafe { asdf_mapping_reverse_iter_init(root) };
+        let mut keys = Vec::new();
+        while unsafe { asdf_mapping_iter_next(&mut iter) } {
+            let head = unsafe { &*iter };
+            keys.push(unsafe { CStr::from_ptr(head.key) }.to_str().unwrap().to_string());
+        }
+        assert_eq!(keys, ["nested", "list", "nothing", "flag", "c", "b", "a"]);
+        unsafe { asdf_value_destroy(root) };
+    }
+
+    #[test]
+    fn iterates_a_sequence_with_indices() {
+        let h = open();
+        let list = value_at(&h, "list");
+
+        let mut iter = unsafe { asdf_sequence_iter_init(list) };
+        let mut seen = Vec::new();
+        while unsafe { asdf_sequence_iter_next(&mut iter) } {
+            let head = unsafe { &*iter };
+            let mut n: i64 = 0;
+            unsafe { asdf_value_as_int64(head.value.cast(), &mut n) };
+            seen.push((head.index, n));
+        }
+        assert_eq!(seen, [(0, 10), (1, 20), (2, 30)]);
+        assert!(iter.is_null());
+        unsafe { asdf_value_destroy(list) };
+    }
+
+    #[test]
+    fn a_reversed_sequence_keeps_original_indices() {
+        let h = open();
+        let list = value_at(&h, "list");
+
+        let mut iter = unsafe { asdf_sequence_reverse_iter_init(list) };
+        let mut seen = Vec::new();
+        while unsafe { asdf_sequence_iter_next(&mut iter) } {
+            let head = unsafe { &*iter };
+            seen.push(head.index);
+        }
+        assert_eq!(seen, [2, 1, 0]);
+        unsafe { asdf_value_destroy(list) };
+    }
+
+    #[test]
+    fn breaking_out_of_a_loop_leaves_the_iterator_to_destroy() {
+        let h = open();
+        let root = value_at(&h, "");
+
+        let mut iter = unsafe { asdf_mapping_iter_init(root) };
+        let mut count = 0;
+        while unsafe { asdf_mapping_iter_next(&mut iter) } {
+            count += 1;
+            if count == 2 {
+                break;
+            }
+        }
+        // The early break leaves a live iterator; destroying it must be
+        // clean, including the value handle it still owns.
+        assert!(!iter.is_null());
+        unsafe { asdf_mapping_iter_destroy(iter) };
+        unsafe { asdf_value_destroy(root) };
+    }
+
+    #[test]
+    fn sequence_indexing_accepts_negatives() {
+        let h = open();
+        let list = value_at(&h, "list");
+
+        let last = unsafe { asdf_sequence_get(list, -1) };
+        assert!(!last.is_null());
+        let mut n: i64 = 0;
+        unsafe { asdf_value_as_int64(last, &mut n) };
+        assert_eq!(n, 30);
+
+        assert!(unsafe { asdf_sequence_get(list, 3) }.is_null());
+        unsafe { asdf_value_destroy(last) };
+        unsafe { asdf_value_destroy(list) };
+    }
+
+    #[test]
+    fn typed_predicates_and_reads() {
+        let h = open();
+
+        let b = value_at(&h, "b");
+        assert!(unsafe { asdf_value_is_string(b) });
+        let mut s: *const c_char = std::ptr::null();
+        assert_eq!(unsafe { asdf_value_as_string0(b, &mut s) }, AsdfValueErr::Ok);
+        assert_eq!(unsafe { CStr::from_ptr(s) }.to_str().unwrap(), "two");
+
+        let c = value_at(&h, "c");
+        assert!(unsafe { asdf_value_is_double(c) });
+        let mut d = 0f64;
+        assert_eq!(unsafe { asdf_value_as_double(c, &mut d) }, AsdfValueErr::Ok);
+        assert_eq!(d, 3.5);
+
+        let flag = value_at(&h, "flag");
+        assert!(unsafe { asdf_value_is_bool(flag) });
+        let mut bl = false;
+        assert_eq!(unsafe { asdf_value_as_bool(flag, &mut bl) }, AsdfValueErr::Ok);
+        assert!(bl);
+
+        let nothing = value_at(&h, "nothing");
+        assert!(unsafe { asdf_value_is_null(nothing) });
+
+        for v in [b, c, flag, nothing] {
+            unsafe { asdf_value_destroy(v) };
+        }
+    }
+
+    #[test]
+    fn reading_the_wrong_type_is_a_mismatch_not_a_guess() {
+        let h = open();
+        let b = value_at(&h, "b");
+        let mut n: i64 = 0;
+        assert_eq!(unsafe { asdf_value_as_int64(b, &mut n) }, AsdfValueErr::TypeMismatch);
+        unsafe { asdf_value_destroy(b) };
+    }
+
+    #[test]
+    fn as_mapping_and_as_sequence_check_the_type() {
+        let h = open();
+        let root = value_at(&h, "");
+        let list = value_at(&h, "list");
+
+        let mut out: *mut AsdfMapping = std::ptr::null_mut();
+        assert_eq!(unsafe { asdf_value_as_mapping(root, &mut out) }, AsdfValueErr::Ok);
+        assert_eq!(out, root);
+        assert_eq!(unsafe { asdf_value_as_mapping(list, &mut out) }, AsdfValueErr::TypeMismatch);
+
+        let mut seq: *mut AsdfSequence = std::ptr::null_mut();
+        assert_eq!(unsafe { asdf_value_as_sequence(list, &mut seq) }, AsdfValueErr::Ok);
+        assert_eq!(unsafe { asdf_value_as_sequence(root, &mut seq) }, AsdfValueErr::TypeMismatch);
+
+        unsafe { asdf_value_destroy(root) };
+        unsafe { asdf_value_destroy(list) };
+    }
+
+    #[test]
+    fn copies_are_independent_handles_to_the_same_node() {
+        let h = open();
+        let a = value_at(&h, "a");
+        let copy = unsafe { asdf_value_copy(a) };
+        assert!(!copy.is_null());
+        assert_ne!(copy, a);
+
+        // Destroying one must leave the other usable.
+        unsafe { asdf_value_destroy(a) };
+        let mut n: i64 = 0;
+        assert_eq!(unsafe { asdf_value_as_int64(copy, &mut n) }, AsdfValueErr::Ok);
+        assert_eq!(n, 1);
+        unsafe { asdf_value_destroy(copy) };
+    }
+
+    #[test]
+    fn null_handles_are_tolerated_everywhere() {
+        let null = std::ptr::null_mut();
+        assert!(!unsafe { asdf_value_is_mapping(null) });
+        assert!(!unsafe { asdf_value_is_sequence(null) });
+        assert!(!unsafe { asdf_value_is_container(null) });
+        assert_eq!(unsafe { asdf_container_size(null) }, -1);
+        assert_eq!(unsafe { asdf_mapping_size(null) }, -1);
+        assert_eq!(unsafe { asdf_sequence_size(null) }, -1);
+        assert!(unsafe { asdf_mapping_iter_init(null) }.is_null());
+        assert!(unsafe { asdf_sequence_iter_init(null) }.is_null());
+        assert!(!unsafe { asdf_mapping_iter_next(std::ptr::null_mut()) });
+        assert!(!unsafe { asdf_sequence_iter_next(std::ptr::null_mut()) });
+        unsafe { asdf_mapping_iter_destroy(std::ptr::null_mut()) };
+        unsafe { asdf_sequence_iter_destroy(std::ptr::null_mut()) };
+        assert!(unsafe { asdf_value_copy(null) }.is_null());
+        assert!(unsafe { asdf_value_file(null) }.is_null());
+    }
+
+    /// The cast between the public head and the implementation is only
+    /// sound while the head sits at offset 0. Pin it, so removing the
+    /// `repr(C)` fails here rather than corrupting a C caller's read.
+    #[test]
+    fn iterator_public_heads_sit_at_offset_zero() {
+        use std::mem::offset_of;
+        assert_eq!(offset_of!(MappingIter, public), 0);
+        assert_eq!(offset_of!(SequenceIter, public), 0);
+    }
+}
 #[cfg(test)]
 mod build_tests {
     use super::*;

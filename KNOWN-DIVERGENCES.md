@@ -88,3 +88,28 @@ never reaches the workaround, so the too-broad version test costs nothing.
 
 Measured by `differential::python_written_checksums_verify`, which reports
 which form the installed Python asdf actually used rather than assuming.
+
+## Five extra exported symbols: `asdf_shim_*`
+
+Two parts of the C ABI cannot be written in stable Rust -- the three variadic
+entry points and `asdf_ndarray_read_float16_at`, whose `_Float16` return uses
+a different register class from `uint16_t`. They live in `shim.c`, which calls
+back into Rust through five helpers: `asdf_shim_error_set`,
+`asdf_shim_error_format`, `asdf_shim_error_set_system`, `asdf_shim_log_message`
+and `asdf_shim_ndarray_read_float16_bits_at`.
+
+Upstream declares no such symbols, so the shared library exports five names
+upstream's does not. The version script cannot hide them: GNU ld resolves a
+symbol matching wildcards in both `global` and `local` in favour of the global
+one, and they have to match `asdf_*` to satisfy the symbol-leakage test that
+reserves that namespace for libasdf. Renaming them outside the namespace would
+trade one problem for a worse one, since the version script is not applied on
+macOS at all.
+
+They collide with nothing: they sit inside the namespace upstream reserves for
+itself, and a program that defines its own `asdf_shim_*` is already in
+violation of that reservation. Nothing in the public headers references them.
+
+Covered by `abi::every_declared_export_is_defined`, which checks the other
+direction -- every symbol the vendored headers declare is defined -- and by
+`abi::exports_only_the_asdf_namespace`.

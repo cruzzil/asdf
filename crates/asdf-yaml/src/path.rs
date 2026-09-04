@@ -203,6 +203,107 @@ impl Document {
     pub fn lookup_str(&self, path: &str) -> Option<NodeId> {
         self.lookup(&Path::parse(path).ok()?)
     }
+
+    /// The container that holds `id`, searching down from the root.
+    ///
+    /// A node reachable by more than one route reports the first parent found
+    /// in document order. Aliases are *not* followed: an alias node is its
+    /// own child of whatever holds it, and the node it points at is reported
+    /// under its defining position.
+    pub fn parent_of(&self, id: NodeId) -> Option<NodeId> {
+        let root = self.root()?;
+        if root == id {
+            return None;
+        }
+        let mut stack = vec![root];
+        let mut seen = vec![false; self.node_count()];
+        while let Some(current) = stack.pop() {
+            let index = current.0 as usize;
+            if index >= seen.len() || seen[index] {
+                continue;
+            }
+            seen[index] = true;
+            match &self.node(current).data {
+                NodeData::Mapping { entries, .. } => {
+                    for entry in entries {
+                        if entry.key == id || entry.value == id {
+                            return Some(current);
+                        }
+                    }
+                    for entry in entries {
+                        stack.push(entry.value);
+                    }
+                }
+                NodeData::Sequence { items, .. } => {
+                    if items.contains(&id) {
+                        return Some(current);
+                    }
+                    stack.extend(items.iter().copied());
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The path from the root to `id`, in the syntax [`Path::parse`] accepts.
+    ///
+    /// The root itself is `/`. Returns `None` when `id` is not reachable from
+    /// the root, which is the case for a node built but not yet attached.
+    pub fn path_of(&self, id: NodeId) -> Option<String> {
+        let root = self.root()?;
+        let mut components = Vec::new();
+        if !self.walk_to(root, id, &mut components, &mut vec![false; self.node_count()]) {
+            return None;
+        }
+        if components.is_empty() {
+            return Some("/".to_string());
+        }
+        Some(components.join("/"))
+    }
+
+    /// Depth-first search for `target`, recording the route taken.
+    fn walk_to(
+        &self,
+        current: NodeId,
+        target: NodeId,
+        route: &mut Vec<String>,
+        seen: &mut Vec<bool>,
+    ) -> bool {
+        if current == target {
+            return true;
+        }
+        let index = current.0 as usize;
+        if index >= seen.len() || seen[index] {
+            return false;
+        }
+        seen[index] = true;
+        match &self.node(current).data {
+            NodeData::Mapping { entries, .. } => {
+                for entry in entries {
+                    let Some(key) = self.resolved(entry.key).as_str() else {
+                        continue;
+                    };
+                    route.push(escape_component(key));
+                    if self.walk_to(entry.value, target, route, seen) {
+                        return true;
+                    }
+                    route.pop();
+                }
+            }
+            NodeData::Sequence { items, .. } => {
+                for (position, item) in items.iter().enumerate() {
+                    route.push(format!("[{position}]"));
+                    if self.walk_to(*item, target, route, seen) {
+                        return true;
+                    }
+                    route.pop();
+                }
+            }
+            _ => {}
+        }
+        false
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +316,48 @@ mod tests {
             "a:\n  b: 1\n  '0': zero-as-key\nseq: [x, y, z]\nnested:\n  - k: v\n  - k: w\n",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn nodes_report_their_path_from_the_root() {
+        let d = doc();
+        let root = d.root().unwrap();
+        assert_eq!(d.path_of(root).as_deref(), Some("/"));
+
+        let inner = d.lookup_str("a/b").unwrap();
+        assert_eq!(d.path_of(inner).as_deref(), Some("a/b"));
+
+        // A sequence element is reported with an explicit index, which is
+        // unambiguous when it is fed back into `Path::parse`.
+        let item = d.lookup_str("seq/1").unwrap();
+        assert_eq!(d.path_of(item).as_deref(), Some("seq/[1]"));
+        assert_eq!(d.lookup_str("seq/[1]"), Some(item));
+
+        let nested = d.lookup_str("nested/1/k").unwrap();
+        assert_eq!(d.path_of(nested).as_deref(), Some("nested/[1]/k"));
+    }
+
+    #[test]
+    fn a_detached_node_has_no_path() {
+        let mut d = doc();
+        let orphan = d.add_scalar("nowhere");
+        assert_eq!(d.path_of(orphan), None);
+        assert_eq!(d.parent_of(orphan), None);
+    }
+
+    #[test]
+    fn nodes_report_their_parent() {
+        let d = doc();
+        let root = d.root().unwrap();
+        assert_eq!(d.parent_of(root), None, "the root has no parent");
+
+        let inner = d.lookup_str("a/b").unwrap();
+        let a = d.lookup_str("a").unwrap();
+        assert_eq!(d.parent_of(inner), Some(a));
+        assert_eq!(d.parent_of(a), Some(root));
+
+        let item = d.lookup_str("seq/2").unwrap();
+        assert_eq!(d.parent_of(item), Some(d.lookup_str("seq").unwrap()));
     }
 
     fn get<'a>(d: &'a Document, path: &str) -> Option<&'a str> {
