@@ -7,10 +7,11 @@
 use std::io::Write;
 use std::path::Path;
 
-use asdf_yaml::{Document, EmitOptions, NodeId, Tag, TagHandle, emit_with};
+use asdf_yaml::{Document, EmitOptions, TagHandle, emit_with};
 
 use crate::block::header::{BlockHeader, CHECKSUM_SIZE};
 use crate::compression::Compression;
+use crate::core::provenance::Software;
 use crate::error::{Result, err};
 use crate::layout::write_block_index;
 use crate::version::{ASDF_FORMAT_VERSION, ASDF_STANDARD_VERSION};
@@ -90,51 +91,6 @@ pub struct WriteOptions {
     /// another writer's output wants.
     pub asdf_library: Option<Software>,
 }
-
-/// The `core/software` record identifying what wrote a file.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Software {
-    pub name: String,
-    pub version: String,
-    pub author: Option<String>,
-    pub homepage: Option<String>,
-}
-
-impl Software {
-    /// This library's own identity.
-    pub fn this_library() -> Self {
-        Self {
-            name: "libasdf-rs".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            author: Some("The libasdf-rs Developers".to_string()),
-            homepage: Some("https://github.com/petesmc/libasdf-rs".to_string()),
-        }
-    }
-
-    /// Build the tree node for this record, tagged `core/software`.
-    fn to_node(&self, doc: &mut Document) -> NodeId {
-        let mut pairs = Vec::new();
-        let mut put = |doc: &mut Document, key: &str, value: &str| {
-            let k = doc.add_scalar(key);
-            let v = doc.add_scalar(value);
-            pairs.push((k, v));
-        };
-        put(doc, "name", &self.name);
-        put(doc, "version", &self.version);
-        if let Some(author) = &self.author {
-            put(doc, "author", author);
-        }
-        if let Some(homepage) = &self.homepage {
-            put(doc, "homepage", homepage);
-        }
-        let node = doc.add_mapping(pairs);
-        doc.node_mut(node).tag = Some(Tag::parse(SOFTWARE_TAG));
-        node
-    }
-}
-
-/// The tag a `core/software` record carries.
-const SOFTWARE_TAG: &str = "tag:stsci.edu:asdf/core/software-1.0.0";
 
 impl Default for WriteOptions {
     fn default() -> Self {

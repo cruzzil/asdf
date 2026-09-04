@@ -83,6 +83,8 @@ use asdf_core::{PendingBlock, Reader, Writer};
 
 pub use asdf_core::ChecksumStatus;
 pub use asdf_core::compression::Compression;
+pub use asdf_core::core::provenance::{ExtensionMetadata, History, HistoryEntry, Meta, Software};
+pub use asdf_core::core::time::{Civil, Location, Time, TimeFormat, TimeScale};
 pub use asdf_core::error::{Error, ErrorCode};
 pub use asdf_core::events::{Event, EventOptions, render_event};
 pub use asdf_core::info::InfoOptions;
@@ -499,6 +501,18 @@ impl Tree {
         asdf_core::core::decode_inline(&self.document, array, &shape)
     }
 
+    /// What this file says about itself: what wrote it, and its history.
+    ///
+    /// Everything in it is optional, so a file that says nothing yields an
+    /// empty [`Meta`] rather than an error.
+    pub fn meta(&self) -> Result<Meta> {
+        let root = self
+            .document
+            .root()
+            .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "the tree has no root"))?;
+        Meta::parse(&self.document, root)
+    }
+
     /// The underlying document, for callers needing the lower-level model.
     pub fn document(&self) -> &Document {
         &self.document
@@ -671,6 +685,30 @@ impl<'a> Value<'a> {
     /// through [`AsdfFile::read_array`].
     pub fn as_ndarray(&self) -> Option<Ndarray> {
         Ndarray::parse(self.document, self.node).ok()
+    }
+
+    /// Interpret this value as a `core/software` record.
+    pub fn as_software(&self) -> Option<Software> {
+        Software::parse(self.document, self.node).ok()
+    }
+
+    /// Interpret this value as a `core/history_entry` record.
+    pub fn as_history_entry(&self) -> Option<HistoryEntry> {
+        HistoryEntry::parse(self.document, self.node).ok()
+    }
+
+    /// Interpret this value as a `core/extension_metadata` record.
+    pub fn as_extension_metadata(&self) -> Option<ExtensionMetadata> {
+        ExtensionMetadata::parse(self.document, self.node).ok()
+    }
+
+    /// Interpret this value as a `time/time`.
+    ///
+    /// The schema allows the whole value to be the time string, or a mapping
+    /// with `value`, `format`, `scale` and a location; both read here, and
+    /// the calendar breakdown comes with it where the value allows one.
+    pub fn as_time(&self) -> Option<Time> {
+        Time::parse(self.document, self.node).ok()
     }
 
     /// Whether this value is an alias to another node.
@@ -1178,6 +1216,62 @@ data: !core/ndarray-1.1.0\n  source: ../../../etc/passwd\n  datatype: int64\n  s
         assert_eq!(names.first(), Some(&"ASDF_ASDF_VERSION_EVENT"));
         assert_eq!(names.last(), Some(&"ASDF_END_EVENT"));
         assert!(names.contains(&"ASDF_BLOCK_EVENT"));
+    }
+
+    /// The core schemas are reachable from Rust, not only from C.
+    #[test]
+    fn the_provenance_schemas_read_from_rust() {
+        let source = "#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n\
+%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n\
+asdf_library: !core/software-1.0.0 {name: asdf, version: 4.1.0}\n\
+history:\n  \
+extensions:\n  \
+- !core/extension_metadata-1.0.0\n    \
+extension_class: asdf.extension._manifest.ManifestExtension\n    \
+software: !core/software-1.0.0 {name: asdf, version: 4.1.0}\n  \
+entries:\n  \
+- !core/history_entry-1.0.0\n    \
+description: made this file\n    \
+time: !<tag:stsci.edu:asdf/time/time-1.4.0> '2025-07-23 11:56:15+00:00'\n\
+...\n";
+        let file = AsdfFile::from_bytes(source.as_bytes().to_vec()).unwrap();
+        let tree = file.tree().unwrap().unwrap();
+
+        // Whole-file provenance in one call.
+        let meta = tree.meta().unwrap();
+        assert_eq!(meta.asdf_library.as_ref().unwrap().name, "asdf");
+        assert_eq!(meta.history.extensions.len(), 1);
+        assert_eq!(meta.history.entries.len(), 1);
+
+        let entry = &meta.history.entries[0];
+        assert_eq!(entry.description.as_deref(), Some("made this file"));
+        assert_eq!(entry.time.as_ref().unwrap().civil.unwrap().unix_seconds, 1_753_271_775);
+
+        // Or one value at a time, by path.
+        let library = tree.get("asdf_library").unwrap().as_software().unwrap();
+        assert_eq!(library.version, "4.1.0");
+
+        let ext = tree.get("history/extensions/0").unwrap().as_extension_metadata().unwrap();
+        assert_eq!(ext.extension_class, "asdf.extension._manifest.ManifestExtension");
+        assert!(ext.package.is_none(), "this record names no package");
+
+        let time = tree.get("history/entries/0/time").unwrap().as_time().unwrap();
+        assert_eq!(time.format, TimeFormat::Iso);
+        assert_eq!(time.scale, TimeScale::Utc);
+
+        // A value that is not one of these says so rather than guessing.
+        assert!(tree.get("asdf_library").unwrap().as_time().is_none());
+        assert!(tree.get("history").unwrap().as_software().is_none());
+    }
+
+    /// The stamp a written file carries reads back as a `Software`.
+    #[test]
+    fn a_written_files_stamp_reads_back_as_software() {
+        let file = round_trip(&AsdfBuilder::new());
+        let tree = file.tree().unwrap().unwrap();
+
+        let library = tree.meta().unwrap().asdf_library.expect("asdf_library");
+        assert_eq!(library, Software::this_library());
     }
 
     #[test]

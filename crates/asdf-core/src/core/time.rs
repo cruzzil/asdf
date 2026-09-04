@@ -18,6 +18,8 @@
 //! `base_format`. Reading collapses the pair into one effective format;
 //! writing splits it back out.
 
+use asdf_yaml::{Document, NodeData, NodeId, Resolved};
+
 use crate::error::{Result, err};
 
 /// How a time is written, mirroring `asdf_time_format_t`.
@@ -719,6 +721,16 @@ fn parse_yday(text: &str) -> Option<Civil> {
     }))
 }
 
+/// How YAML reads a scalar, which decides whether its format may be guessed.
+fn scalar_kind(doc: &Document, node: NodeId) -> Resolved {
+    match &doc.resolved(node).data {
+        NodeData::Scalar { value, style } => {
+            asdf_yaml::resolve(value, *style, asdf_yaml::Schema::Libasdf)
+        }
+        _ => Resolved::Null,
+    }
+}
+
 /// Strip the `B`/`J` prefix from an epoch-year string.
 fn parse_epoch_year(text: &str) -> Option<f64> {
     let text = text.trim();
@@ -745,6 +757,109 @@ impl Time {
     /// A time with the given value and format.
     pub fn new(value: impl Into<String>, format: TimeFormat, scale: TimeScale) -> Self {
         Self { value: value.into(), format, scale, location: Location::default(), civil: None }
+    }
+
+    /// Read a `time/time` value from the tree.
+    ///
+    /// The schema allows two shapes: the whole tagged value as a string, or
+    /// a mapping with the string under `value` and optional `format`,
+    /// `base_format`, `scale` and `location`.
+    ///
+    /// The *wire* format says how to read the value; `base_format` records
+    /// the object's real format and overrides only what it reports
+    /// afterwards. An astropy `plot_date` is stored as an ISO string with
+    /// `base_format: plot_date`, so collapsing the two before parsing would
+    /// try to read a date as a matplotlib ordinal.
+    ///
+    /// The calendar breakdown is computed where the value allows it; a value
+    /// that will not parse is not an error, since the value, format and
+    /// scale round-trip regardless and the breakdown is a convenience.
+    pub fn parse(doc: &Document, id: NodeId) -> Result<Self> {
+        let node = doc.resolved(id);
+        let mapping = node.is_mapping();
+
+        let value_node = if mapping {
+            let Some(found) = doc.mapping_get(id, "value") else {
+                return Err(err!(InvalidArgument, "a time mapping needs a 'value'"));
+            };
+            doc.resolve(found)
+        } else {
+            doc.resolve(id)
+        };
+
+        // The raw text is what the format parsers want, even where YAML
+        // would read it as a number.
+        let Some(value) = doc.resolved(value_node).as_str().map(str::to_string) else {
+            return Err(err!(InvalidArgument, "a time's value must be a scalar"));
+        };
+        // Whether YAML read it *as* a string decides what may be guessed: a
+        // bare number is ambiguous and cannot be.
+        let value_is_string = matches!(scalar_kind(doc, value_node), Resolved::String);
+
+        let field = |key: &str| -> Option<String> {
+            doc.mapping_get(id, key).and_then(|n| doc.resolved(n).as_str().map(str::to_string))
+        };
+
+        let (explicit, base, scale, location) = if mapping {
+            let scale = field("scale")
+                .and_then(|name| TimeScale::from_name(&name))
+                .unwrap_or(TimeScale::Utc);
+
+            let mut location = Location::default();
+            if let Some(loc) = doc.mapping_get(id, "location") {
+                let number = |key: &str| {
+                    doc.mapping_get(loc, key)
+                        .and_then(|n| doc.resolved(n).as_str())
+                        .and_then(|text| text.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                };
+                location.longitude = number("longitude");
+                location.latitude = number("latitude");
+                location.height = number("height");
+            }
+            (field("format"), field("base_format"), scale, location)
+        } else {
+            (None, None, TimeScale::Utc, Location::default())
+        };
+
+        let wire = match &explicit {
+            Some(name) => TimeFormat::from_name(name)
+                .ok_or_else(|| err!(InvalidArgument, "unknown time format {name:?}"))?,
+            None => {
+                if !value_is_string {
+                    return Err(err!(
+                        InvalidArgument,
+                        "a numeric time value needs an explicit format; {value:?} is ambiguous"
+                    ));
+                }
+                infer_format(&value).ok_or_else(|| {
+                    err!(InvalidArgument, "could not guess the format of time {value:?}")
+                })?
+            }
+        };
+
+        // `jyear_str` and `byear_str` exist to make the `J`/`B` prefix
+        // mandatory, so a bare number under either is not a time.
+        if matches!(wire, TimeFormat::JyearStr | TimeFormat::ByearStr) {
+            let prefix = if wire == TimeFormat::JyearStr { ['J', 'j'] } else { ['B', 'b'] };
+            if !value_is_string || !value.starts_with(prefix) {
+                return Err(err!(
+                    InvalidArgument,
+                    "time format {:?} needs a value starting with {:?}",
+                    wire.name(),
+                    prefix[0]
+                ));
+            }
+        }
+
+        // An unrecognised `base_format` is a label we do not know; the value
+        // is still readable without it.
+        let effective = base.as_deref().and_then(TimeFormat::from_name).unwrap_or(wire);
+
+        let mut time = Time::new(value, wire, scale);
+        time.location = location;
+        let civil = time.compute_civil().ok();
+        Ok(Time { format: effective, civil, ..time })
     }
 
     /// Compute the calendar breakdown from the value, format and scale.
