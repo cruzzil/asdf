@@ -8,7 +8,7 @@
 use std::ffi::{CStr, CString, c_char, c_int};
 
 use asdf_core::core::time::{Civil, Time, TimeFormat, TimeScale, infer_format};
-use asdf_core::yaml::{Document, NodeId};
+use asdf_core::yaml::{Document, NodeId, Resolved};
 
 use crate::panic::guard;
 use crate::types::AsdfValueErr;
@@ -241,48 +241,35 @@ pub(crate) fn time_deserialize(
     _file: *mut crate::file_ffi::AsdfFile,
     out: *mut asdf_time_t,
 ) -> AsdfValueErr {
-    // The shorthand: the whole tagged value is the time string.
     let resolved = doc.resolved(node);
-    let (value, format, scale, location) = if let Some(text) = resolved.as_str() {
-        // With no `format` key there is nothing to say what this is, so the
-        // format is read off the value's shape. A value matching none of the
-        // schema's string forms is not a time.
-        let Some(format) = infer_format(text) else {
+
+    // Either the whole tagged value is the time string, or it is a mapping
+    // with the string under `value`.
+    let (value_node, mapping) = if resolved.is_mapping() {
+        let Some(id) = doc.mapping_get(node, "value") else {
             return AsdfValueErr::ParseFailure;
         };
-        (text.to_string(), format, TimeScale::Utc, asdf_time_location_t::default())
-    } else if resolved.is_mapping() {
-        let Some(value) = doc
-            .mapping_get(node, "value")
-            .and_then(|id| doc.resolved(id).as_str().map(str::to_string))
-        else {
-            return AsdfValueErr::ParseFailure;
-        };
+        (doc.resolve(id), true)
+    } else {
+        (doc.resolve(node), false)
+    };
 
-        // `base_format` overrides `format`, collapsing the pair into one
-        // effective format.
-        let wire = doc
-            .mapping_get(node, "format")
-            .and_then(|id| doc.resolved(id).as_str())
-            .and_then(TimeFormat::from_name);
-        let base = doc
-            .mapping_get(node, "base_format")
-            .and_then(|id| doc.resolved(id).as_str())
-            .and_then(TimeFormat::from_name);
-        // As for the bare form, a mapping with no `format` has its format
-        // inferred rather than assumed to be ISO.
-        let format = match base.or(wire) {
-            Some(format) => format,
-            None => match infer_format(&value) {
-                Some(format) => format,
-                None => return AsdfValueErr::ParseFailure,
-            },
-        };
+    // The raw scalar text is what the format parsers want, even when YAML
+    // would read it as a number.
+    let Some(value) = doc.resolved(value_node).as_str().map(str::to_string) else {
+        return AsdfValueErr::ParseFailure;
+    };
+    // Whether YAML read it *as* a string decides what may be guessed: a bare
+    // number is ambiguous and cannot be.
+    let value_is_string = matches!(scalar_kind(doc, value_node), Resolved::String);
 
-        let scale = doc
-            .mapping_get(node, "scale")
-            .and_then(|id| doc.resolved(id).as_str())
-            .and_then(TimeScale::from_name)
+    let string_field = |key: &str| -> Option<String> {
+        doc.mapping_get(node, key).and_then(|id| doc.resolved(id).as_str().map(str::to_string))
+    };
+
+    let (explicit, base, scale, location) = if mapping {
+        let scale = string_field("scale")
+            .and_then(|name| TimeScale::from_name(&name))
             .unwrap_or(TimeScale::Utc);
 
         let mut location = asdf_time_location_t::default();
@@ -297,24 +284,57 @@ pub(crate) fn time_deserialize(
             location.latitude = number("latitude");
             location.height = number("height");
         }
-        (value, format, scale, location)
+        (string_field("format"), string_field("base_format"), scale, location)
     } else {
-        return AsdfValueErr::ParseFailure;
+        (None, None, TimeScale::Utc, asdf_time_location_t::default())
     };
+
+    // The *wire* format says how to parse the value. `base_format` is the
+    // object's real format and overrides the reported one afterwards, but
+    // never changes how the value is read: an astropy `plot_date` is stored
+    // as an ISO string with `base_format: plot_date`.
+    let wire = match &explicit {
+        Some(name) => match TimeFormat::from_name(name) {
+            Some(format) => format,
+            None => return AsdfValueErr::ParseFailure,
+        },
+        None => {
+            if !value_is_string {
+                return AsdfValueErr::ParseFailure;
+            }
+            match infer_format(&value) {
+                Some(format) => format,
+                None => return AsdfValueErr::ParseFailure,
+            }
+        }
+    };
+
+    // `jyear_str` and `byear_str` exist to make the `J`/`B` prefix
+    // mandatory, so a bare number under either is not a time.
+    if matches!(wire, TimeFormat::JyearStr | TimeFormat::ByearStr) {
+        let prefix = if wire == TimeFormat::JyearStr { ['J', 'j'] } else { ['B', 'b'] };
+        if !value_is_string || !value.starts_with(prefix) {
+            return AsdfValueErr::ParseFailure;
+        }
+    }
 
     let Ok(owned) = CString::new(value.clone()) else {
         return AsdfValueErr::ParseFailure;
     };
 
+    // An unrecognised `base_format` is ignored rather than fatal, as
+    // upstream's is.
+    let effective = base.as_deref().and_then(TimeFormat::from_name).unwrap_or(wire);
+
     unsafe {
         (*out).value = owned.into_raw();
-        (*out).format = format as c_int;
+        (*out).format = effective as c_int;
         (*out).scale = scale as c_int;
         (*out).location = location;
         // A value that will not parse is not an error: the value, format and
         // scale are authoritative and round-trip regardless, and the
         // breakdown is only a convenience.
-        (*out).info = match Time::new(value, format, scale).compute_civil() {
+        (*out).info = match Time::new(value, wire, scale).compute_civil() {
             Ok(civil) => fill_info(&civil),
             Err(_) => asdf_time_info_t::default(),
         };
@@ -322,7 +342,17 @@ pub(crate) fn time_deserialize(
     AsdfValueErr::Ok
 }
 
-/// Write a `time/time` value into the tree.
+/// How YAML reads a scalar, which decides whether its format may be guessed.
+fn scalar_kind(doc: &Document, node: NodeId) -> Resolved {
+    let resolved = doc.resolved(node);
+    match &resolved.data {
+        asdf_core::yaml::NodeData::Scalar { value, style } => {
+            asdf_core::yaml::resolve(value, *style, asdf_core::yaml::Schema::Libasdf)
+        }
+        _ => Resolved::Null,
+    }
+}
+
 pub(crate) fn time_serialize(doc: &mut Document, obj: &asdf_time_t) -> Option<NodeId> {
     if obj.value.is_null() {
         return None;
