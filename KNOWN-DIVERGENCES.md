@@ -161,3 +161,41 @@ corpus compare equal.
 Covered by `pyrepr::tests` and, against the interpreter itself rather than
 written-down expectations, by
 `differential::float_and_complex_spellings_match_python`.
+
+## No schema validation
+
+**Upstream behaviour.** libasdf does not validate against the ASDF Standard's
+JSON Schemas, and ships none. Its only `validate`-named code is config
+checking, block-index verification, and range checks on time strings
+(`src/core/time.c`). There is no C entry point for validation, so this is not
+a parity gap.
+
+**Python's behaviour.** The Python `asdf` library does validate, using the
+schemas and manifests published by the `asdf-standard` package.
+
+**What we do.** Nothing, deliberately, and we leave the door open rather than
+half-build it.
+
+The reason is not effort, it is that the interesting half of the job is *data
+we do not own*. A tag does not determine its schema by any rule we could
+encode: the mapping is declared in a manifest, as explicit `tag_uri` /
+`schema_uri` pairs. The ASDF Standard's own twelve manifests happen to map
+`tag:stsci.edu:asdf/X` to `http://stsci.edu/schemas/asdf/X`, but that is a
+convention of one namespace, not a specification — a third-party extension
+publishes whatever pairs it likes. So a validator built into the engine could
+only ever validate the tags whose manifests it had been handed, which is to
+say: it needs a caller to supply them anyway.
+
+Given that, carrying the machinery here buys little and costs a lot — a
+draft-4 validator with `$ref` resolution across 63 schema files, an ECMA regex
+engine, and a second vendored third-party corpus, all to reimplement what the
+reference implementation already does well.
+
+A caller who wants validation has what they need: `Tag` parses ASDF tags and
+splits their versions, `Value` exposes the tagged node, and the schemas are one
+`pip install asdf-standard` away. If validation is ever built here it belongs
+in a separate optional crate that resolves manifests from a path the caller
+gives it, leaving `asdf-core` as it is.
+
+Covered by `dependencies::no_regex_or_json_schema_engine_is_linked`, which
+fails if either dependency appears.
