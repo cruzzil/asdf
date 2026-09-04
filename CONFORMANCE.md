@@ -101,7 +101,7 @@ Every suite's pass count is pinned. A change that loses ground fails, and so
 does one that gains ground without updating the number, so the figure below
 cannot drift.
 
-**269 of 427.**
+**417 of 427.**
 
 | Suite | | |
 |---|---|---|
@@ -111,7 +111,7 @@ cannot drift.
 | `test-error` | 3/3 | |
 | `test-time` | 17/17 | |
 | `test-core-extensions` | 16/16 | |
-| `test-ndarray` | 100/257 | |
+| `test-ndarray` | 248/257 | the numeric conversion matrix, 3 byte orders deep |
 | `test-extension` | 12/13 | |
 | `test-reference-files` | 113/113 | every tagged value in every reference file |
 

@@ -592,36 +592,80 @@ pub unsafe extern "C" fn asdf_ndarray_storage_set(
 }
 
 /// Convert one element to a destination scalar type, writing it into `out`.
+///
+/// A value outside the destination's range **saturates** rather than
+/// wrapping or being refused: to the destination's minimum or maximum for an
+/// integer, and to an infinity for a float. The call still reports
+/// [`NdarrayErr::Overflow`], and the caller is expected to keep the
+/// converted buffer -- that is what upstream does, and what a reader
+/// converting a whole array needs, since one bad element should not cost the
+/// rest.
+///
+/// Losing *precision* is not overflow: `int32::MAX` as an `f32` rounds, and
+/// that is an ordinary conversion. Only leaving the representable range is.
 fn write_converted(element: &Element, target: ScalarType, out: &mut [u8]) -> NdarrayErr {
-    macro_rules! put {
-        ($ty:ty, $value:expr) => {{
-            let bytes = (<$ty>::from($value)).to_ne_bytes();
+    /// Write a value's native-endian bytes, if they fit.
+    macro_rules! emit {
+        ($bytes:expr) => {{
+            let bytes = $bytes;
             if out.len() < bytes.len() {
                 return NdarrayErr::Inval;
             }
             out[..bytes.len()].copy_from_slice(&bytes);
-            NdarrayErr::Ok
         }};
     }
+
     macro_rules! put_int {
         ($ty:ty) => {{
-            let wide: i128 = match element {
-                Element::Int(v) => i128::from(*v),
-                Element::Uint(v) => i128::from(*v),
-                Element::Bool(v) => i128::from(*v),
-                Element::Float(v) if v.fract() == 0.0 => *v as i128,
+            let (wide, saturated): (i128, bool) = match element {
+                Element::Int(v) => (i128::from(*v), false),
+                Element::Uint(v) => (i128::from(*v), false),
+                Element::Bool(v) => (i128::from(*v), false),
+                Element::Float(v) => {
+                    if v.is_nan() {
+                        // Converting a NaN to an integer has no defined
+                        // answer; zero is as good as any, and upstream
+                        // makes no promise either.
+                        (0, false)
+                    } else if v.is_infinite() {
+                        (
+                            if *v > 0.0 { i128::from(<$ty>::MAX) } else { i128::from(<$ty>::MIN) },
+                            true,
+                        )
+                    } else {
+                        // Truncates toward zero, as a C cast does.
+                        (v.trunc() as i128, false)
+                    }
+                }
                 _ => return NdarrayErr::Conversion,
             };
-            match <$ty>::try_from(wide) {
-                Ok(v) => {
-                    let bytes = v.to_ne_bytes();
-                    if out.len() < bytes.len() {
-                        return NdarrayErr::Inval;
-                    }
-                    out[..bytes.len()].copy_from_slice(&bytes);
-                    NdarrayErr::Ok
-                }
-                Err(_) => NdarrayErr::Overflow,
+
+            let clamped = wide.clamp(i128::from(<$ty>::MIN), i128::from(<$ty>::MAX));
+            emit!((clamped as $ty).to_ne_bytes());
+            if saturated || clamped != wide { NdarrayErr::Overflow } else { NdarrayErr::Ok }
+        }};
+    }
+
+    /// Convert to a float type, reporting only a finite value turning
+    /// infinite.
+    macro_rules! put_float {
+        ($convert:expr, $bytes:expr) => {{
+            let source: f64 = match element {
+                Element::Float(v) => *v,
+                Element::Int(v) => *v as f64,
+                Element::Uint(v) => *v as f64,
+                Element::Bool(v) => f64::from(*v),
+                _ => return NdarrayErr::Conversion,
+            };
+            #[allow(clippy::redundant_closure_call)]
+            let value = ($convert)(source);
+            #[allow(clippy::redundant_closure_call)]
+            let bytes = ($bytes)(value);
+            emit!(bytes);
+            if source.is_finite() && !is_finite_result(value.into()) {
+                NdarrayErr::Overflow
+            } else {
+                NdarrayErr::Ok
             }
         }};
     }
@@ -642,52 +686,21 @@ fn write_converted(element: &Element, target: ScalarType, out: &mut [u8]) -> Nda
                 Element::Uint(v) => u8::from(*v != 0),
                 _ => return NdarrayErr::Conversion,
             };
-            put!(u8, value)
-        }
-        ScalarType::Float32 => {
-            let value = match element {
-                Element::Float(v) => *v as f32,
-                Element::Int(v) => *v as f32,
-                Element::Uint(v) => *v as f32,
-                _ => return NdarrayErr::Conversion,
-            };
-            let bytes = value.to_ne_bytes();
-            if out.len() < bytes.len() {
-                return NdarrayErr::Inval;
-            }
-            out[..bytes.len()].copy_from_slice(&bytes);
+            emit!(value.to_ne_bytes());
             NdarrayErr::Ok
         }
-        ScalarType::Float64 => {
-            let value = match element {
-                Element::Float(v) => *v,
-                Element::Int(v) => *v as f64,
-                Element::Uint(v) => *v as f64,
-                _ => return NdarrayErr::Conversion,
-            };
-            let bytes = value.to_ne_bytes();
-            if out.len() < bytes.len() {
-                return NdarrayErr::Inval;
-            }
-            out[..bytes.len()].copy_from_slice(&bytes);
-            NdarrayErr::Ok
-        }
+        ScalarType::Float32 => put_float!(|v: f64| v as f32, |v: f32| v.to_ne_bytes()),
+        ScalarType::Float64 => put_float!(|v: f64| v, |v: f64| v.to_ne_bytes()),
         ScalarType::Float16 => {
-            let value = match element {
-                Element::Float(v) => half::f16::from_f64(*v),
-                Element::Int(v) => half::f16::from_f64(*v as f64),
-                Element::Uint(v) => half::f16::from_f64(*v as f64),
-                _ => return NdarrayErr::Conversion,
-            };
-            let bytes = value.to_bits().to_ne_bytes();
-            if out.len() < bytes.len() {
-                return NdarrayErr::Inval;
-            }
-            out[..bytes.len()].copy_from_slice(&bytes);
-            NdarrayErr::Ok
+            put_float!(half::f16::from_f64, |v: half::f16| v.to_bits().to_ne_bytes())
         }
         _ => NdarrayErr::Conversion,
     }
+}
+
+/// Whether a converted float stayed finite.
+fn is_finite_result(value: f64) -> bool {
+    value.is_finite()
 }
 
 /// Decode the array's elements, using the cached data.
@@ -734,34 +747,24 @@ pub unsafe extern "C" fn asdf_ndarray_read_all(
 
         let total = elements.len() * width;
         let mut buffer = vec![0u8; total];
+        // An overflowing element saturates and the read continues: the
+        // caller gets the whole converted array *and* the report that
+        // something did not fit. Anything else is a hard failure.
+        let mut overflowed = false;
         for (index, element) in elements.iter().enumerate() {
             let slot = &mut buffer[index * width..(index + 1) * width];
-            let err = write_converted(element, target, slot);
-            if err != NdarrayErr::Ok {
-                return err;
+            match write_converted(element, target, slot) {
+                NdarrayErr::Ok => {}
+                NdarrayErr::Overflow => overflowed = true,
+                err => return err,
             }
         }
 
-        if dst.is_null() {
-            return NdarrayErr::Inval;
+        let delivered = deliver(&buffer, dst);
+        if delivered != NdarrayErr::Ok {
+            return delivered;
         }
-        let existing = unsafe { *dst };
-        if existing.is_null() {
-            // Allocate with malloc, since the caller frees it with free().
-            let allocation = unsafe { libc::malloc(total.max(1)) };
-            if allocation.is_null() {
-                return NdarrayErr::Oom;
-            }
-            unsafe {
-                std::ptr::copy_nonoverlapping(buffer.as_ptr(), allocation.cast::<u8>(), total);
-                *dst = allocation;
-            }
-        } else {
-            unsafe {
-                std::ptr::copy_nonoverlapping(buffer.as_ptr(), existing.cast::<u8>(), total);
-            }
-        }
-        NdarrayErr::Ok
+        if overflowed { NdarrayErr::Overflow } else { NdarrayErr::Ok }
     })
 }
 
@@ -1441,17 +1444,21 @@ fn write_elements(
     width: usize,
     dst: &mut [u8],
 ) -> NdarrayErr {
+    let mut overflowed = false;
     for step in 0..count {
         let Some(element) = elements.get(flat + step) else {
             return NdarrayErr::OutOfBounds;
         };
         let slot = &mut dst[step * width..(step + 1) * width];
-        let err = write_converted(element, target, slot);
-        if err != NdarrayErr::Ok {
-            return err;
+        match write_converted(element, target, slot) {
+            NdarrayErr::Ok => {}
+            // Saturating is reported but does not stop the copy; see
+            // `write_converted`.
+            NdarrayErr::Overflow => overflowed = true,
+            err => return err,
         }
     }
-    NdarrayErr::Ok
+    if overflowed { NdarrayErr::Overflow } else { NdarrayErr::Ok }
 }
 
 /// Hand a buffer back through `dst`, allocating with `malloc` if asked.
@@ -1608,14 +1615,16 @@ pub unsafe extern "C" fn asdf_ndarray_read_tile_ndim(
         let mut buffer = vec![0u8; count * width];
         let mut cursor = origin.clone();
         let mut written = 0usize;
+        let mut overflowed = false;
         loop {
             let Some(flat) = flat_index(&state.shape, &cursor) else {
                 return NdarrayErr::OutOfBounds;
             };
             let slice = &mut buffer[written * width..(written + run) * width];
-            let err = write_elements(&elements, flat, run, target, width, slice);
-            if err != NdarrayErr::Ok {
-                return err;
+            match write_elements(&elements, flat, run, target, width, slice) {
+                NdarrayErr::Ok => {}
+                NdarrayErr::Overflow => overflowed = true,
+                err => return err,
             }
             written += run;
 
@@ -1623,7 +1632,11 @@ pub unsafe extern "C" fn asdf_ndarray_read_tile_ndim(
             let mut axis = ndim as isize - 2;
             loop {
                 if axis < 0 {
-                    return deliver(&buffer, dst);
+                    let delivered = deliver(&buffer, dst);
+                    if delivered != NdarrayErr::Ok {
+                        return delivered;
+                    }
+                    return if overflowed { NdarrayErr::Overflow } else { NdarrayErr::Ok };
                 }
                 let a = axis as usize;
                 cursor[a] += 1;
@@ -1811,6 +1824,123 @@ mod tests {
         let bytes: Vec<u8> = (0i32..12).flat_map(i32::to_le_bytes).collect();
         set_data(array, bytes);
         array
+    }
+
+    /// A value outside the destination's range saturates and reports
+    /// overflow, rather than wrapping or refusing the whole read.
+    #[test]
+    fn out_of_range_values_saturate_and_report_overflow() {
+        let mut out = [0u8; 8];
+
+        // A negative integer into an unsigned type clamps at zero.
+        assert_eq!(
+            write_converted(&Element::Int(-5), ScalarType::Uint8, &mut out[..1]),
+            NdarrayErr::Overflow
+        );
+        assert_eq!(out[0], 0);
+
+        // Too large for the destination clamps at its maximum.
+        assert_eq!(
+            write_converted(&Element::Int(70_000), ScalarType::Uint16, &mut out[..2]),
+            NdarrayErr::Overflow
+        );
+        assert_eq!(u16::from_ne_bytes([out[0], out[1]]), u16::MAX);
+
+        // And at its minimum going the other way.
+        assert_eq!(
+            write_converted(&Element::Int(-70_000), ScalarType::Int16, &mut out[..2]),
+            NdarrayErr::Overflow
+        );
+        assert_eq!(i16::from_ne_bytes([out[0], out[1]]), i16::MIN);
+
+        // A value that fits is not an overflow.
+        assert_eq!(
+            write_converted(&Element::Int(42), ScalarType::Uint8, &mut out[..1]),
+            NdarrayErr::Ok
+        );
+        assert_eq!(out[0], 42);
+    }
+
+    /// Losing precision is not overflow; leaving the representable range is.
+    #[test]
+    fn only_leaving_the_range_counts_as_overflow() {
+        let mut out = [0u8; 8];
+
+        // `i32::MAX` rounds when it becomes an `f32`, which is ordinary.
+        assert_eq!(
+            write_converted(&Element::Int(i64::from(i32::MAX)), ScalarType::Float32, &mut out[..4]),
+            NdarrayErr::Ok
+        );
+
+        // `f64::MAX` has no `f32`, so it becomes an infinity, which is not.
+        assert_eq!(
+            write_converted(&Element::Float(f64::MAX), ScalarType::Float32, &mut out[..4]),
+            NdarrayErr::Overflow
+        );
+        assert!(f32::from_ne_bytes([out[0], out[1], out[2], out[3]]).is_infinite());
+
+        // An infinity that was already infinite stays one, and is not an
+        // overflow: nothing was lost.
+        assert_eq!(
+            write_converted(&Element::Float(f64::INFINITY), ScalarType::Float32, &mut out[..4]),
+            NdarrayErr::Ok
+        );
+    }
+
+    /// A float into an integer truncates toward zero, and the non-finites
+    /// saturate.
+    #[test]
+    fn floats_convert_to_integers_the_way_a_c_cast_does() {
+        let mut out = [0u8; 8];
+
+        assert_eq!(
+            write_converted(&Element::Float(3.9), ScalarType::Int32, &mut out[..4]),
+            NdarrayErr::Ok
+        );
+        assert_eq!(i32::from_ne_bytes([out[0], out[1], out[2], out[3]]), 3);
+
+        assert_eq!(
+            write_converted(&Element::Float(-3.9), ScalarType::Int32, &mut out[..4]),
+            NdarrayErr::Ok
+        );
+        assert_eq!(i32::from_ne_bytes([out[0], out[1], out[2], out[3]]), -3);
+
+        assert_eq!(
+            write_converted(&Element::Float(f64::INFINITY), ScalarType::Int32, &mut out[..4]),
+            NdarrayErr::Overflow
+        );
+        assert_eq!(i32::from_ne_bytes([out[0], out[1], out[2], out[3]]), i32::MAX);
+
+        assert_eq!(
+            write_converted(&Element::Float(f64::NEG_INFINITY), ScalarType::Int32, &mut out[..4]),
+            NdarrayErr::Overflow
+        );
+        assert_eq!(i32::from_ne_bytes([out[0], out[1], out[2], out[3]]), i32::MIN);
+
+        // A NaN has no integer, so any answer will do -- but it must not be
+        // reported as an overflow, which would be a claim about magnitude.
+        assert_eq!(
+            write_converted(&Element::Float(f64::NAN), ScalarType::Int32, &mut out[..4]),
+            NdarrayErr::Ok
+        );
+    }
+
+    /// The whole array still comes back when one element overflows.
+    #[test]
+    fn an_overflow_does_not_abandon_the_read() {
+        let array = int32_array(&[1, -1, 300]);
+        let mut dst: *mut c_void = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { asdf_ndarray_read_all(array, ScalarType::Uint8 as ScalarTypeAbi, &mut dst) },
+            NdarrayErr::Overflow
+        );
+        assert!(!dst.is_null(), "the converted buffer is still delivered");
+
+        let got = unsafe { std::slice::from_raw_parts(dst.cast::<u8>(), 3) };
+        assert_eq!(got, [1, 0, 255], "each element saturates on its own");
+
+        unsafe { libc::free(dst) };
+        unsafe { asdf_ndarray_destroy(array) };
     }
 
     #[test]

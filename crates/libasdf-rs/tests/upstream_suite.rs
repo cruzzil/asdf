@@ -60,7 +60,7 @@ const SUITES: &[Suite] = &[
     Suite { name: "test-error", expect_pass: 3, total: 3, needs_compat_headers: false },
     Suite { name: "test-time", expect_pass: 17, total: 17, needs_compat_headers: false },
     Suite { name: "test-core-extensions", expect_pass: 16, total: 16, needs_compat_headers: false },
-    Suite { name: "test-ndarray", expect_pass: 100, total: 257, needs_compat_headers: true },
+    Suite { name: "test-ndarray", expect_pass: 248, total: 257, needs_compat_headers: true },
     // The one test that cannot pass: `test_asdf_value_of_foo` compares an
     // emitted file byte for byte against a fixture libasdf wrote, whose
     // `asdf_library` names libasdf. Byte parity on YAML is a nice-to-have
@@ -202,6 +202,10 @@ fn upstream_c_test_suite_runs_against_this_library() {
         cflags.push("-I".into());
         cflags.push(dir.display().to_string());
     }
+    // `compat/numeric.h` reads its `config.h` only under `HAVE_CONFIG_H`,
+    // which upstream's build defines; without it `HAVE_FLOAT16` never
+    // arrives and `test-ndarray` compiles its no-float16 branch instead.
+    cflags.push("-DHAVE_CONFIG_H=1".to_string());
     cflags
         .push(format!("-DREFERENCE_FILES_DIR=\"{}\"", standard.join("reference_files").display()));
     cflags.push(format!("-DFIXTURES_DIR=\"{}\"", tests.join("fixtures").display()));
