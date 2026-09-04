@@ -123,6 +123,13 @@ pub enum Resolved {
     Int(i64, ValueType),
     /// A float. libasdf always reports these as `Double`.
     Double(f64),
+    /// An integer literal too large for any of the integer types.
+    ///
+    /// Distinct from a string: the text *is* a number, so reading it as one
+    /// is an overflow rather than a type mismatch, but there is no integer
+    /// type that holds it, so its reported type is `Unknown`. libasdf gets
+    /// here through `strtoull` setting `ERANGE`.
+    IntOverflow,
     /// Anything else.
     String,
 }
@@ -135,6 +142,7 @@ impl Resolved {
             Resolved::Bool(_) => ValueType::Bool,
             Resolved::Uint(_, t) | Resolved::Int(_, t) => t,
             Resolved::Double(_) => ValueType::Double,
+            Resolved::IntOverflow => ValueType::Unknown,
             Resolved::String => ValueType::String,
         }
     }
@@ -315,12 +323,14 @@ pub fn resolve_tagged(text: &str, tag_suffix: &str, schema: Schema) -> Option<Re
 fn resolve_int_only(text: &str) -> Option<Resolved> {
     match strtoull_base0_full(text) {
         Some(Ok(v)) => return Some(Resolved::Uint(v, narrow_uint(v))),
-        Some(Err(Overflow)) => return Some(Resolved::Uint(u64::MAX, ValueType::Uint64)),
+        // The text is an integer literal that no integer type holds. It is
+        // not a string, and it is not a `uint64` either.
+        Some(Err(Overflow)) => return Some(Resolved::IntOverflow),
         None => {}
     }
     match strtoll_base0_full(text) {
         Some(Ok(v)) => Some(Resolved::Int(v, narrow_int(v))),
-        Some(Err(Overflow)) => Some(Resolved::Int(i64::MIN, ValueType::Int64)),
+        Some(Err(Overflow)) => Some(Resolved::IntOverflow),
         None => None,
     }
 }
@@ -566,11 +576,28 @@ mod tests {
         assert_eq!(y11("190:20:30"), Resolved::Uint(685230, ValueType::Uint32));
     }
 
+    /// An integer literal too large for any integer type is neither an
+    /// integer nor a string.
+    ///
+    /// libasdf reaches this through `strtoull` setting `ERANGE`: the value's
+    /// reported type stays `<unknown>`, every `asdf_value_is_*` is false,
+    /// and every `asdf_value_as_*` reports an overflow rather than a type
+    /// mismatch -- because the text *is* a number, just not one that fits.
     #[test]
-    fn overflowing_ints_stay_integers() {
-        // libasdf reports overflow but still classes the value as an int.
-        let huge = "99999999999999999999999999";
-        assert!(matches!(lib(huge), Resolved::Uint(_, ValueType::Uint64)));
+    fn an_integer_too_large_for_any_type_is_neither_int_nor_string() {
+        for huge in [
+            "99999999999999999999999999",
+            // Exactly one past `u64::MAX`.
+            "18446744073709551616",
+            "-99999999999999999999999999",
+        ] {
+            assert_eq!(lib(huge), Resolved::IntOverflow, "{huge}");
+            assert_eq!(lib(huge).value_type(), ValueType::Unknown, "{huge}");
+        }
+
+        // The largest values that *do* fit are unaffected.
+        assert_eq!(lib("18446744073709551615"), Resolved::Uint(u64::MAX, ValueType::Uint64));
+        assert_eq!(lib("-9223372036854775808"), Resolved::Int(i64::MIN, ValueType::Int64));
     }
 
     #[test]

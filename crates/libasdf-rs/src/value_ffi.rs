@@ -129,8 +129,28 @@ pub unsafe extern "C" fn asdf_value_is_type(value: *mut AsdfValue, value_type: c
         let Some(wanted) = AsdfValueType::from_i32(value_type) else {
             return false;
         };
-        let actual = unsafe { crate::file_ffi::asdf_value_get_type(value) };
-        actual == wanted
+        match wanted {
+            // `Unknown` names no type, so nothing is of it.
+            AsdfValueType::Unknown => false,
+            // `Scalar` is the category, not a resolution: a string, a
+            // boolean and an integer are all scalars.
+            AsdfValueType::Scalar => unsafe { asdf_value_is_scalar(value) },
+            AsdfValueType::Mapping => unsafe { asdf_value_is_mapping(value) },
+            AsdfValueType::Sequence => unsafe { asdf_value_is_sequence(value) },
+            AsdfValueType::Bool => unsafe { asdf_value_is_bool(value) },
+            AsdfValueType::Int8 => unsafe { asdf_value_is_int8(value) },
+            AsdfValueType::Int16 => unsafe { asdf_value_is_int16(value) },
+            AsdfValueType::Int32 => unsafe { asdf_value_is_int32(value) },
+            AsdfValueType::Int64 => unsafe { asdf_value_is_int64(value) },
+            AsdfValueType::Uint8 => unsafe { asdf_value_is_uint8(value) },
+            AsdfValueType::Uint16 => unsafe { asdf_value_is_uint16(value) },
+            AsdfValueType::Uint32 => unsafe { asdf_value_is_uint32(value) },
+            AsdfValueType::Uint64 => unsafe { asdf_value_is_uint64(value) },
+            other => {
+                let actual = unsafe { crate::file_ffi::asdf_value_get_type(value) };
+                actual == other
+            }
+        }
     })
 }
 
@@ -554,22 +574,29 @@ pub unsafe extern "C" fn asdf_sequence_iter_destroy(iter: *mut asdf_sequence_ite
 /// Generate `asdf_value_is_<type>` and `asdf_value_as_<type>` for an integer.
 macro_rules! value_int_accessors {
     ($is:ident, $as:ident, $ty:ty, $variant:ident) => {
-        /// Whether the value has this type.
+        /// Whether the value is an integer that this type can hold.
+        ///
+        /// Not "whose inferred type is exactly this": an `int8` of `-127`
+        /// *is* an `int16`, and a caller asking whether it can read one is
+        /// asking whether the value fits, not how it was spelled.
         ///
         /// # Safety
         /// `value` must be null or a valid value handle.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $is(value: *mut AsdfValue) -> bool {
-            guard(stringify!($is), false, || {
-                // Bound rather than compared inline: an `unsafe { .. }` block
-                // in expression position followed by `==` parses as a
-                // statement.
-                let actual = unsafe { crate::file_ffi::asdf_value_get_type(value) };
-                actual == AsdfValueType::$variant
+            guard(stringify!($is), false, || match resolved_of(value) {
+                Some(Resolved::Uint(v, _)) => <$ty>::try_from(v).is_ok(),
+                Some(Resolved::Int(v, _)) => <$ty>::try_from(v).is_ok(),
+                _ => false,
             })
         }
 
         /// Read the value as this type.
+        ///
+        /// A value too large for the type is still written, truncated to the
+        /// type's width as a C cast would, *and* reported as an overflow --
+        /// the caller decides whether the truncation is acceptable. Only a
+        /// value that is not an integer at all leaves `out` untouched.
         ///
         /// # Safety
         /// `value` must be null or a valid value handle; `out` writable or null.
@@ -579,20 +606,18 @@ macro_rules! value_int_accessors {
                 let Some(resolved) = resolved_of(value) else {
                     return AsdfValueErr::TypeMismatch;
                 };
-                let narrowed: Option<$ty> = match resolved {
-                    Resolved::Uint(v, _) => <$ty>::try_from(v).ok(),
-                    Resolved::Int(v, _) => <$ty>::try_from(v).ok(),
+                let (truncated, fits): ($ty, bool) = match resolved {
+                    Resolved::Uint(v, _) => (v as $ty, <$ty>::try_from(v).is_ok()),
+                    Resolved::Int(v, _) => (v as $ty, <$ty>::try_from(v).is_ok()),
+                    // The text is an integer, just not one any type holds,
+                    // so this is an overflow rather than a type mismatch.
+                    Resolved::IntOverflow => return AsdfValueErr::Overflow,
                     _ => return AsdfValueErr::TypeMismatch,
                 };
-                match narrowed {
-                    Some(v) => {
-                        if !out.is_null() {
-                            unsafe { *out = v };
-                        }
-                        AsdfValueErr::Ok
-                    }
-                    None => AsdfValueErr::Overflow,
+                if !out.is_null() {
+                    unsafe { *out = truncated };
                 }
+                if fits { AsdfValueErr::Ok } else { AsdfValueErr::Overflow }
             })
         }
     };
@@ -653,8 +678,15 @@ pub unsafe extern "C" fn asdf_value_as_float(value: *mut AsdfValue, out: *mut f3
         if err != AsdfValueErr::Ok {
             return err;
         }
+        let narrow = wide as f32;
         if !out.is_null() {
-            unsafe { *out = wide as f32 };
+            unsafe { *out = narrow };
+        }
+        // A finite `double` with no `float` becomes an infinity. The value
+        // is still handed over -- the caller may not care -- but the loss is
+        // reported. A value that was already infinite loses nothing.
+        if wide.is_finite() && narrow.is_infinite() {
+            return AsdfValueErr::Overflow;
         }
         AsdfValueErr::Ok
     })
@@ -685,7 +717,22 @@ pub unsafe extern "C" fn asdf_value_is_float(value: *mut AsdfValue) -> bool {
 /// `value` must be null or a valid value handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_is_bool(value: *mut AsdfValue) -> bool {
-    guard("asdf_value_is_bool", false, || matches!(resolved_of(value), Some(Resolved::Bool(_))))
+    guard("asdf_value_is_bool", false, || bool_of(value).is_some())
+}
+
+/// A value's boolean reading, if it has one.
+///
+/// libasdf's boolean parser accepts `0` and `1`, but tries integers first,
+/// so a bare `1` *resolves* as `uint8` while still reading as `true`. Both
+/// halves are the contract: the reported type is the integer one, and asking
+/// for a boolean succeeds.
+fn bool_of(value: *mut AsdfValue) -> Option<bool> {
+    match resolved_of(value)? {
+        Resolved::Bool(v) => Some(v),
+        Resolved::Uint(0, _) => Some(false),
+        Resolved::Uint(1, _) => Some(true),
+        _ => None,
+    }
 }
 
 /// Read the value as a boolean.
@@ -698,11 +745,8 @@ pub unsafe extern "C" fn asdf_value_is_bool(value: *mut AsdfValue) -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_as_bool(value: *mut AsdfValue, out: *mut bool) -> AsdfValueErr {
     guard("asdf_value_as_bool", AsdfValueErr::Unknown, || {
-        let converted = match resolved_of(value) {
-            Some(Resolved::Bool(b)) => b,
-            Some(Resolved::Uint(0, _)) => false,
-            Some(Resolved::Uint(1, _)) => true,
-            _ => return AsdfValueErr::TypeMismatch,
+        let Some(converted) = bool_of(value) else {
+            return AsdfValueErr::TypeMismatch;
         };
         if !out.is_null() {
             unsafe { *out = converted };
@@ -770,6 +814,10 @@ pub unsafe extern "C" fn asdf_value_as_scalar0(
     out: *mut *const c_char,
 ) -> AsdfValueErr {
     guard("asdf_value_as_scalar0", AsdfValueErr::Unknown, || {
+        // A null handle is not a value of the wrong type; there is no value.
+        if value.is_null() {
+            return AsdfValueErr::Unknown;
+        }
         if !unsafe { asdf_value_is_scalar(value) } {
             return AsdfValueErr::TypeMismatch;
         }
@@ -808,8 +856,10 @@ struct ContainerIter {
     /// The public head, which C casts to. Must stay first.
     public: asdf_container_iter_t,
     file: *mut AsdfFile,
-    /// The children, with a key for a mapping and none for a sequence.
-    entries: Vec<(Option<String>, NodeId)>,
+    /// The children, each with its key (for a mapping) and the position it
+    /// holds in the container -- which is what `index` reports, counting
+    /// from the container's own start even when iterating in reverse.
+    entries: Vec<(Option<String>, NodeId, c_int)>,
     position: usize,
     current_key: Option<CString>,
     current_value: *mut AsdfValue,
@@ -838,31 +888,23 @@ fn container_iter_init(container: *mut AsdfValue, reverse: bool) -> *mut asdf_co
         return std::ptr::null_mut();
     };
 
-    let mut indices: Vec<c_int> =
-        (0..entries.len()).map(|i| c_int::try_from(i).unwrap_or(c_int::MAX)).collect();
+    let mut numbered: Vec<(Option<String>, NodeId, c_int)> = entries
+        .drain(..)
+        .enumerate()
+        .map(|(index, (key, node))| (key, node, c_int::try_from(index).unwrap_or(c_int::MAX)))
+        .collect();
     if reverse {
-        entries.reverse();
-        indices.reverse();
+        numbered.reverse();
     }
 
     let iter = Box::new(ContainerIter {
         public: asdf_container_iter_t {
             key: std::ptr::null(),
-            // A mapping reports -1 for the index, as libasdf does.
             index: -1,
             value: std::ptr::null_mut(),
         },
         file,
-        entries: entries
-            .into_iter()
-            .zip(indices)
-            .map(|((key, node), index)| {
-                // Stash the reported index alongside the key by encoding it
-                // in the entry order; sequences use their position.
-                let _ = index;
-                (key, node)
-            })
-            .collect(),
+        entries: numbered,
         position: 0,
         current_key: None,
         current_value: std::ptr::null_mut(),
@@ -928,19 +970,20 @@ pub unsafe extern "C" fn asdf_container_iter_next(
             return false;
         }
 
-        let (key, node) = iter.entries[iter.position].clone();
-        let position = iter.position;
+        let (key, node, index) = iter.entries[iter.position].clone();
         iter.position += 1;
 
+        // A mapping's entries are numbered too: the index is the position in
+        // the container, which a caller can use to address the entry either
+        // way round.
         if iter.is_mapping {
             iter.current_key = key.and_then(|k| CString::new(k).ok());
             iter.public.key = iter.current_key.as_ref().map_or(std::ptr::null(), |k| k.as_ptr());
-            iter.public.index = -1;
         } else {
             iter.current_key = None;
             iter.public.key = std::ptr::null();
-            iter.public.index = c_int::try_from(position).unwrap_or(c_int::MAX);
         }
+        iter.public.index = index;
 
         iter.current_value = make_value(iter.file, node);
         iter.public.value = iter.current_value.cast();
@@ -1887,6 +1930,10 @@ pub unsafe extern "C" fn asdf_value_as_scalar(
     out_len: *mut usize,
 ) -> AsdfValueErr {
     guard("asdf_value_as_scalar", AsdfValueErr::Unknown, || {
+        // See `asdf_value_as_scalar0`.
+        if value.is_null() {
+            return AsdfValueErr::Unknown;
+        }
         if !unsafe { asdf_value_is_scalar(value) } {
             return AsdfValueErr::TypeMismatch;
         }
@@ -1914,6 +1961,23 @@ pub unsafe extern "C" fn asdf_value_as_type(
         let Some(value_type) = AsdfValueType::from_i32(value_type) else {
             return AsdfValueErr::TypeMismatch;
         };
+        // `Unknown` names no type, so the request is for the value itself:
+        // hand back a copy the caller destroys.
+        if value_type == AsdfValueType::Unknown {
+            if value.is_null() {
+                return AsdfValueErr::Unknown;
+            }
+            let copy = asdf_value_copy(value);
+            if copy.is_null() {
+                return AsdfValueErr::Oom;
+            }
+            if out.is_null() {
+                crate::file_ffi::asdf_value_destroy(copy);
+            } else {
+                *out.cast::<*mut AsdfValue>() = copy;
+            }
+            return AsdfValueErr::Ok;
+        }
         match value_type {
             AsdfValueType::Int8 => asdf_value_as_int8(value, out.cast()),
             AsdfValueType::Int16 => asdf_value_as_int16(value, out.cast()),
@@ -2031,7 +2095,11 @@ struct FindIter {
 impl FindIter {
     /// Push a node's children in the order the traversal wants them.
     fn enqueue_children(&mut self, doc: &asdf_core::yaml::Document, node: NodeId, depth: isize) {
-        if self.max_depth >= 0 && depth >= self.max_depth {
+        // `max_depth` counts containers entered *below* the root, so a
+        // container at depth `d` may be opened while `d <= max_depth`: with
+        // a limit of 1 the root's children are visited and one container
+        // among them is entered, but nothing inside that one.
+        if self.max_depth >= 0 && depth > self.max_depth {
             return;
         }
         let resolved = doc.resolve(node);
@@ -2056,7 +2124,15 @@ impl FindIter {
     }
 
     /// Whether the traversal should descend into this container.
-    fn should_descend(&self, node: NodeId) -> bool {
+    ///
+    /// The search's own root is always descended: `descend_pred` selects
+    /// which containers *found along the way* are entered, and refusing the
+    /// root would make a search from a mapping with
+    /// `asdf_find_descend_sequence_only` find nothing at all.
+    fn should_descend(&self, node: NodeId, is_root: bool) -> bool {
+        if is_root {
+            return true;
+        }
         let Some(pred) = self.descend_pred else {
             return true;
         };
@@ -2090,7 +2166,7 @@ impl FindIter {
             self.seen.push(resolved);
 
             let is_container = doc.node(resolved).is_mapping() || doc.node(resolved).is_sequence();
-            if is_container && self.should_descend(node) {
+            if is_container && self.should_descend(node, depth == 0) {
                 self.enqueue_children(doc, node, depth);
             }
 
@@ -2332,13 +2408,23 @@ mod tests {
         unsafe { asdf_value_destroy(root) };
     }
 
+    /// `max_depth` counts containers entered *below* the root: with a limit
+    /// of 0 the root's own children are visited and nothing under them.
     #[test]
     fn find_respects_max_depth() {
         let h = open();
         let root = value_at(&h, "");
-        // `deep` lives below `nested`, so a depth-1 search cannot reach it.
-        let shallow = unsafe { asdf_value_find_ex(root, Some(is_deep), false, None, 1) };
+
+        // `deep` lives inside `nested`, so entering `nested` is the one
+        // descent a limit of 0 forbids.
+        let shallow = unsafe { asdf_value_find_ex(root, Some(is_deep), false, None, 0) };
         assert!(shallow.is_null());
+
+        // A limit of 1 allows exactly that descent.
+        let found = unsafe { asdf_value_find_ex(root, Some(is_deep), false, None, 1) };
+        assert!(!found.is_null());
+        unsafe { asdf_value_destroy(found) };
+
         let deep = unsafe { asdf_value_find_ex(root, Some(is_deep), false, None, -1) };
         assert!(!deep.is_null());
         unsafe { asdf_value_destroy(deep) };
@@ -2381,14 +2467,15 @@ mod tests {
     fn values_report_their_path_and_parent() {
         let h = open();
         let inner = value_at(&h, "nested/inner");
+        // Paths are absolute, as libasdf reports them.
         let path = unsafe { asdf_value_path(inner) };
         assert!(!path.is_null());
-        assert_eq!(unsafe { CStr::from_ptr(path) }, c"nested/inner");
+        assert_eq!(unsafe { CStr::from_ptr(path) }, c"/nested/inner");
 
         let parent = unsafe { asdf_value_parent(inner) };
         assert!(!parent.is_null());
         let parent_path = unsafe { asdf_value_path(parent) };
-        assert_eq!(unsafe { CStr::from_ptr(parent_path) }, c"nested");
+        assert_eq!(unsafe { CStr::from_ptr(parent_path) }, c"/nested");
 
         // The root has no parent, and its path is `/`.
         let root = value_at(&h, "");
@@ -2400,11 +2487,20 @@ mod tests {
         }
     }
 
+    /// A sequence index is written plainly, not bracketed: that is the form
+    /// libasdf reports, and it reads back as an index because the container
+    /// it addresses is a sequence.
     #[test]
-    fn sequence_elements_report_bracketed_paths() {
+    fn sequence_elements_report_plain_indices() {
         let h = open();
         let item = value_at(&h, "list/1");
-        assert_eq!(unsafe { CStr::from_ptr(asdf_value_path(item)) }, c"list/[1]");
+        assert_eq!(unsafe { CStr::from_ptr(asdf_value_path(item)) }, c"/list/1");
+
+        // And the reported path finds the same value again.
+        let again = value_at(&h, "/list/1");
+        assert_eq!(value_node(again), value_node(item));
+
+        unsafe { asdf_value_destroy(again) };
         unsafe { asdf_value_destroy(item) };
     }
 
@@ -3016,7 +3112,9 @@ mod build_tests {
         while unsafe { asdf_container_iter_next(&mut iter) } {
             let head = unsafe { &*iter };
             assert!(!head.key.is_null(), "a mapping must report keys");
-            assert_eq!(head.index, -1, "a mapping reports -1 for the index");
+            // A mapping's entries are numbered too: the index is the
+            // position in the container, not a sequence-only field.
+            assert_eq!(head.index, seen.len() as c_int);
             seen.push(unsafe { CStr::from_ptr(head.key) }.to_str().unwrap().to_string());
         }
         assert_eq!(seen, ["a", "b"]);

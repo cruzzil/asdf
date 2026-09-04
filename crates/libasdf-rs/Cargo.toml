@@ -11,6 +11,15 @@ links = "asdf"
 build = "build.rs"
 
 [lib]
+# The target name decides the artifact names: `libasdf.so` and `libasdf.a`,
+# which is what a consumer of libasdf links against.
+#
+# The idiomatic `asdf` crate's lib target has the same name, so cargo warns
+# that both uplift to `target/<profile>/libasdf.rlib`. That copy is a
+# convenience only -- a dependent links the hashed artifact under `deps/`,
+# which is per-crate -- so the collision affects nothing that is built.
+# Renaming either would change a published crate's name to silence a
+# warning about a file nothing reads.
 name = "asdf"
 crate-type = ["cdylib", "staticlib", "rlib"]
 

@@ -236,9 +236,11 @@ fn public_struct_layouts_match() {
 #include <asdf/core/time.h>
 
 #define SHOW(type, field) printf(#type "." #field "=%zu\n", offsetof(type, field))
+/* `sizeof`/`alignof` rather than `size`/`align`: `asdf_datatype_t` has a
+   field called `size`, and the two would share a key. */
 #define SHOW_TYPE(type) \
-    printf(#type ".size=%zu\n", sizeof(type)); \
-    printf(#type ".align=%zu\n", _Alignof(type))
+    printf(#type ".sizeof=%zu\n", sizeof(type)); \
+    printf(#type ".alignof=%zu\n", _Alignof(type))
 
 int main(void) {
     SHOW_TYPE(asdf_version_t);
@@ -289,8 +291,14 @@ int main(void) {
     SHOW(asdf_mapping_iter_t, key);
     SHOW(asdf_mapping_iter_t, value);
     SHOW_TYPE(asdf_sequence_iter_t);
-    SHOW(asdf_sequence_iter_t, index);
     SHOW(asdf_sequence_iter_t, value);
+    SHOW(asdf_sequence_iter_t, index);
+    SHOW_TYPE(asdf_container_iter_t);
+    SHOW(asdf_container_iter_t, key);
+    SHOW(asdf_container_iter_t, index);
+    SHOW(asdf_container_iter_t, value);
+    SHOW_TYPE(asdf_find_iter_t);
+    SHOW(asdf_find_iter_t, value);
     return 0;
 }
 "#;
@@ -303,17 +311,64 @@ int main(void) {
         }
     }
 
+    // Every value the C program reported is checked against the Rust mirror.
+    // Collecting an offset and not asserting it is how a transposed
+    // `asdf_sequence_iter_t` -- `value` and `index` the wrong way round --
+    // once reached a caller: the evidence was gathered and never read.
+    let mut checked = 0usize;
+    macro_rules! check {
+        ($ty:ty) => {{
+            use std::mem::{align_of, size_of};
+            assert_eq!(got[concat!(stringify!($ty), ".sizeof")], size_of::<$ty>(), "{} size", stringify!($ty));
+            assert_eq!(
+                got[concat!(stringify!($ty), ".alignof")],
+                align_of::<$ty>(),
+                "{} alignment",
+                stringify!($ty)
+            );
+            checked += 2;
+        }};
+        ($ty:ty, $($field:ident),+ $(,)?) => {{
+            check!($ty);
+            $(
+                {
+                    // `type_` in Rust is `type` in C: the trailing
+                    // underscore is there only because `type` is reserved.
+                    let field = stringify!($field);
+                    let key =
+                        format!("{}.{}", stringify!($ty), field.strip_suffix('_').unwrap_or(field));
+                    assert_eq!(
+                        got[&key],
+                        std::mem::offset_of!($ty, $field),
+                        "{key}"
+                    );
+                    checked += 1;
+                }
+            )+
+        }};
+    }
+
     // The lib is named `asdf` so the cdylib links as `libasdf.so`.
     use asdf::asdf_version_t;
-    use std::mem::{align_of, offset_of, size_of};
+    use asdf::ndarray_ffi::{asdf_datatype_t, asdf_ndarray_t};
+    use asdf::time_ffi::{asdf_time_info_t, asdf_time_location_t, asdf_time_t};
+    use asdf::types::asdf_sequence_iter_t;
+    use asdf::types::{asdf_container_iter_t, asdf_find_iter_t, asdf_mapping_iter_t};
 
-    assert_eq!(got["asdf_version_t.size"], size_of::<asdf_version_t>());
-    assert_eq!(got["asdf_version_t.align"], align_of::<asdf_version_t>());
-    assert_eq!(got["asdf_version_t.version"], offset_of!(asdf_version_t, version));
-    assert_eq!(got["asdf_version_t.major"], offset_of!(asdf_version_t, major));
-    assert_eq!(got["asdf_version_t.minor"], offset_of!(asdf_version_t, minor));
-    assert_eq!(got["asdf_version_t.patch"], offset_of!(asdf_version_t, patch));
-    assert_eq!(got["asdf_version_t.extra"], offset_of!(asdf_version_t, extra));
+    check!(asdf_version_t, version, major, minor, patch, extra);
+    check!(asdf_ndarray_t, source, ndim, shape, datatype, byteorder, offset, strides);
+    check!(asdf_datatype_t, type_, size, name, byteorder, ndim, shape, nfields, fields);
+    check!(asdf_time_t, value, info, format, scale, location);
+    check!(asdf_time_info_t, ts, tm);
+    check!(asdf_time_location_t, longitude, latitude, height);
+    check!(asdf_mapping_iter_t, key, value);
+    check!(asdf_sequence_iter_t, value, index);
+    check!(asdf_container_iter_t, key, index, value);
+    check!(asdf_find_iter_t, value);
+
+    // Nothing the C side reported may go unchecked.
+    assert_eq!(checked, got.len(), "C reported {} values, {checked} were asserted", got.len());
+    eprintln!("{checked} struct sizes, alignments and offsets agree with C");
 }
 
 /// A real C program calling into the library, end to end.

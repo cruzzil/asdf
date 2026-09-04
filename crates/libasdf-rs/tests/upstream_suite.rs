@@ -65,6 +65,7 @@ const SUITES: &[Suite] = &[
     // emitted file byte for byte against a fixture libasdf wrote, whose
     // `asdf_library` names libasdf. Byte parity on YAML is a nice-to-have
     // and never a gate; the binary layer is where bytes matter.
+    Suite { name: "test-value", expect_pass: 66, total: 68, needs_compat_headers: false },
     Suite { name: "test-extension", expect_pass: 12, total: 13, needs_compat_headers: false },
     Suite {
         name: "test-reference-files",
@@ -85,7 +86,6 @@ const INTERNAL_ONLY: &[(&str, &str)] = &[
     ("test-parse-util", "includes parse_util.h and yaml.h"),
     ("test-parser", "includes event.h and parser.h"),
     ("test-stream", "includes stream.h and stream_intern.h"),
-    ("test-value", "includes libfyaml.h directly"),
     ("test-value-util", "includes value_util.h"),
     ("test-yaml", "includes yaml.h"),
 ];
@@ -189,6 +189,16 @@ fn upstream_c_test_suite_runs_against_this_library() {
     // `HAVE_STATGRAB` from it -- left undefined, which selects the portable
     // path -- and `compat/numeric.h` reads `HAVE_FLOAT16`, which must match
     // what our own build probed for.
+    // `test-value.c` carries a stray `#include <libfyaml.h>` and never uses
+    // anything from it, so an empty header of that name is enough to let it
+    // compile. Nothing is being stood in for: there is no libfyaml API here
+    // to fake.
+    std::fs::write(
+        build.join("libfyaml.h"),
+        "/* Empty: test-value.c includes this and uses nothing from it. */\n",
+    )
+    .expect("write libfyaml stub");
+
     let float16 = if cfg!(asdf_have_float16) { "#define HAVE_FLOAT16 1\n" } else { "" };
     std::fs::write(
         build.join("config.h"),

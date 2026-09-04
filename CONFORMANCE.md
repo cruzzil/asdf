@@ -86,22 +86,25 @@ checkout with its munit submodule initialised:
 $ cd ~/code/libasdf && git submodule update --init tests/munit
 ```
 
-Nine of upstream's twenty-one suites build against the public ABI. The other
-twelve include libasdf's private headers -- `event.h`, `parser.h`,
-`stream.h`, `libfyaml.h` -- to reach internals that are implementation detail
+Ten of upstream's twenty-one suites build against the public ABI. The other
+eleven include libasdf's private headers -- `event.h`, `parser.h`,
+`stream.h`, `file.h` -- to reach internals that are implementation detail
 rather than interface, so they cannot run against a different implementation
 by construction. Each is listed in the test with the header that rules it out.
 
-`test-ndarray` is the one exception: it reaches for `compat/numeric.h`, which
-is a type alias for `_Float16` and nothing more -- no struct layouts, no
-internal API -- so libasdf's `src/` is added to its include path *after* the
-vendored headers, and `asdf/*.h` still resolves to ours.
+Two needed a nudge and got one, neither of which stands anything in:
+
+- `test-ndarray` reaches for `compat/numeric.h`, a type alias for `_Float16`
+  and nothing more, so libasdf's `src/` is added to its include path *after*
+  the vendored headers and `asdf/*.h` still resolves to ours.
+- `test-value` carries a stray `#include <libfyaml.h>` and uses nothing from
+  it, so an empty header of that name lets it compile.
 
 Every suite's pass count is pinned. A change that loses ground fails, and so
 does one that gains ground without updating the number, so the figure below
 cannot drift.
 
-**426 of 427.**
+**492 of 495.**
 
 | Suite | | |
 |---|---|---|
@@ -112,14 +115,15 @@ cannot drift.
 | `test-time` | 17/17 | |
 | `test-core-extensions` | 16/16 | |
 | `test-ndarray` | 257/257 | the numeric conversion matrix, both byte orders deep |
+| `test-value` | 66/68 | the value API in full |
 | `test-extension` | 12/13 | |
 | `test-reference-files` | 113/113 | every tagged value in every reference file |
 
-The one test that does not pass is `test_asdf_value_of_foo`, which compares
-an emitted file byte for byte against a fixture libasdf wrote — whose
-`asdf_library` names libasdf. It cannot pass for any other implementation.
-Byte parity on emitted YAML is a nice-to-have and never a gate; the binary
-block layer is where bytes matter, and there they are exact.
+The three that do not pass are all `compare_files` checks of emitted YAML
+against fixtures libasdf wrote — whose `asdf_library` names libasdf. They
+cannot pass for any other implementation. Byte parity on emitted YAML is a
+nice-to-have and never a gate; the binary block layer is where bytes matter,
+and there they are exact.
 
 ## Not yet wired up
 - **Differential testing against the real libasdf.** Blocked on building the C

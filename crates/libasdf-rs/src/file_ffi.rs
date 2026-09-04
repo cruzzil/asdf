@@ -661,20 +661,19 @@ macro_rules! int_getter {
                 let Some((resolved, _, _)) = resolve_at(file, path) else {
                     return AsdfValueErr::NotFound;
                 };
-                let narrowed: Option<$ty> = match resolved {
-                    Resolved::Uint(v, _) => <$ty>::try_from(v).ok(),
-                    Resolved::Int(v, _) => <$ty>::try_from(v).ok(),
+                // Truncated as a C cast would, written even when it does
+                // not fit; see `asdf_value_as_<type>`, which this mirrors.
+                let (truncated, fits): ($ty, bool) = match resolved {
+                    Resolved::Uint(v, _) => (v as $ty, <$ty>::try_from(v).is_ok()),
+                    Resolved::Int(v, _) => (v as $ty, <$ty>::try_from(v).is_ok()),
+                    // See `asdf_value_as_<type>`.
+                    Resolved::IntOverflow => return AsdfValueErr::Overflow,
                     _ => return AsdfValueErr::TypeMismatch,
                 };
-                match narrowed {
-                    Some(v) => {
-                        if !out.is_null() {
-                            unsafe { *out = v };
-                        }
-                        AsdfValueErr::Ok
-                    }
-                    None => AsdfValueErr::Overflow,
+                if !out.is_null() {
+                    unsafe { *out = truncated };
                 }
+                if fits { AsdfValueErr::Ok } else { AsdfValueErr::Overflow }
             })
         }
     };

@@ -248,6 +248,13 @@ impl Document {
 
     /// The path from the root to `id`, in the syntax [`Path::parse`] accepts.
     ///
+    /// Absolute, so `/history/extensions/0` rather than
+    /// `history/extensions/0`, and a sequence index is written plainly
+    /// rather than bracketed -- that is the form libasdf reports and the one
+    /// its own tests expect. A bare numeric component is unambiguous on the
+    /// way back in, since it is read as an index only when the container it
+    /// addresses is a sequence.
+    ///
     /// The root itself is `/`. Returns `None` when `id` is not reachable from
     /// the root, which is the case for a node built but not yet attached.
     pub fn path_of(&self, id: NodeId) -> Option<String> {
@@ -256,10 +263,7 @@ impl Document {
         if !self.walk_to(root, id, &mut components, &mut vec![false; self.node_count()]) {
             return None;
         }
-        if components.is_empty() {
-            return Some("/".to_string());
-        }
-        Some(components.join("/"))
+        Some(format!("/{}", components.join("/")))
     }
 
     /// Depth-first search for `target`, recording the route taken.
@@ -293,7 +297,7 @@ impl Document {
             }
             NodeData::Sequence { items, .. } => {
                 for (position, item) in items.iter().enumerate() {
-                    route.push(format!("[{position}]"));
+                    route.push(position.to_string());
                     if self.walk_to(*item, target, route, seen) {
                         return true;
                     }
@@ -325,16 +329,17 @@ mod tests {
         assert_eq!(d.path_of(root).as_deref(), Some("/"));
 
         let inner = d.lookup_str("a/b").unwrap();
-        assert_eq!(d.path_of(inner).as_deref(), Some("a/b"));
+        assert_eq!(d.path_of(inner).as_deref(), Some("/a/b"));
 
-        // A sequence element is reported with an explicit index, which is
-        // unambiguous when it is fed back into `Path::parse`.
+        // A sequence element's index is written plainly; it reads back as an
+        // index because the container it addresses is a sequence.
         let item = d.lookup_str("seq/1").unwrap();
-        assert_eq!(d.path_of(item).as_deref(), Some("seq/[1]"));
-        assert_eq!(d.lookup_str("seq/[1]"), Some(item));
+        assert_eq!(d.path_of(item).as_deref(), Some("/seq/1"));
+        assert_eq!(d.lookup_str(&d.path_of(item).unwrap()), Some(item));
 
         let nested = d.lookup_str("nested/1/k").unwrap();
-        assert_eq!(d.path_of(nested).as_deref(), Some("nested/[1]/k"));
+        assert_eq!(d.path_of(nested).as_deref(), Some("/nested/1/k"));
+        assert_eq!(d.lookup_str("/nested/1/k"), Some(nested));
     }
 
     #[test]
