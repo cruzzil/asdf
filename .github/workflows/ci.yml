@@ -29,11 +29,14 @@ jobs:
           repository: asdf-format/asdf-standard
           path: corpora/asdf-standard
 
+      # `submodules: true` brings in tests/munit, which upstream's own C
+      # test suite needs; without it the `upstream_suite` gate skips.
       - name: Check out libasdf
         uses: actions/checkout@v4
         with:
           repository: asdf-format/libasdf
           path: corpora/libasdf
+          submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -60,8 +63,9 @@ jobs:
           LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf
         run: cargo test --workspace
 
-      # The ABI gates need the shared library present, which `cargo test`
-      # alone does not guarantee for a cdylib.
+      # The C gates load the shared library, so they build it first. The
+      # tests do that themselves, but running them separately reports their
+      # counts in the log rather than burying them in the workspace run.
       - name: ABI conformance
         env:
           ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
@@ -69,6 +73,15 @@ jobs:
         run: |
           cargo build -p libasdf-rs
           cargo test -p libasdf-rs --test abi -- --nocapture
+
+      # Upstream's own C test suite, compiled against the vendored headers
+      # and linked against our shared library. Its pass count is pinned in
+      # the test, so a regression fails here.
+      - name: Upstream C test suite
+        env:
+          ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
+          LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf
+        run: cargo test -p libasdf-rs --test upstream_suite -- --nocapture
 
   lint:
     runs-on: ubuntu-latest
