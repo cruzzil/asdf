@@ -795,6 +795,142 @@ int main(void) {
     assert_eq!(out.trim(), "ok");
 }
 
+/// libasdf's README write example, verbatim, including its ndarrays.
+///
+/// This is the program upstream puts first in its documentation: open a NULL
+/// file, set metadata, build two arrays with
+/// `asdf_ndarray_data_alloc`, attach them with `asdf_set_ndarray`, and write.
+/// It then reads the result back the way the README's second example does.
+/// Between them these exercise most of what a real consumer touches.
+#[test]
+fn the_upstream_readme_ndarray_example_works() {
+    if !have_c_compiler() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    if shared_library().is_none() {
+        eprintln!("skipping: shared library not built");
+        return;
+    }
+
+    let out_dir = target_dir().join("abi-tests");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let output = out_dir.join("readme-out.asdf");
+    let _ = std::fs::remove_file(&output);
+
+    let src = format!(
+        r##"
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <asdf.h>
+
+#define CHECK(cond, msg) \
+    do {{ if (!(cond)) {{ fprintf(stderr, "FAIL: %s\n", msg); return 1; }} }} while (0)
+
+int main(void) {{
+    const char *filename = "{path}";
+
+    /* ---- the README's write example ---- */
+    asdf_file_t *file = asdf_open(NULL);
+    CHECK(file != NULL, "asdf_open(NULL)");
+
+    asdf_set_string0(file, "name", "Dennis Richie");
+    asdf_set_int64(file, "foo", 42);
+
+    uint64_t N = 100;
+
+    asdf_ndarray_t sequence = {{
+        .ndim = 1,
+        .shape = (uint64_t[]){{N}},
+        .datatype = {{.type = ASDF_DATATYPE_UINT64}}
+    }};
+    uint64_t *sequence_data = asdf_ndarray_data_alloc(&sequence);
+    CHECK(sequence_data != NULL, "sequence data_alloc");
+
+    asdf_ndarray_t squares = {{
+        .ndim = 1,
+        .shape = (uint64_t[]){{N}},
+        .datatype = {{.type = ASDF_DATATYPE_UINT64}}
+    }};
+    uint64_t *squares_data = asdf_ndarray_data_alloc(&squares);
+    CHECK(squares_data != NULL, "squares data_alloc");
+
+    for (uint64_t idx = 0; idx < N; idx++) {{
+        sequence_data[idx] = idx;
+        squares_data[idx] = idx * idx;
+    }}
+
+    CHECK(asdf_set_ndarray(file, "sequence", &sequence) == ASDF_VALUE_OK, "set sequence");
+    /* A nested path materialises its parent, as the README relies on. */
+    CHECK(asdf_set_ndarray(file, "powers/squares", &squares) == ASDF_VALUE_OK, "set squares");
+
+    CHECK(asdf_write_to(file, filename) == 0, "write_to");
+
+    asdf_ndarray_data_dealloc(&sequence);
+    asdf_ndarray_data_dealloc(&squares);
+    asdf_close(file);
+
+    /* ---- the README's read example ---- */
+    asdf_file_t *readback = asdf_open(filename, "r");
+    CHECK(readback != NULL, "reopen");
+
+    const char *name = NULL;
+    CHECK(asdf_get_string0(readback, "name", &name) == ASDF_VALUE_OK, "get name");
+    CHECK(strcmp(name, "Dennis Richie") == 0, "name");
+
+    int64_t foo = 0;
+    CHECK(asdf_get_int64(readback, "foo", &foo) == ASDF_VALUE_OK, "get foo");
+    CHECK(foo == 42, "foo");
+
+    asdf_ndarray_t *read_squares = NULL;
+    uint64_t *read_data = NULL;
+    CHECK(asdf_get_ndarray(readback, "powers/squares", &read_squares) == ASDF_VALUE_OK,
+          "get squares");
+    CHECK(asdf_ndarray_read_all(read_squares, ASDF_DATATYPE_UINT64, (void **)&read_data)
+              == ASDF_NDARRAY_OK, "read_all");
+
+    uint64_t nelem = asdf_ndarray_size(read_squares);
+    CHECK(nelem == N, "element count");
+    uint64_t sum = 0;
+    for (uint64_t idx = 0; idx < nelem; idx++) {{
+        sum += read_data[idx];
+    }}
+    /* The README states this figure. */
+    CHECK(sum == 328350, "sum of squares");
+
+    /* The other array must have landed in its own block. */
+    CHECK(asdf_block_count(readback) == 2, "two blocks");
+
+    asdf_ndarray_t *read_sequence = NULL;
+    CHECK(asdf_get_ndarray(readback, "sequence", &read_sequence) == ASDF_VALUE_OK,
+          "get sequence");
+    uint64_t index = 7;
+    asdf_ndarray_err_t err = ASDF_NDARRAY_OK;
+    CHECK(asdf_ndarray_read_uint64_at(read_sequence, &index, &err) == 7, "sequence[7]");
+    CHECK(err == ASDF_NDARRAY_OK, "read_at err");
+
+    free(read_data);
+    asdf_ndarray_destroy(read_sequence);
+    asdf_ndarray_destroy(read_squares);
+    asdf_close(readback);
+    printf("ok\n");
+    return 0;
+}}
+"##,
+        path = output.display()
+    );
+
+    let out = compile_and_run("readme_ndarray", &src, true).unwrap();
+    assert_eq!(out.trim(), "ok");
+
+    // And the file it produced must be a real ASDF file to anyone else.
+    let reader = asdf_core::Reader::open(&output).expect("the written file should scan");
+    assert_eq!(reader.block_count(), 2);
+    assert!(reader.tree().unwrap().is_some());
+}
+
 /// Upstream's `tests/test-symbol-leakage.sh`, ported.
 ///
 /// The shared library must export nothing outside libasdf's own namespace.

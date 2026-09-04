@@ -119,6 +119,11 @@ fn scalar_abi(t: ScalarType) -> ScalarTypeAbi {
     t as i32
 }
 
+/// The scalar type for an ABI discriminant, for other modules.
+pub(crate) fn scalar_from_abi_public(v: ScalarTypeAbi) -> ScalarType {
+    scalar_from_abi(v)
+}
+
 fn scalar_from_abi(v: ScalarTypeAbi) -> ScalarType {
     match v {
         1 => ScalarType::Int8,
@@ -231,6 +236,68 @@ fn state_of<'a>(array: *mut asdf_ndarray_t) -> Option<&'a mut NdarrayState> {
     }
     let reserved = unsafe { &*array }._reserved;
     (!reserved.is_null()).then(|| unsafe { &mut *reserved.cast::<NdarrayState>() })
+}
+
+/// The state behind an array, creating it from the public fields if absent.
+///
+/// A caller may build an `asdf_ndarray_t` as a stack literal with
+/// `_reserved` left zero -- libasdf's own README write example does exactly
+/// that, then calls `asdf_ndarray_data_alloc` on it. So anything needing
+/// state has to bring it into being rather than assume it is already there.
+///
+/// The caller then owns that allocation, and releases it with
+/// `asdf_ndarray_deinit` or `asdf_ndarray_destroy`.
+fn ensure_state<'a>(array: *mut asdf_ndarray_t) -> Option<&'a mut NdarrayState> {
+    if array.is_null() {
+        return None;
+    }
+    if state_of(array).is_some() {
+        return state_of(array);
+    }
+
+    let view = unsafe { &*array };
+    let shape: Vec<u64> = if view.shape.is_null() || view.ndim == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(view.shape, view.ndim as usize) }.to_vec()
+    };
+    let strides: Option<Vec<i64>> = (!view.strides.is_null() && view.ndim > 0)
+        .then(|| unsafe { std::slice::from_raw_parts(view.strides, view.ndim as usize) }.to_vec());
+
+    // Rebuild the engine's view from what the caller filled in.
+    let scalar = scalar_from_abi(view.datatype.type_);
+    let mut datatype = Datatype::scalar(scalar);
+    if view.datatype.size != 0 {
+        datatype.size = view.datatype.size;
+    }
+    let parsed = Ndarray {
+        source: Source::Block(view.source),
+        shape: shape.iter().map(|d| Some(*d)).collect(),
+        datatype,
+        byteorder: match view.byteorder {
+            62 => asdf_core::core::datatype::ByteOrder::Big,
+            60 => asdf_core::core::datatype::ByteOrder::Little,
+            _ => asdf_core::core::datatype::ByteOrder::native(),
+        },
+        offset: view.offset,
+        strides: strides.clone(),
+        mask: None,
+    };
+
+    let state = Box::new(NdarrayState {
+        shape,
+        strides,
+        fields: Vec::new(),
+        field_names: Vec::new(),
+        field_shapes: Vec::new(),
+        parsed,
+        data: None,
+        allocated: None,
+        compression: Compression::None,
+        storage: AsdfArrayStorage::Internal,
+    });
+    unsafe { (*array)._reserved = Box::into_raw(state).cast::<c_void>() };
+    state_of(array)
 }
 
 /// The number of elements.
@@ -347,7 +414,7 @@ pub extern "C" fn asdf_scalar_datatype_to_string(datatype: ScalarTypeAbi) -> *co
 pub unsafe extern "C" fn asdf_ndarray_data_alloc(ndarray: *mut asdf_ndarray_t) -> *mut c_void {
     guard("asdf_ndarray_data_alloc", std::ptr::null_mut(), || {
         let nbytes = unsafe { asdf_ndarray_nbytes(ndarray) };
-        let Some(state) = state_of(ndarray) else {
+        let Some(state) = ensure_state(ndarray) else {
             return std::ptr::null_mut();
         };
         let Ok(len) = usize::try_from(nbytes) else {
@@ -462,7 +529,7 @@ pub unsafe extern "C" fn asdf_ndarray_compression_set(
     compression: *const c_char,
 ) -> c_int {
     guard("asdf_ndarray_compression_set", -1, || {
-        let Some(state) = state_of(ndarray) else { return -1 };
+        let Some(state) = ensure_state(ndarray) else { return -1 };
         let name = if compression.is_null() {
             String::new()
         } else {
@@ -506,7 +573,7 @@ pub unsafe extern "C" fn asdf_ndarray_storage_set(
         if storage == AsdfArrayStorage::External {
             return;
         }
-        if let Some(state) = state_of(ndarray) {
+        if let Some(state) = ensure_state(ndarray) {
             state.storage = storage;
         }
     })
@@ -981,6 +1048,272 @@ pub unsafe extern "C" fn asdf_value_is_ndarray(value: *mut crate::file_ffi::Asdf
             return false;
         };
         doc.tag_of(node).is_some_and(|t| t.split_version().0 == "core/ndarray")
+    })
+}
+
+// ---- The rest of the generated extension family ----------------------
+
+/// Free an ndarray's fields without freeing the struct.
+///
+/// # Safety
+/// `ndarray` must be null or a valid `asdf_ndarray_t`; safe on a zeroed one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_ndarray_deinit(ndarray: *mut asdf_ndarray_t) {
+    guard("asdf_ndarray_deinit", (), || {
+        if ndarray.is_null() {
+            return;
+        }
+        let array = unsafe { &mut *ndarray };
+        if !array._reserved.is_null() {
+            drop(unsafe { Box::from_raw(array._reserved.cast::<NdarrayState>()) });
+            array._reserved = std::ptr::null_mut();
+        }
+        // The public pointers all borrowed from the state that just went.
+        array.shape = std::ptr::null();
+        array.strides = std::ptr::null();
+        array.datatype.fields = std::ptr::null();
+        array.datatype.nfields = 0;
+        array.ndim = 0;
+    })
+}
+
+/// Deep-copy an ndarray into caller-provided storage.
+///
+/// The copy owns its own data, so it may outlive the original and be written
+/// to a different file.
+///
+/// # Safety
+/// `src` and `dst` must be valid `asdf_ndarray_t` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_ndarray_copy_into(
+    file: *mut crate::file_ffi::AsdfFile,
+    src: *const asdf_ndarray_t,
+    dst: *mut asdf_ndarray_t,
+) -> bool {
+    guard("asdf_ndarray_copy_into", false, || {
+        let _ = file;
+        if src.is_null() || dst.is_null() {
+            return false;
+        }
+        let Some(state) = state_of(src.cast_mut()) else {
+            return false;
+        };
+
+        // Rebuild from the engine's own view, so every buffer is fresh.
+        let rebuilt = make_ndarray(state.parsed.clone(), state.shape.clone());
+        if rebuilt.is_null() {
+            return false;
+        }
+        if let Some(data) = state.allocated.as_ref().or(state.data.as_ref()) {
+            set_data(rebuilt, data.clone());
+        }
+        if let Some(fresh) = state_of(rebuilt) {
+            fresh.compression = state.compression;
+            fresh.storage = state.storage;
+        }
+
+        // Move the rebuilt value into the caller's storage.
+        let boxed = unsafe { Box::from_raw(rebuilt) };
+        unsafe { std::ptr::write(dst, *boxed) };
+        true
+    })
+}
+
+/// Deep-copy an ndarray into fresh storage.
+///
+/// # Safety
+/// `src` must be a valid `asdf_ndarray_t`. The result must be released with
+/// [`asdf_ndarray_destroy`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_ndarray_copy(
+    file: *mut crate::file_ffi::AsdfFile,
+    src: *const asdf_ndarray_t,
+) -> *mut asdf_ndarray_t {
+    guard("asdf_ndarray_copy", std::ptr::null_mut(), || {
+        if src.is_null() {
+            return std::ptr::null_mut();
+        }
+        let raw = Box::into_raw(Box::new(asdf_ndarray_t {
+            source: 0,
+            ndim: 0,
+            shape: std::ptr::null(),
+            datatype: asdf_datatype_t {
+                type_: 0,
+                size: 0,
+                name: std::ptr::null(),
+                byteorder: 0,
+                ndim: 0,
+                shape: std::ptr::null(),
+                nfields: 0,
+                fields: std::ptr::null(),
+            },
+            byteorder: 0,
+            offset: 0,
+            strides: std::ptr::null(),
+            _reserved: std::ptr::null_mut(),
+        }));
+        if unsafe { asdf_ndarray_copy_into(file, src, raw) } {
+            raw
+        } else {
+            drop(unsafe { Box::from_raw(raw) });
+            std::ptr::null_mut()
+        }
+    })
+}
+
+/// Deep-copy a null-terminated array of ndarrays.
+///
+/// # Safety
+/// `src` must be a null-terminated array of valid `asdf_ndarray_t` pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_ndarray_array_copy(
+    file: *mut crate::file_ffi::AsdfFile,
+    src: *mut *const asdf_ndarray_t,
+) -> *mut *mut asdf_ndarray_t {
+    guard("asdf_ndarray_array_copy", std::ptr::null_mut(), || {
+        if src.is_null() {
+            return std::ptr::null_mut();
+        }
+        let mut count = 0isize;
+        while !unsafe { *src.offset(count) }.is_null() {
+            count += 1;
+        }
+
+        let mut copies: Vec<*mut asdf_ndarray_t> = Vec::with_capacity(count as usize + 1);
+        for index in 0..count {
+            let copy = unsafe { asdf_ndarray_copy(file, *src.offset(index)) };
+            if copy.is_null() {
+                // Unwind rather than leak the copies already made.
+                for made in copies {
+                    unsafe { asdf_ndarray_destroy(made) };
+                }
+                return std::ptr::null_mut();
+            }
+            copies.push(copy);
+        }
+        copies.push(std::ptr::null_mut());
+        Box::into_raw(copies.into_boxed_slice()).cast::<*mut asdf_ndarray_t>()
+    })
+}
+
+/// Build a value for an ndarray, writing its data into a new block.
+///
+/// The array's `source` in the tree is the index of the block appended to
+/// `file`, so the value is only meaningful once written with that file.
+///
+/// # Safety
+/// `file` must be a file handle open for writing and `obj` a valid
+/// `asdf_ndarray_t`. The result must be released with `asdf_value_destroy`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_value_of_ndarray(
+    file: *mut crate::file_ffi::AsdfFile,
+    obj: *const asdf_ndarray_t,
+) -> *mut crate::file_ffi::AsdfValue {
+    use asdf_core::yaml::{CollectionStyle, NodeData, Tag};
+
+    guard("asdf_value_of_ndarray", std::ptr::null_mut(), || {
+        if file.is_null() || obj.is_null() {
+            return std::ptr::null_mut();
+        }
+        let array = unsafe { &*obj };
+
+        // The shape and datatype come from the public fields, so an array
+        // built as a C stack literal works -- which is what libasdf's own
+        // write example does.
+        let shape: Vec<u64> = if array.shape.is_null() || array.ndim == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(array.shape, array.ndim as usize) }.to_vec()
+        };
+        let scalar = scalar_from_abi(array.datatype.type_);
+        let item_size = if array.datatype.size != 0 { array.datatype.size } else { scalar.size() };
+        if item_size == 0 {
+            return std::ptr::null_mut();
+        }
+
+        // The data is whatever the caller allocated or we read.
+        let element_count: u64 = shape.iter().product::<u64>().max(1);
+        let expected = (element_count * item_size) as usize;
+        let payload: Vec<u8> = match ensure_state(obj.cast_mut()) {
+            Some(state) => state
+                .allocated
+                .as_ref()
+                .or(state.data.as_ref())
+                .cloned()
+                .unwrap_or_else(|| vec![0u8; expected]),
+            None => vec![0u8; expected],
+        };
+        let compression =
+            state_of(obj.cast_mut()).map(|s| s.compression).unwrap_or(Compression::None);
+
+        // Append the block, then reference it by index.
+        let Some(blocks) = crate::file_ffi::file_blocks_mut(file) else {
+            return std::ptr::null_mut();
+        };
+        blocks.push(asdf_core::PendingBlock::compressed(payload, compression));
+        let index = blocks.len() - 1;
+
+        let handle = unsafe { &mut *file };
+        let Some(doc) = handle.document_for_values() else {
+            return std::ptr::null_mut();
+        };
+
+        let source = doc.add_scalar(index.to_string());
+        let datatype = doc.add_scalar(scalar.name());
+        let order = match array.byteorder {
+            62 => "big",
+            60 => "little",
+            // An unspecified order means this machine's.
+            _ => ByteOrderNative,
+        };
+        let byteorder = doc.add_scalar(order);
+
+        let dims: Vec<_> = shape.iter().map(|d| doc.add_scalar(d.to_string())).collect();
+        let shape_node = doc.add_sequence(dims);
+        if let NodeData::Sequence { style, .. } = &mut doc.node_mut(shape_node).data {
+            *style = CollectionStyle::Flow;
+        }
+
+        let keys: Vec<_> = ["source", "datatype", "byteorder", "shape"]
+            .iter()
+            .map(|k| doc.add_scalar(*k))
+            .collect();
+        let node = doc.add_mapping(vec![
+            (keys[0], source),
+            (keys[1], datatype),
+            (keys[2], byteorder),
+            (keys[3], shape_node),
+        ]);
+        doc.node_mut(node).tag = Some(Tag::parse("tag:stsci.edu:asdf/core/ndarray-1.1.0"));
+
+        Box::into_raw(Box::new(crate::file_ffi::AsdfValue::new(file, node)))
+    })
+}
+
+/// This machine's byte order, as the schema spells it.
+#[allow(non_upper_case_globals)]
+const ByteOrderNative: &str = if cfg!(target_endian = "big") { "big" } else { "little" };
+
+/// Write an ndarray at `path`, appending its data as a new block.
+///
+/// # Safety
+/// See [`asdf_value_of_ndarray`]; `path` must be a valid string or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_set_ndarray(
+    file: *mut crate::file_ffi::AsdfFile,
+    path: *const c_char,
+    obj: *const asdf_ndarray_t,
+) -> crate::types::AsdfValueErr {
+    use crate::types::AsdfValueErr;
+
+    guard("asdf_set_ndarray", AsdfValueErr::Unknown, || {
+        let value = unsafe { asdf_value_of_ndarray(file, obj) };
+        if value.is_null() {
+            return AsdfValueErr::EmitFailure;
+        }
+        let result = unsafe { crate::file_ffi::set_value_at(file, path, value) };
+        unsafe { crate::file_ffi::asdf_value_destroy(value) };
+        result
     })
 }
 

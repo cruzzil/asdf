@@ -1311,3 +1311,595 @@ mod history_tests {
         unsafe { asdf_time_deinit(std::ptr::null_mut()) };
     }
 }
+
+// ---- core/datatype ---------------------------------------------------
+
+use crate::ndarray_ffi::asdf_datatype_t;
+
+/// The tag for `core/datatype`.
+pub const DATATYPE_TAG: &str = "tag:stsci.edu:asdf/core/datatype-1.0.0";
+
+impl asdf_datatype_t {
+    /// A zeroed instance.
+    pub(crate) fn zeroed() -> Self {
+        Self {
+            type_: 0,
+            size: 0,
+            name: std::ptr::null(),
+            byteorder: 0,
+            ndim: 0,
+            shape: std::ptr::null(),
+            nfields: 0,
+            fields: std::ptr::null(),
+        }
+    }
+}
+
+fn datatype_deserialize(doc: &Document, node: NodeId, out: *mut asdf_datatype_t) -> AsdfValueErr {
+    use asdf_core::core::datatype::Datatype;
+
+    let Ok(parsed) = Datatype::parse(doc, node) else {
+        return AsdfValueErr::ParseFailure;
+    };
+
+    // Field descriptors and their names are leaked into owned allocations
+    // that `deinit` reclaims, so the pointers stay valid for the object's
+    // life.
+    let mut fields: Vec<asdf_datatype_t> = Vec::with_capacity(parsed.fields.len());
+    for field in &parsed.fields {
+        let name = field.name.as_deref().map(to_c_string).unwrap_or(std::ptr::null());
+        let shape: Vec<u64> = field.datatype.shape.clone();
+        let (shape_ptr, ndim) = if shape.is_empty() {
+            (std::ptr::null(), 0)
+        } else {
+            let boxed = shape.into_boxed_slice();
+            let len = boxed.len() as u32;
+            (Box::into_raw(boxed).cast::<u64>().cast_const(), len)
+        };
+        fields.push(asdf_datatype_t {
+            type_: field.datatype.scalar as i32,
+            size: field.datatype.item_size(),
+            name,
+            byteorder: field.datatype.byteorder as i32,
+            ndim,
+            shape: shape_ptr,
+            nfields: 0,
+            fields: std::ptr::null(),
+        });
+    }
+
+    let (fields_ptr, nfields) = if fields.is_empty() {
+        (std::ptr::null(), 0)
+    } else {
+        let len = fields.len() as u32;
+        (Box::into_raw(fields.into_boxed_slice()).cast::<asdf_datatype_t>().cast_const(), len)
+    };
+
+    unsafe {
+        (*out).type_ = parsed.scalar as i32;
+        (*out).size = parsed.item_size();
+        (*out).name = std::ptr::null();
+        (*out).byteorder = parsed.byteorder as i32;
+        (*out).ndim = 0;
+        (*out).shape = std::ptr::null();
+        (*out).nfields = nfields;
+        (*out).fields = fields_ptr;
+    }
+    AsdfValueErr::Ok
+}
+
+fn datatype_serialize(doc: &mut Document, obj: &asdf_datatype_t) -> Option<NodeId> {
+    use asdf_core::core::datatype::ScalarType;
+
+    // A compound type is a sequence of field mappings.
+    if obj.nfields > 0 && !obj.fields.is_null() {
+        let fields = unsafe { std::slice::from_raw_parts(obj.fields, obj.nfields as usize) };
+        let mut items = Vec::with_capacity(fields.len());
+        for field in fields {
+            let mut pairs = Vec::new();
+            if !field.name.is_null() {
+                let text = unsafe { CStr::from_ptr(field.name) }.to_string_lossy().into_owned();
+                let key = doc.add_scalar("name");
+                let value = doc.add_scalar_styled(text, asdf_core::yaml::ScalarStyle::Plain);
+                pairs.push((key, value));
+            }
+            if let Some(node) = datatype_serialize(doc, field) {
+                let key = doc.add_scalar("datatype");
+                pairs.push((key, node));
+            }
+            items.push(doc.add_mapping(pairs));
+        }
+        return Some(doc.add_sequence(items));
+    }
+
+    // A string type is a [kind, length] pair, sized in characters.
+    let scalar = crate::ndarray_ffi::scalar_from_abi_public(obj.type_);
+    if scalar.is_string() {
+        let characters = obj.size / scalar.bytes_per_char().max(1);
+        let kind = doc.add_scalar(scalar.name());
+        let length = doc.add_scalar(characters.to_string());
+        let seq = doc.add_sequence(vec![kind, length]);
+        if let asdf_core::yaml::NodeData::Sequence { style, .. } = &mut doc.node_mut(seq).data {
+            *style = asdf_core::yaml::CollectionStyle::Flow;
+        }
+        return Some(seq);
+    }
+
+    (scalar != ScalarType::Unknown).then(|| doc.add_scalar(scalar.name()))
+}
+
+unsafe fn datatype_deinit(obj: *mut asdf_datatype_t) {
+    let datatype = unsafe { &mut *obj };
+
+    if !datatype.fields.is_null() && datatype.nfields > 0 {
+        let count = datatype.nfields as usize;
+        let slice = std::ptr::slice_from_raw_parts_mut(datatype.fields.cast_mut(), count);
+        // Reclaim each field's own allocations before the array itself.
+        for index in 0..count {
+            let field = unsafe { &mut *datatype.fields.cast_mut().add(index) };
+            unsafe { free_c_string(field.name) };
+            if !field.shape.is_null() && field.ndim > 0 {
+                let shape =
+                    std::ptr::slice_from_raw_parts_mut(field.shape.cast_mut(), field.ndim as usize);
+                drop(unsafe { Box::from_raw(shape) });
+            }
+        }
+        drop(unsafe { Box::from_raw(slice) });
+    }
+    unsafe { free_c_string(datatype.name) };
+    *datatype = asdf_datatype_t::zeroed();
+}
+
+unsafe fn datatype_copy(src: &asdf_datatype_t, dst: *mut asdf_datatype_t) -> bool {
+    let out = unsafe { &mut *dst };
+    out.type_ = src.type_;
+    out.size = src.size;
+    out.byteorder = src.byteorder;
+    out.name = unsafe { clone_c_string(src.name) };
+    out.ndim = 0;
+    out.shape = std::ptr::null();
+
+    if src.nfields == 0 || src.fields.is_null() {
+        out.nfields = 0;
+        out.fields = std::ptr::null();
+        return true;
+    }
+
+    let source = unsafe { std::slice::from_raw_parts(src.fields, src.nfields as usize) };
+    let mut copies: Vec<asdf_datatype_t> = Vec::with_capacity(source.len());
+    for field in source {
+        let mut copy = asdf_datatype_t::zeroed();
+        // Nested fields are one level deep in practice; a deeper nesting
+        // recurses through this same path.
+        if !unsafe { datatype_copy(field, &mut copy) } {
+            return false;
+        }
+        copies.push(copy);
+    }
+    out.nfields = src.nfields;
+    out.fields = Box::into_raw(copies.into_boxed_slice()).cast::<asdf_datatype_t>().cast_const();
+    true
+}
+
+declare_extension! {
+    name: datatype,
+    ty: asdf_datatype_t,
+    tag: DATATYPE_TAG,
+    deserialize: datatype_deserialize,
+    serialize: datatype_serialize,
+    deinit: datatype_deinit,
+    copy: datatype_copy,
+    is_fn: asdf_is_datatype,
+    value_is_fn: asdf_value_is_datatype,
+    value_as_fn: asdf_value_as_datatype,
+    value_of_fn: asdf_value_of_datatype,
+    get_fn: asdf_get_datatype,
+    set_fn: asdf_set_datatype,
+    copy_fn: asdf_datatype_copy,
+    copy_into_fn: asdf_datatype_copy_into,
+    array_copy_fn: asdf_datatype_array_copy,
+    deinit_fn: asdf_datatype_deinit,
+    destroy_fn: asdf_datatype_destroy,
+}
+
+// ---- core/asdf (the tree's own metadata) -----------------------------
+
+/// The tag for the tree root, `core/asdf`.
+pub const META_TAG: &str = "tag:stsci.edu:asdf/core/asdf-1.1.0";
+
+/// Mirror of `asdf_meta_history_t`.
+#[repr(C)]
+#[derive(Debug)]
+pub struct asdf_meta_history_t {
+    /// A null-terminated array of the extensions used.
+    pub extensions: *mut *const asdf_extension_metadata_t,
+    /// A null-terminated array of history entries.
+    pub entries: *mut *const asdf_history_entry_t,
+}
+
+/// Mirror of `asdf_meta_t`, the `core/asdf` tree root.
+#[repr(C)]
+#[derive(Debug)]
+pub struct asdf_meta_t {
+    /// The software that wrote the file.
+    pub asdf_library: *mut asdf_software_t,
+    /// The file's history.
+    pub history: asdf_meta_history_t,
+}
+
+impl asdf_meta_t {
+    fn zeroed() -> Self {
+        Self {
+            asdf_library: std::ptr::null_mut(),
+            history: asdf_meta_history_t {
+                extensions: std::ptr::null_mut(),
+                entries: std::ptr::null_mut(),
+            },
+        }
+    }
+}
+
+/// Read a null-terminated array of objects from a sequence.
+fn read_list<T>(
+    doc: &Document,
+    node: Option<NodeId>,
+    zeroed: fn() -> T,
+    deserialize: fn(&Document, NodeId, *mut T) -> AsdfValueErr,
+) -> *mut *const T {
+    let Some(node) = node else {
+        return std::ptr::null_mut();
+    };
+    let items: Vec<NodeId> = match doc.sequence_items(node) {
+        Some(items) => items.to_vec(),
+        None => vec![node],
+    };
+
+    let mut list: Vec<*const T> = Vec::with_capacity(items.len() + 1);
+    for item in items {
+        let raw = Box::into_raw(Box::new(zeroed()));
+        if deserialize(doc, item, raw) == AsdfValueErr::Ok {
+            list.push(raw.cast_const());
+        } else {
+            drop(unsafe { Box::from_raw(raw) });
+        }
+    }
+    if list.is_empty() {
+        return std::ptr::null_mut();
+    }
+    list.push(std::ptr::null());
+    Box::into_raw(list.into_boxed_slice()).cast::<*const T>()
+}
+
+/// Free a list produced by [`read_list`].
+///
+/// The destructor is an `extern "C"` function, since these are the same
+/// generated `destroy` entry points C callers use.
+unsafe fn free_list<T>(list: *mut *const T, destroy: unsafe extern "C" fn(*mut T)) {
+    if list.is_null() {
+        return;
+    }
+    let mut count = 0isize;
+    while !unsafe { *list.offset(count) }.is_null() {
+        unsafe { destroy((*list.offset(count)).cast_mut()) };
+        count += 1;
+    }
+    let slice = std::ptr::slice_from_raw_parts_mut(list, count as usize + 1);
+    drop(unsafe { Box::from_raw(slice) });
+}
+
+fn meta_deserialize(doc: &Document, node: NodeId, out: *mut asdf_meta_t) -> AsdfValueErr {
+    let library = doc
+        .mapping_get(node, "asdf_library")
+        .map(|id| {
+            let raw = Box::into_raw(Box::new(asdf_software_t::zeroed()));
+            if software_deserialize(doc, id, raw) == AsdfValueErr::Ok {
+                raw
+            } else {
+                drop(unsafe { Box::from_raw(raw) });
+                std::ptr::null_mut()
+            }
+        })
+        .unwrap_or(std::ptr::null_mut());
+
+    // `history` is a mapping of extensions and entries in the 1.1.0 form,
+    // and a bare sequence of entries in the older one. Both are accepted.
+    let history = doc.mapping_get(node, "history");
+    let (extensions_node, entries_node) = match history {
+        Some(history) if doc.resolved(history).is_mapping() => {
+            (doc.mapping_get(history, "extensions"), doc.mapping_get(history, "entries"))
+        }
+        Some(history) => (None, Some(history)),
+        None => (None, None),
+    };
+
+    unsafe {
+        (*out).asdf_library = library;
+        (*out).history.extensions = read_list(
+            doc,
+            extensions_node,
+            asdf_extension_metadata_t::zeroed,
+            extension_metadata_deserialize,
+        );
+        (*out).history.entries =
+            read_list(doc, entries_node, asdf_history_entry_t::zeroed, history_entry_deserialize);
+    }
+    AsdfValueErr::Ok
+}
+
+fn meta_serialize(doc: &mut Document, obj: &asdf_meta_t) -> Option<NodeId> {
+    let mut pairs = Vec::new();
+
+    if !obj.asdf_library.is_null()
+        && let Some(node) = software_serialize(doc, unsafe { &*obj.asdf_library })
+    {
+        doc.node_mut(node).tag = Some(Tag::parse(SOFTWARE_TAG));
+        let key = doc.add_scalar("asdf_library");
+        pairs.push((key, node));
+    }
+
+    let mut history_pairs = Vec::new();
+    if !obj.history.extensions.is_null() {
+        let mut items = Vec::new();
+        let mut index = 0isize;
+        while !unsafe { *obj.history.extensions.offset(index) }.is_null() {
+            let entry = unsafe { *obj.history.extensions.offset(index) };
+            if let Some(node) = extension_metadata_serialize(doc, unsafe { &*entry }) {
+                doc.node_mut(node).tag = Some(Tag::parse(EXTENSION_METADATA_TAG));
+                items.push(node);
+            }
+            index += 1;
+        }
+        if !items.is_empty() {
+            let list = doc.add_sequence(items);
+            let key = doc.add_scalar("extensions");
+            history_pairs.push((key, list));
+        }
+    }
+    if !obj.history.entries.is_null() {
+        let mut items = Vec::new();
+        let mut index = 0isize;
+        while !unsafe { *obj.history.entries.offset(index) }.is_null() {
+            let entry = unsafe { *obj.history.entries.offset(index) };
+            if let Some(node) = history_entry_serialize(doc, unsafe { &*entry }) {
+                doc.node_mut(node).tag = Some(Tag::parse(HISTORY_ENTRY_TAG));
+                items.push(node);
+            }
+            index += 1;
+        }
+        if !items.is_empty() {
+            let list = doc.add_sequence(items);
+            let key = doc.add_scalar("entries");
+            history_pairs.push((key, list));
+        }
+    }
+    if !history_pairs.is_empty() {
+        let history = doc.add_mapping(history_pairs);
+        let key = doc.add_scalar("history");
+        pairs.push((key, history));
+    }
+
+    Some(doc.add_mapping(pairs))
+}
+
+unsafe fn meta_deinit(obj: *mut asdf_meta_t) {
+    let meta = unsafe { &mut *obj };
+    if !meta.asdf_library.is_null() {
+        unsafe { asdf_software_destroy(meta.asdf_library) };
+    }
+    unsafe { free_list(meta.history.extensions, asdf_extension_metadata_destroy) };
+    unsafe { free_list(meta.history.entries, asdf_history_entry_destroy) };
+    *meta = asdf_meta_t::zeroed();
+}
+
+unsafe fn meta_copy(src: &asdf_meta_t, dst: *mut asdf_meta_t) -> bool {
+    let out = unsafe { &mut *dst };
+    out.asdf_library = if src.asdf_library.is_null() {
+        std::ptr::null_mut()
+    } else {
+        unsafe { asdf_software_copy(std::ptr::null_mut(), src.asdf_library) }
+    };
+    out.history.extensions = if src.history.extensions.is_null() {
+        std::ptr::null_mut()
+    } else {
+        unsafe { asdf_extension_metadata_array_copy(std::ptr::null_mut(), src.history.extensions) }
+            .cast::<*const asdf_extension_metadata_t>()
+    };
+    out.history.entries = if src.history.entries.is_null() {
+        std::ptr::null_mut()
+    } else {
+        unsafe { asdf_history_entry_array_copy(std::ptr::null_mut(), src.history.entries) }
+            .cast::<*const asdf_history_entry_t>()
+    };
+    true
+}
+
+declare_extension! {
+    name: meta,
+    ty: asdf_meta_t,
+    tag: META_TAG,
+    deserialize: meta_deserialize,
+    serialize: meta_serialize,
+    deinit: meta_deinit,
+    copy: meta_copy,
+    is_fn: asdf_is_meta,
+    value_is_fn: asdf_value_is_meta,
+    value_as_fn: asdf_value_as_meta,
+    value_of_fn: asdf_value_of_meta,
+    get_fn: asdf_get_meta,
+    set_fn: asdf_set_meta,
+    copy_fn: asdf_meta_copy,
+    copy_into_fn: asdf_meta_copy_into,
+    array_copy_fn: asdf_meta_array_copy,
+    deinit_fn: asdf_meta_deinit,
+    destroy_fn: asdf_meta_destroy,
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::*;
+    use crate::file_ffi::{asdf_close, asdf_open_mem_ex};
+    use crate::ndarray_ffi::asdf_datatype_t;
+
+    struct Handle(*mut AsdfFile);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            unsafe { asdf_close(self.0) };
+        }
+    }
+
+    /// A tree shaped like a real file's metadata.
+    fn open_full() -> Handle {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n");
+        buf.extend_from_slice(b"%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
+        buf.extend_from_slice(
+            b"asdf_library: !core/software-1.0.0 {name: asdf, version: 4.1.0}\n\
+              history:\n  extensions:\n  - !core/extension_metadata-1.0.0\n    \
+              extension_class: asdf.extension._manifest.ManifestExtension\n    \
+              software: !core/software-1.0.0 {name: asdf_standard, version: 1.1.1}\n  \
+              entries:\n  - !core/history_entry-1.0.0 {description: 'made it'}\n\
+              dt: !core/datatype-1.0.0 float64\n\
+              compound: !core/datatype-1.0.0\n  - name: x\n    datatype: float64\n  \
+              - name: y\n    datatype: int32\n",
+        );
+        buf.extend_from_slice(b"...\n");
+        let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), std::ptr::null_mut()) };
+        assert!(!f.is_null());
+        Handle(f)
+    }
+
+    #[test]
+    fn reads_the_tree_metadata() {
+        let h = open_full();
+        // The root itself carries the core/asdf tag.
+        assert!(unsafe { asdf_is_meta(h.0, c"".as_ptr()) });
+
+        let mut meta: *mut asdf_meta_t = std::ptr::null_mut();
+        assert_eq!(unsafe { asdf_get_meta(h.0, c"".as_ptr(), &mut meta) }, AsdfValueErr::Ok);
+        let view = unsafe { &*meta };
+
+        assert!(!view.asdf_library.is_null());
+        assert_eq!(unsafe { CStr::from_ptr((*view.asdf_library).name) }.to_str().unwrap(), "asdf");
+
+        // Extensions and entries both decoded, both null-terminated.
+        assert!(!view.history.extensions.is_null());
+        let first = unsafe { *view.history.extensions };
+        assert_eq!(
+            unsafe { CStr::from_ptr((*first).extension_class) }.to_str().unwrap(),
+            "asdf.extension._manifest.ManifestExtension"
+        );
+        assert!(unsafe { *view.history.extensions.offset(1) }.is_null());
+
+        assert!(!view.history.entries.is_null());
+        let entry = unsafe { *view.history.entries };
+        assert_eq!(unsafe { CStr::from_ptr((*entry).description) }.to_str().unwrap(), "made it");
+
+        unsafe { asdf_meta_destroy(meta) };
+    }
+
+    /// The older schema wrote `history` as a bare sequence of entries rather
+    /// than a mapping. Both forms must read.
+    #[test]
+    fn the_legacy_history_form_is_accepted() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n");
+        buf.extend_from_slice(b"%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
+        buf.extend_from_slice(
+            b"history:\n- !core/history_entry-1.0.0 {description: 'old style'}\n",
+        );
+        buf.extend_from_slice(b"...\n");
+        let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), std::ptr::null_mut()) };
+        let h = Handle(f);
+
+        let mut meta: *mut asdf_meta_t = std::ptr::null_mut();
+        assert_eq!(unsafe { asdf_get_meta(h.0, c"".as_ptr(), &mut meta) }, AsdfValueErr::Ok);
+        let view = unsafe { &*meta };
+        assert!(view.history.extensions.is_null(), "no extensions in the old form");
+        assert!(!view.history.entries.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr((**view.history.entries).description) }.to_str().unwrap(),
+            "old style"
+        );
+        unsafe { asdf_meta_destroy(meta) };
+    }
+
+    #[test]
+    fn metadata_copies_are_independent() {
+        let h = open_full();
+        let mut meta: *mut asdf_meta_t = std::ptr::null_mut();
+        unsafe { asdf_get_meta(h.0, c"".as_ptr(), &mut meta) };
+
+        let copy = unsafe { asdf_meta_copy(h.0, meta) };
+        assert!(!copy.is_null());
+        unsafe {
+            assert_ne!((*copy).asdf_library, (*meta).asdf_library);
+            assert_ne!((*copy).history.entries, (*meta).history.entries);
+        }
+
+        // Freeing the original must leave the copy whole.
+        unsafe { asdf_meta_destroy(meta) };
+        assert_eq!(
+            unsafe { CStr::from_ptr((*(*copy).asdf_library).name) }.to_str().unwrap(),
+            "asdf"
+        );
+        unsafe { asdf_meta_destroy(copy) };
+    }
+
+    #[test]
+    fn reads_a_scalar_datatype() {
+        let h = open_full();
+        assert!(unsafe { asdf_is_datatype(h.0, c"dt".as_ptr()) });
+
+        let mut datatype: *mut asdf_datatype_t = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { asdf_get_datatype(h.0, c"dt".as_ptr(), &mut datatype) },
+            AsdfValueErr::Ok
+        );
+        let view = unsafe { &*datatype };
+        // float64 is discriminant 11, eight bytes wide.
+        assert_eq!(view.type_, 11);
+        assert_eq!(view.size, 8);
+        assert_eq!(view.nfields, 0);
+        unsafe { asdf_datatype_destroy(datatype) };
+    }
+
+    #[test]
+    fn reads_a_compound_datatype_with_named_fields() {
+        let h = open_full();
+        let mut datatype: *mut asdf_datatype_t = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { asdf_get_datatype(h.0, c"compound".as_ptr(), &mut datatype) },
+            AsdfValueErr::Ok
+        );
+        let view = unsafe { &*datatype };
+        assert_eq!(view.nfields, 2);
+        assert!(!view.fields.is_null());
+        // A record of float64 plus int32 is twelve bytes.
+        assert_eq!(view.size, 12);
+
+        let fields = unsafe { std::slice::from_raw_parts(view.fields, 2) };
+        assert_eq!(unsafe { CStr::from_ptr(fields[0].name) }.to_str().unwrap(), "x");
+        assert_eq!(fields[0].size, 8);
+        assert_eq!(unsafe { CStr::from_ptr(fields[1].name) }.to_str().unwrap(), "y");
+        assert_eq!(fields[1].size, 4);
+
+        // The copy must duplicate the field array, not share it.
+        let copy = unsafe { asdf_datatype_copy(h.0, datatype) };
+        assert!(!copy.is_null());
+        unsafe { assert_ne!((*copy).fields, view.fields) };
+        unsafe { asdf_datatype_destroy(datatype) };
+        assert_eq!(unsafe { (*copy).nfields }, 2);
+        unsafe { asdf_datatype_destroy(copy) };
+    }
+
+    #[test]
+    fn deinit_is_safe_on_zeroed_objects() {
+        let mut meta = asdf_meta_t::zeroed();
+        unsafe { asdf_meta_deinit(&mut meta) };
+        unsafe { asdf_meta_deinit(&mut meta) };
+
+        let mut datatype = asdf_datatype_t::zeroed();
+        unsafe { asdf_datatype_deinit(&mut datatype) };
+        unsafe { asdf_datatype_deinit(std::ptr::null_mut()) };
+    }
+}
