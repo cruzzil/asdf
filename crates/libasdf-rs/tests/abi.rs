@@ -1099,31 +1099,69 @@ fn every_declared_export_is_defined() {
     eprintln!("all {} declared exports are defined", declared.len());
 }
 
+/// Every header the vendored tree holds, whether or not `asdf.h` reaches it.
+///
+/// `asdf/extension_util.h` is not included from `asdf.h`, so scanning only
+/// what `asdf.h` pulls in silently excused the two symbols it declares --
+/// both of which were missing. Every header is now scanned on its own.
+fn vendored_headers() -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "h") {
+                out.push(path);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for dir in include_dirs() {
+        walk(&dir, &mut out);
+    }
+    out.sort();
+    out
+}
+
 /// Every symbol the vendored headers declare with `ASDF_EXPORT`.
 ///
 /// Read out of the preprocessed headers: `ASDF_EXPORT` expands to the
 /// visibility attribute, so each declaration is the identifier just before
-/// the first `(` that follows one.
+/// the first `(` -- or the first `;` for an `extern` variable -- that
+/// follows one.
 fn declared_exports() -> std::collections::BTreeSet<String> {
     const MARKER: &str = r#"__attribute__((visibility("default")))"#;
 
     let out_dir = target_dir().join("abi-tests");
     std::fs::create_dir_all(&out_dir).expect("create abi-tests dir");
-    let src = out_dir.join("declared_exports.c");
-    std::fs::write(&src, "#include <asdf.h>\n").expect("write probe source");
 
-    let mut cmd = Command::new(c_compiler());
-    cmd.arg("-E").arg(&src);
-    for dir in include_dirs() {
-        cmd.arg("-I").arg(dir);
+    let headers = vendored_headers();
+    assert!(!headers.is_empty(), "no vendored headers found");
+
+    // Each header is preprocessed as its own translation unit and the
+    // results unioned, so a header nothing else includes is still covered.
+    let mut text = String::new();
+    for header in &headers {
+        let src = out_dir.join("declared_exports.c");
+        std::fs::write(&src, format!("#include \"{}\"\n", header.display()))
+            .unwrap_or_else(|e| panic!("write probe for {}: {e}", header.display()));
+
+        let mut cmd = Command::new(c_compiler());
+        cmd.arg("-E").arg(&src);
+        for dir in include_dirs() {
+            cmd.arg("-I").arg(dir);
+        }
+        let out = cmd.output().expect("run the preprocessor");
+        assert!(
+            out.status.success(),
+            "preprocessing {} failed:\n{}",
+            header.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        text.push_str(&String::from_utf8_lossy(&out.stdout));
     }
-    let out = cmd.output().expect("run the preprocessor");
-    assert!(
-        out.status.success(),
-        "preprocessing failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let text = String::from_utf8_lossy(&out.stdout);
 
     let mut names = std::collections::BTreeSet::new();
     for chunk in text.split(MARKER).skip(1) {

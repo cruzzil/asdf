@@ -15,10 +15,11 @@
 //! runs its own setup first, would reintroduce exactly the ordering problem
 //! this avoids.
 
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::Mutex;
 
 use crate::panic::guard;
+use crate::types::AsdfValueType;
 use crate::version_ffi::asdf_version_t;
 
 /// Mirror of `asdf_tag_t`.
@@ -533,6 +534,137 @@ pub unsafe extern "C" fn asdf_set_extension_type(
         let result = unsafe { crate::file_ffi::set_value_at(file, path, value) };
         unsafe { crate::file_ffi::asdf_value_destroy(value) };
         result
+    })
+}
+
+// ---- Schema property helpers -----------------------------------------
+//
+// `asdf/extension_util.h`. These are what an extension's deserializer uses
+// to pull a schema's properties out of a mapping with the type checking the
+// schema calls for, rather than repeating it at each call site.
+
+/// Whether a value of `found` can be read as `wanted`.
+///
+/// Integer widths widen, and every numeric type reads as a `double`. The
+/// relation is deliberately one-way: a `uint16` satisfies a request for an
+/// `int32`, but not the reverse, because the reverse can overflow.
+fn is_equivalent_type(found: AsdfValueType, wanted: AsdfValueType) -> bool {
+    use AsdfValueType as T;
+    match wanted {
+        T::Uint64 => matches!(found, T::Uint64 | T::Uint32 | T::Uint16 | T::Uint8),
+        T::Uint32 => matches!(found, T::Uint32 | T::Uint16 | T::Uint8),
+        T::Uint16 => matches!(found, T::Uint16 | T::Uint8),
+        T::Uint8 => found == T::Uint8,
+        T::Int64 => matches!(
+            found,
+            T::Int64 | T::Uint32 | T::Int32 | T::Uint16 | T::Int16 | T::Uint8 | T::Int8
+        ),
+        T::Int32 => matches!(found, T::Int32 | T::Uint16 | T::Int16 | T::Uint8 | T::Int8),
+        T::Int16 => matches!(found, T::Int16 | T::Uint8 | T::Int8),
+        T::Int8 => found == T::Int8,
+        T::Double => matches!(
+            found,
+            T::Double
+                | T::Float
+                | T::Int64
+                | T::Int32
+                | T::Int16
+                | T::Int8
+                | T::Uint64
+                | T::Uint32
+                | T::Uint16
+                | T::Uint8
+        ),
+        other => found == other,
+    }
+}
+
+/// Look up a mapping's property and read it as `value_type`.
+///
+/// # Safety
+/// `mapping` must be a valid handle, `name` a valid string, `tag` a valid
+/// string or null, and `out` storage of the C type matching `value_type`.
+unsafe fn get_property(
+    mapping: *mut crate::value_ffi::AsdfMapping,
+    name: *const c_char,
+    value_type: c_int,
+    tag: *const c_char,
+    out: *mut c_void,
+) -> crate::types::AsdfValueErr {
+    use crate::types::AsdfValueErr;
+
+    let prop = unsafe { crate::value_ffi::asdf_mapping_get(mapping, name) };
+    if prop.is_null() {
+        return AsdfValueErr::NotFound;
+    }
+    let release = |value| unsafe { crate::file_ffi::asdf_value_destroy(value) };
+
+    let Some(wanted) = AsdfValueType::from_i32(value_type) else {
+        release(prop);
+        return AsdfValueErr::TypeMismatch;
+    };
+
+    // An extension type is matched by tag rather than by shape.
+    if wanted == AsdfValueType::Extension && !tag.is_null() {
+        let file = crate::file_ffi::value_file(mapping).unwrap_or(std::ptr::null_mut());
+        let ext = unsafe { asdf_extension_get(file, tag) };
+        if ext.is_null() || !unsafe { asdf_value_is_extension_type(prop, ext) } {
+            release(prop);
+            return AsdfValueErr::TypeMismatch;
+        }
+        let err = unsafe { asdf_value_as_extension_type(prop, ext, out.cast()) };
+        release(prop);
+        return err;
+    }
+
+    if wanted != AsdfValueType::Unknown && wanted != AsdfValueType::Extension {
+        let found = unsafe { crate::file_ffi::asdf_value_get_type(prop) };
+        if !is_equivalent_type(found, wanted) {
+            release(prop);
+            return AsdfValueErr::TypeMismatch;
+        }
+    }
+
+    let err = unsafe { crate::value_ffi::asdf_value_as_type(prop, value_type, out) };
+    release(prop);
+    err
+}
+
+/// Read a property the schema requires.
+///
+/// # Safety
+/// See [`asdf_get_optional_property`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_get_required_property(
+    mapping: *mut crate::value_ffi::AsdfMapping,
+    name: *const c_char,
+    value_type: c_int,
+    tag: *const c_char,
+    out: *mut c_void,
+) -> crate::types::AsdfValueErr {
+    guard("asdf_get_required_property", crate::types::AsdfValueErr::Unknown, || unsafe {
+        get_property(mapping, name, value_type, tag, out)
+    })
+}
+
+/// Read a property the schema allows but does not require.
+///
+/// Identical to [`asdf_get_required_property`] except in how loudly an
+/// absent property is reported; both return `ASDF_VALUE_ERR_NOT_FOUND`.
+///
+/// # Safety
+/// `mapping` must be a valid handle, `name` a valid string, `tag` a valid
+/// string or null, and `out` storage of the C type matching `value_type`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_get_optional_property(
+    mapping: *mut crate::value_ffi::AsdfMapping,
+    name: *const c_char,
+    value_type: c_int,
+    tag: *const c_char,
+    out: *mut c_void,
+) -> crate::types::AsdfValueErr {
+    guard("asdf_get_optional_property", crate::types::AsdfValueErr::Unknown, || unsafe {
+        get_property(mapping, name, value_type, tag, out)
     })
 }
 

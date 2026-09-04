@@ -86,18 +86,22 @@ checkout with its munit submodule initialised:
 $ cd ~/code/libasdf && git submodule update --init tests/munit
 ```
 
-Eight of upstream's twenty-one suites build against the public ABI. The other
-thirteen include libasdf's private headers -- `event.h`, `parser.h`,
-`stream.h`, `compat/numeric.h`, `libfyaml.h` -- to reach internals that are
-implementation detail rather than interface, so they cannot run against a
-different implementation by construction. Each is listed in the test with the
-header that rules it out.
+Nine of upstream's twenty-one suites build against the public ABI. The other
+twelve include libasdf's private headers -- `event.h`, `parser.h`,
+`stream.h`, `libfyaml.h` -- to reach internals that are implementation detail
+rather than interface, so they cannot run against a different implementation
+by construction. Each is listed in the test with the header that rules it out.
+
+`test-ndarray` is the one exception: it reaches for `compat/numeric.h`, which
+is a type alias for `_Float16` and nothing more -- no struct layouts, no
+internal API -- so libasdf's `src/` is added to its include path *after* the
+vendored headers, and `asdf/*.h` still resolves to ours.
 
 Every suite's pass count is pinned. A change that loses ground fails, and so
 does one that gains ground without updating the number, so the figure below
 cannot drift.
 
-**169 of 170.**
+**269 of 427.**
 
 | Suite | | |
 |---|---|---|
@@ -107,6 +111,7 @@ cannot drift.
 | `test-error` | 3/3 | |
 | `test-time` | 17/17 | |
 | `test-core-extensions` | 16/16 | |
+| `test-ndarray` | 100/257 | |
 | `test-extension` | 12/13 | |
 | `test-reference-files` | 113/113 | every tagged value in every reference file |
 

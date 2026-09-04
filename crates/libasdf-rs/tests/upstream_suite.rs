@@ -39,6 +39,13 @@ struct Suite {
     expect_pass: usize,
     /// Total tests in the suite, as munit counts them.
     total: usize,
+    /// Also search libasdf's `src/` for includes.
+    ///
+    /// `test-ndarray.c` reaches for `compat/numeric.h`, which is a type
+    /// alias for `_Float16` and nothing more -- no struct layouts, no
+    /// internal API. The vendored headers still come first, so `asdf/*.h`
+    /// resolves to ours.
+    needs_compat_headers: bool,
 }
 
 /// The suites that build against the public ABI.
@@ -47,18 +54,24 @@ struct Suite {
 /// build achieves -- the point of pinning them is that a change which loses
 /// ground fails here rather than going unnoticed.
 const SUITES: &[Suite] = &[
-    Suite { name: "test-version", expect_pass: 4, total: 4 },
-    Suite { name: "test-tag", expect_pass: 1, total: 1 },
-    Suite { name: "test-tests", expect_pass: 3, total: 3 },
-    Suite { name: "test-error", expect_pass: 3, total: 3 },
-    Suite { name: "test-time", expect_pass: 17, total: 17 },
-    Suite { name: "test-core-extensions", expect_pass: 16, total: 16 },
+    Suite { name: "test-version", expect_pass: 4, total: 4, needs_compat_headers: false },
+    Suite { name: "test-tag", expect_pass: 1, total: 1, needs_compat_headers: false },
+    Suite { name: "test-tests", expect_pass: 3, total: 3, needs_compat_headers: false },
+    Suite { name: "test-error", expect_pass: 3, total: 3, needs_compat_headers: false },
+    Suite { name: "test-time", expect_pass: 17, total: 17, needs_compat_headers: false },
+    Suite { name: "test-core-extensions", expect_pass: 16, total: 16, needs_compat_headers: false },
+    Suite { name: "test-ndarray", expect_pass: 100, total: 257, needs_compat_headers: true },
     // The one test that cannot pass: `test_asdf_value_of_foo` compares an
     // emitted file byte for byte against a fixture libasdf wrote, whose
     // `asdf_library` names libasdf. Byte parity on YAML is a nice-to-have
     // and never a gate; the binary layer is where bytes matter.
-    Suite { name: "test-extension", expect_pass: 12, total: 13 },
-    Suite { name: "test-reference-files", expect_pass: 113, total: 113 },
+    Suite { name: "test-extension", expect_pass: 12, total: 13, needs_compat_headers: false },
+    Suite {
+        name: "test-reference-files",
+        expect_pass: 113,
+        total: 113,
+        needs_compat_headers: false,
+    },
 ];
 
 /// Suites that cannot run against another implementation, and why.
@@ -69,7 +82,6 @@ const INTERNAL_ONLY: &[(&str, &str)] = &[
     ("test-event", "includes event.h and parser.h, the private event struct"),
     ("test-file", "includes file.h"),
     ("test-malloc-fail", "includes event.h, file.h, parser.h, tag.h, value.h"),
-    ("test-ndarray", "includes compat/numeric.h"),
     ("test-parse-util", "includes parse_util.h and yaml.h"),
     ("test-parser", "includes event.h and parser.h"),
     ("test-stream", "includes stream.h and stream_intern.h"),
@@ -173,12 +185,14 @@ fn upstream_c_test_suite_runs_against_this_library() {
     let temp = build.join("tmp");
     std::fs::create_dir_all(&temp).expect("create build dir");
 
-    // `util.c` includes libasdf's build-time `config.h`, of which it reads
-    // only `HAVE_STATGRAB`; leaving it undefined selects the portable path.
+    // A stand-in for libasdf's build-time `config.h`. `util.c` reads only
+    // `HAVE_STATGRAB` from it -- left undefined, which selects the portable
+    // path -- and `compat/numeric.h` reads `HAVE_FLOAT16`, which must match
+    // what our own build probed for.
+    let float16 = if cfg!(asdf_have_float16) { "#define HAVE_FLOAT16 1\n" } else { "" };
     std::fs::write(
         build.join("config.h"),
-        "/* Stand-in for libasdf's build config. Only HAVE_STATGRAB is read,\n\
-           and leaving it undefined selects util.c's portable path. */\n",
+        format!("/* Stand-in for libasdf's build config; see upstream_suite.rs. */\n{float16}"),
     )
     .expect("write config.h");
 
@@ -193,9 +207,10 @@ fn upstream_c_test_suite_runs_against_this_library() {
     cflags.push(format!("-DFIXTURES_DIR=\"{}\"", tests.join("fixtures").display()));
     cflags.push(format!("-DTEMP_DIR=\"{}\"", temp.display()));
 
-    let compile = |source: &Path, object: &Path| -> Result<(), String> {
+    let compile = |source: &Path, object: &Path, extra: &[String]| -> Result<(), String> {
         let out = Command::new(c_compiler())
             .args(&cflags)
+            .args(extra)
             .arg("-c")
             .arg(source)
             .arg("-o")
@@ -212,11 +227,11 @@ fn upstream_c_test_suite_runs_against_this_library() {
     // The harness objects, shared by every suite.
     let munit_o = build.join("munit.o");
     let util_o = build.join("util.o");
-    if let Err(e) = compile(&munit, &munit_o) {
+    if let Err(e) = compile(&munit, &munit_o, &[]) {
         eprintln!("skipping: munit did not compile:\n{e}");
         return;
     }
-    compile(&tests.join("util.c"), &util_o).expect("upstream's test util.c must compile");
+    compile(&tests.join("util.c"), &util_o, &[]).expect("upstream's test util.c must compile");
 
     let mut results = Vec::new();
     let mut failures = Vec::new();
@@ -224,7 +239,12 @@ fn upstream_c_test_suite_runs_against_this_library() {
     for suite in SUITES {
         let object = build.join(format!("{}.o", suite.name));
         let binary = build.join(suite.name);
-        if let Err(e) = compile(&tests.join(format!("{}.c", suite.name)), &object) {
+        let extra: Vec<String> = if suite.needs_compat_headers {
+            vec!["-I".to_string(), root.join("src").display().to_string()]
+        } else {
+            Vec::new()
+        };
+        if let Err(e) = compile(&tests.join(format!("{}.c", suite.name)), &object, &extra) {
             failures.push(format!("{}: did not compile:\n{e}", suite.name));
             continue;
         }
