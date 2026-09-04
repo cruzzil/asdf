@@ -940,7 +940,7 @@ fn ndarray_from_value(value: *mut crate::file_ffi::AsdfValue) -> *mut asdf_ndarr
 
     // Read the block up front, as libasdf does, so the array's data pointer
     // is usable for as long as the handle is.
-    let mut data = None;
+    let mut data: Option<Vec<u8>> = None;
     let mut block_len = None;
     let mut block_index = None;
     if let Some(file) = value_file(value)
@@ -967,6 +967,14 @@ fn ndarray_from_value(value: *mut crate::file_ffi::AsdfValue) -> *mut asdf_ndarr
     let Ok(shape) = parsed.resolved_shape(block_len) else {
         return std::ptr::null_mut();
     };
+
+    // An inline array's elements are already in the tree. `asdf_ndarray_data`
+    // still hands out bytes, so they are encoded into the array's own scalar
+    // type in this machine's order -- there is no stored layout to preserve.
+    if data.is_none() && matches!(parsed.source, Source::Inline(_)) {
+        data = encode_inline(doc, &parsed, &shape);
+    }
+
     let array = make_ndarray(parsed, shape);
     if let Some(bytes) = data {
         set_data(array, bytes);
@@ -978,6 +986,36 @@ fn ndarray_from_value(value: *mut crate::file_ffi::AsdfValue) -> *mut asdf_ndarr
         state.block_index = block_index;
     }
     array
+}
+
+/// Encode an inline array's elements as bytes of its own scalar type.
+///
+/// Returns `None` for a compound datatype, whose record layout is not a
+/// simple sequence of scalars; such an array is still described correctly,
+/// it just has no flat buffer to hand out.
+fn encode_inline(
+    doc: &asdf_core::yaml::Document,
+    parsed: &Ndarray,
+    shape: &[u64],
+) -> Option<Vec<u8>> {
+    let scalar = parsed.datatype.scalar;
+    if !parsed.datatype.fields.is_empty() {
+        return None;
+    }
+    let width = usize::try_from(scalar.size()).ok()?;
+    if width == 0 {
+        return None;
+    }
+
+    let elements = asdf_core::core::decode_inline(doc, parsed, shape).ok()?;
+    let mut out = vec![0u8; elements.len() * width];
+    for (index, element) in elements.iter().enumerate() {
+        let slot = &mut out[index * width..(index + 1) * width];
+        if write_converted(element, scalar, slot) != NdarrayErr::Ok {
+            return None;
+        }
+    }
+    Some(out)
 }
 
 /// Read the array at `path`.
@@ -1306,12 +1344,33 @@ pub unsafe extern "C" fn asdf_value_of_ndarray(
             .iter()
             .map(|k| doc.add_scalar(*k))
             .collect();
-        let node = doc.add_mapping(vec![
+        let mut pairs = vec![
             (keys[0], source),
             (keys[1], datatype),
             (keys[2], byteorder),
             (keys[3], shape_node),
-        ]);
+        ];
+
+        // `offset` and `strides` say where the elements sit inside the
+        // block, so an array that has them is unreadable without them. Both
+        // are omitted at their defaults, as every other writer omits them.
+        if array.offset != 0 {
+            let key = doc.add_scalar("offset");
+            let value = doc.add_scalar(array.offset.to_string());
+            pairs.push((key, value));
+        }
+        if !array.strides.is_null() && array.ndim > 0 {
+            let strides = unsafe { std::slice::from_raw_parts(array.strides, array.ndim as usize) };
+            let items: Vec<_> = strides.iter().map(|s| doc.add_scalar(s.to_string())).collect();
+            let node = doc.add_sequence(items);
+            if let NodeData::Sequence { style, .. } = &mut doc.node_mut(node).data {
+                *style = CollectionStyle::Flow;
+            }
+            let key = doc.add_scalar("strides");
+            pairs.push((key, node));
+        }
+
+        let node = doc.add_mapping(pairs);
         doc.node_mut(node).tag = Some(Tag::parse("tag:stsci.edu:asdf/core/ndarray-1.1.0"));
 
         Box::into_raw(Box::new(crate::file_ffi::AsdfValue::new(file, node)))

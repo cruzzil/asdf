@@ -97,6 +97,25 @@ Every suite's pass count is pinned. A change that loses ground fails, and so
 does one that gains ground without updating the number, so the figure below
 cannot drift.
 
+**169 of 170.**
+
+| Suite | | |
+|---|---|---|
+| `test-version` | 4/4 | |
+| `test-tag` | 1/1 | |
+| `test-tests` | 3/3 | the harness's own self-test |
+| `test-error` | 3/3 | |
+| `test-time` | 17/17 | |
+| `test-core-extensions` | 16/16 | |
+| `test-extension` | 12/13 | |
+| `test-reference-files` | 113/113 | every tagged value in every reference file |
+
+The one test that does not pass is `test_asdf_value_of_foo`, which compares
+an emitted file byte for byte against a fixture libasdf wrote — whose
+`asdf_library` names libasdf. It cannot pass for any other implementation.
+Byte parity on emitted YAML is a nice-to-have and never a gate; the binary
+block layer is where bytes matter, and there they are exact.
+
 ## Not yet wired up
 - **Differential testing against the real libasdf.** Blocked on building the C
   library locally, which needs `libfyaml`, `cmake`, `libbz2`, `liblz4` and

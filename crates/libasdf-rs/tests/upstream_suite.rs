@@ -52,7 +52,11 @@ const SUITES: &[Suite] = &[
     Suite { name: "test-tests", expect_pass: 3, total: 3 },
     Suite { name: "test-error", expect_pass: 3, total: 3 },
     Suite { name: "test-time", expect_pass: 17, total: 17 },
-    Suite { name: "test-core-extensions", expect_pass: 14, total: 16 },
+    Suite { name: "test-core-extensions", expect_pass: 16, total: 16 },
+    // The one test that cannot pass: `test_asdf_value_of_foo` compares an
+    // emitted file byte for byte against a fixture libasdf wrote, whose
+    // `asdf_library` names libasdf. Byte parity on YAML is a nice-to-have
+    // and never a gate; the binary layer is where bytes matter.
     Suite { name: "test-extension", expect_pass: 12, total: 13 },
     Suite { name: "test-reference-files", expect_pass: 113, total: 113 },
 ];
