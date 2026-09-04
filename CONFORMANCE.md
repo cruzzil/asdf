@@ -73,12 +73,31 @@ rendered output against upstream's committed fixtures byte for byte:
 | `info_goldens` | `asdf info` reproduces all 17 of upstream's `.info.txt` captures, ANSI styling included. |
 | `event_goldens` | `asdf events --verbose` reproduces all 4 of upstream's `.events.txt` captures. These pin the event *order*, which is not the file's own — the block index is reported before the tree — and the names libfyaml gives YAML events (`+MAP`, `=VAL`, `-SEQ`), which appear in no header. |
 
-## Not yet wired up
+## Upstream's own C test suite
 
-- **Upstream's own C test suite** (~20 `test-*.c` files with munit) compiled
-  against our headers and linked against our library. This is the highest-value
-  gate in the project and its pass count is the real progress metric. It needs
-  libasdf's `tests/` directory and its munit submodule.
+The strongest conformance evidence the project can produce: the tests
+*upstream wrote for its own implementation*, compiled against the vendored
+headers and linked against our shared library.
+
+Run with `cargo test -p libasdf-rs --test upstream_suite`. It needs a libasdf
+checkout with its munit submodule initialised:
+
+```console
+$ cd ~/code/libasdf && git submodule update --init tests/munit
+```
+
+Eight of upstream's twenty-one suites build against the public ABI. The other
+thirteen include libasdf's private headers -- `event.h`, `parser.h`,
+`stream.h`, `compat/numeric.h`, `libfyaml.h` -- to reach internals that are
+implementation detail rather than interface, so they cannot run against a
+different implementation by construction. Each is listed in the test with the
+header that rules it out.
+
+Every suite's pass count is pinned. A change that loses ground fails, and so
+does one that gains ground without updating the number, so the figure below
+cannot drift.
+
+## Not yet wired up
 - **Differential testing against the real libasdf.** Blocked on building the C
   library locally, which needs `libfyaml`, `cmake`, `libbz2`, `liblz4` and
   `libmd`, plus `git submodule update --init` in the libasdf checkout.
