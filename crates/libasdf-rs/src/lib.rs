@@ -28,6 +28,8 @@ pub mod block_ffi;
 pub mod core_ext;
 pub mod error_ffi;
 pub mod extension_ffi;
+/// Internal only: the raw-pointer helpers every entry point is built on.
+pub(crate) mod ffi;
 pub mod file_ffi;
 pub mod ndarray_ffi;
 pub mod panic;

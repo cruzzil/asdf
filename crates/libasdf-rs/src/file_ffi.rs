@@ -20,6 +20,7 @@ use asdf_core::yaml::{
 use asdf_core::{PendingBlock, Reader, Writer};
 
 use crate::error_ffi::ErrorState;
+use crate::ffi::{CMallocBuf, write_out};
 use crate::panic::guard;
 use crate::types::{AsdfValueErr, AsdfValueType, asdf_config_t};
 
@@ -125,7 +126,7 @@ pub(crate) unsafe fn read_config(config: *const asdf_config_t) -> FileConfig {
 
 /// A file's configuration, for callers that need it after open.
 pub(crate) fn file_config(file: *const AsdfFile) -> Option<FileConfig> {
-    (!file.is_null()).then(|| unsafe { &*file }.config)
+    unsafe { crate::ffi::as_ref(file) }.map(|f| f.config)
 }
 
 /// A handle's error state, for the `ASDF_ERROR_*` macros.
@@ -671,7 +672,7 @@ macro_rules! int_getter {
                     _ => return AsdfValueErr::TypeMismatch,
                 };
                 if !out.is_null() {
-                    unsafe { *out = truncated };
+                    unsafe { write_out(out, truncated) };
                 }
                 if fits { AsdfValueErr::Ok } else { AsdfValueErr::Overflow }
             })
@@ -711,7 +712,7 @@ pub unsafe extern "C" fn asdf_get_double(
             _ => return AsdfValueErr::TypeMismatch,
         };
         if !out.is_null() {
-            unsafe { *out = value };
+            unsafe { write_out(out, value) };
         }
         AsdfValueErr::Ok
     })
@@ -738,7 +739,7 @@ pub unsafe extern "C" fn asdf_get_float(
             _ => return AsdfValueErr::TypeMismatch,
         };
         if !out.is_null() {
-            unsafe { *out = value as f32 };
+            unsafe { write_out(out, value as f32) };
         }
         AsdfValueErr::Ok
     })
@@ -771,7 +772,7 @@ pub unsafe extern "C" fn asdf_get_bool(
             }
         };
         if !out.is_null() {
-            unsafe { *out = value };
+            unsafe { write_out(out, value) };
         }
         AsdfValueErr::Ok
     })
@@ -800,7 +801,7 @@ pub unsafe extern "C" fn asdf_get_string0(
             return AsdfValueErr::Oom;
         }
         if !out.is_null() {
-            unsafe { *out = ptr };
+            unsafe { write_out(out, ptr) };
         }
         AsdfValueErr::Ok
     })
@@ -1126,17 +1127,15 @@ pub unsafe extern "C" fn asdf_write_to_mem(
             }
         };
 
-        // Allocated with malloc rather than Rust's allocator, since the C
-        // caller frees it with free().
-        let allocation = unsafe { libc::malloc(bytes.len().max(1)) };
-        if allocation.is_null() {
+        // The header specifies `malloc` here, because it tells the caller to
+        // release the buffer with `free`. `CMallocBuf` is the one place the
+        // crate honours that, and it frees the allocation itself if anything
+        // between here and `into_raw` returns early.
+        let Some(allocation) = CMallocBuf::copy_from(&bytes) else {
             return -1;
-        }
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), allocation.cast::<u8>(), bytes.len());
-            *buf = allocation;
-            *size = bytes.len();
-        }
+        };
+        unsafe { write_out(size, allocation.len()) };
+        unsafe { write_out(buf, allocation.into_raw()) };
         0
     })
 }
@@ -1292,10 +1291,10 @@ fn intern_at(
         return AsdfValueErr::Oom;
     }
     if !out.is_null() {
-        unsafe { *out = ptr };
+        unsafe { write_out(out, ptr) };
     }
     if !out_len.is_null() {
-        unsafe { *out_len = text.len() };
+        unsafe { write_out(out_len, text.len()) };
     }
     AsdfValueErr::Ok
 }
@@ -1327,7 +1326,7 @@ macro_rules! container_getter {
                     if handle.is_null() {
                         return AsdfValueErr::Oom;
                     }
-                    unsafe { *out = handle };
+                    unsafe { write_out(out, handle) };
                 }
                 AsdfValueErr::Ok
             })

@@ -194,7 +194,7 @@ pub unsafe extern "C" fn asdf_extension_get(
         if tag.is_null() {
             return std::ptr::null();
         }
-        let wanted = unsafe { CStr::from_ptr(tag) }.to_string_lossy().into_owned();
+        let wanted = unsafe { crate::ffi::c_string_lossy(tag) }.unwrap_or_default();
         let registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
 
         for entry in registry.iter() {
@@ -252,7 +252,7 @@ pub unsafe extern "C" fn asdf_tag_parse(tag: *const c_char) -> *mut asdf_tag_t {
         if tag.is_null() {
             return std::ptr::null_mut();
         }
-        let text = unsafe { CStr::from_ptr(tag) }.to_string_lossy().into_owned();
+        let text = unsafe { crate::ffi::c_string_lossy(tag) }.unwrap_or_default();
         let (name, version) = asdf_core::yaml::tag::split_tag_version(&text);
 
         let Ok(name) = CString::new(name) else {

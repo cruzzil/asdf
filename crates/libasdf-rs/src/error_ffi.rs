@@ -265,11 +265,7 @@ pub unsafe extern "C" fn asdf_shim_error_set(
     msg: *const c_char,
 ) {
     crate::panic::guard("asdf_shim_error_set", (), || {
-        let text = if msg.is_null() {
-            String::new()
-        } else {
-            unsafe { CStr::from_ptr(msg) }.to_string_lossy().into_owned()
-        };
+        let text = unsafe { crate::ffi::c_string_lossy(msg) }.unwrap_or_default();
         let text = if text.is_empty() {
             usize::try_from(code)
                 .ok()
@@ -323,11 +319,7 @@ pub unsafe extern "C" fn asdf_shim_log_message(
 ) {
     crate::panic::guard("asdf_shim_log_message", (), || {
         let Some(level) = LogLevel::from_i32(level) else { return };
-        let text = if msg.is_null() {
-            String::new()
-        } else {
-            unsafe { CStr::from_ptr(msg) }.to_string_lossy().into_owned()
-        };
+        let text = unsafe { crate::ffi::c_string_lossy(msg) }.unwrap_or_default();
         unsafe { emit_log(file.cast_mut(), 0, level, src_file, lineno, &text) };
     });
 }
@@ -366,11 +358,9 @@ unsafe fn emit_log(
     if level == LogLevel::None || level < default_log_level() {
         return;
     }
-    let src = if src_file.is_null() {
-        String::from("?")
-    } else {
-        unsafe { CStr::from_ptr(src_file) }.to_string_lossy().into_owned()
-    };
+    // A null `src_file` is what the shim passes when it has no source
+    // location to report, and upstream prints `?` for it.
+    let src = unsafe { crate::ffi::c_string_lossy(src_file) }.unwrap_or_else(|| "?".into());
     eprintln!("{} libasdf {}:{}: {}", level.as_str(), src, lineno, msg);
 }
 

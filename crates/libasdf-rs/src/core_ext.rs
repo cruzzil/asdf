@@ -39,10 +39,9 @@ unsafe fn free_c_string(ptr: *const c_char) {
 
 /// Copy a C string, or null.
 unsafe fn clone_c_string(ptr: *const c_char) -> *const c_char {
-    if ptr.is_null() {
+    let Some(text) = (unsafe { crate::ffi::c_str(ptr) }) else {
         return std::ptr::null();
-    }
-    let text = unsafe { CStr::from_ptr(ptr) };
+    };
     CString::new(text.to_bytes()).map_or(std::ptr::null(), |c| c.into_raw().cast_const())
 }
 
@@ -167,7 +166,7 @@ macro_rules! declare_extension {
                 let raw = Box::into_raw(boxed);
                 match $deserialize(doc, node, file, raw) {
                     AsdfValueErr::Ok => {
-                        unsafe { *out = raw };
+                        unsafe { write_out(out, raw) };
                         AsdfValueErr::Ok
                     }
                     err => {
@@ -403,7 +402,7 @@ macro_rules! declare_extension {
                 let raw = Box::into_raw(Box::new(<$ty>::zeroed()));
                 match $deserialize(doc, node, file, raw) {
                     AsdfValueErr::Ok => {
-                        unsafe { *out = raw.cast::<std::ffi::c_void>() };
+                        unsafe { write_out(out, raw.cast::<std::ffi::c_void>()) };
                         AsdfValueErr::Ok
                     }
                     err => {
@@ -1562,6 +1561,7 @@ mod history_tests {
 
 // ---- core/datatype ---------------------------------------------------
 
+use crate::ffi::write_out;
 use crate::ndarray_ffi::asdf_datatype_t;
 
 /// The tag for `core/datatype`.

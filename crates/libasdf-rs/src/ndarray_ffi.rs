@@ -15,6 +15,7 @@ use asdf_core::core::datatype::{Datatype, ScalarType};
 use asdf_core::core::elements::{Element, decode_all};
 use asdf_core::core::ndarray::{Ndarray, Source};
 
+use crate::ffi::{CMallocBuf, write_out};
 use crate::panic::guard;
 use crate::types::AsdfArrayStorage;
 
@@ -345,7 +346,7 @@ fn state_of<'a>(array: *mut asdf_ndarray_t) -> Option<&'a mut NdarrayState> {
         return None;
     }
     let reserved = unsafe { &*array }._reserved;
-    (!reserved.is_null()).then(|| unsafe { &mut *reserved.cast::<NdarrayState>() })
+    unsafe { crate::ffi::as_mut(reserved.cast::<NdarrayState>()) }
 }
 
 /// The state behind an array, creating it from the public fields if absent.
@@ -596,7 +597,7 @@ pub unsafe extern "C" fn asdf_ndarray_data(
     guard("asdf_ndarray_data", std::ptr::null(), || {
         let Some(state) = state_of(ndarray) else {
             if !size.is_null() {
-                unsafe { *size = 0 };
+                unsafe { write_out(size, 0) };
             }
             return std::ptr::null();
         };
@@ -606,13 +607,13 @@ pub unsafe extern "C" fn asdf_ndarray_data(
             (None, Some(data)) => data,
             (None, None) => {
                 if !size.is_null() {
-                    unsafe { *size = 0 };
+                    unsafe { write_out(size, 0) };
                 }
                 return std::ptr::null();
             }
         };
         if !size.is_null() {
-            unsafe { *size = bytes.len() };
+            unsafe { write_out(size, bytes.len()) };
         }
         bytes.as_ptr().cast::<c_void>()
     })
@@ -901,7 +902,7 @@ macro_rules! read_at {
             guard(stringify!($name), <$ty>::default(), || {
                 let set = |code: NdarrayErr| {
                     if !err.is_null() {
-                        unsafe { *err = code as c_int };
+                        unsafe { write_out(err, code as c_int) };
                     }
                 };
                 let Some(state) = state_of(ndarray) else {
@@ -1148,7 +1149,7 @@ pub unsafe extern "C" fn asdf_get_ndarray(
             return AsdfValueErr::TypeMismatch;
         }
         if !out.is_null() {
-            unsafe { *out = array };
+            unsafe { write_out(out, array) };
         } else {
             unsafe { asdf_ndarray_destroy(array) };
         }
@@ -1174,7 +1175,7 @@ pub unsafe extern "C" fn asdf_value_as_ndarray(
             return AsdfValueErr::TypeMismatch;
         }
         if !out.is_null() {
-            unsafe { *out = array };
+            unsafe { write_out(out, array) };
         } else {
             unsafe { asdf_ndarray_destroy(array) };
         }
@@ -1686,14 +1687,12 @@ fn deliver(buffer: &[u8], dst: *mut *mut c_void) -> NdarrayErr {
     }
     let existing = unsafe { *dst };
     if existing.is_null() {
-        let allocation = unsafe { libc::malloc(buffer.len().max(1)) };
-        if allocation.is_null() {
+        // A null destination means "allocate one for me, I will `free` it",
+        // so this must come from `malloc` and not Rust's allocator.
+        let Some(allocation) = CMallocBuf::copy_from(buffer) else {
             return NdarrayErr::Oom;
-        }
-        unsafe {
-            std::ptr::copy_nonoverlapping(buffer.as_ptr(), allocation.cast::<u8>(), buffer.len());
-            *dst = allocation;
-        }
+        };
+        unsafe { write_out(dst, allocation.into_raw()) };
     } else {
         unsafe {
             std::ptr::copy_nonoverlapping(buffer.as_ptr(), existing.cast::<u8>(), buffer.len());
@@ -1930,7 +1929,7 @@ unsafe extern "C" fn ndarray_ext_deserialize(
     let mut typed: *mut asdf_ndarray_t = std::ptr::null_mut();
     let err = unsafe { asdf_value_as_ndarray(value, &mut typed) };
     if err == crate::types::AsdfValueErr::Ok && !out.is_null() {
-        unsafe { *out = typed.cast::<c_void>() };
+        unsafe { write_out(out, typed.cast::<c_void>()) };
     }
     err
 }

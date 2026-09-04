@@ -578,7 +578,7 @@ mod tests {
     fn format_names_match_upstream() {
         let name = |format: c_int| {
             let ptr = asdf_time_format_string(format);
-            (!ptr.is_null()).then(|| unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string())
+            unsafe { crate::ffi::c_str(ptr) }.map(|s| s.to_string_lossy().into_owned())
         };
         assert_eq!(name(0).as_deref(), Some("iso"));
         assert_eq!(name(10).as_deref(), Some("tai_seconds"));

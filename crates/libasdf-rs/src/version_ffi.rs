@@ -160,14 +160,18 @@ mod tests {
 
     fn version_str(v: *const asdf_version_t) -> Option<String> {
         let v = unsafe { &*v };
-        (!v.version.is_null())
-            .then(|| unsafe { CStr::from_ptr(v.version) }.to_string_lossy().into_owned())
+        (!v.version.is_null()).then(|| {
+            unsafe { crate::ffi::c_str(v.version) }
+                .map_or_else(String::new, |s| s.to_string_lossy().into_owned())
+        })
     }
 
     fn extra_str(v: *const asdf_version_t) -> Option<String> {
         let v = unsafe { &*v };
-        (!v.extra.is_null())
-            .then(|| unsafe { CStr::from_ptr(v.extra) }.to_string_lossy().into_owned())
+        (!v.extra.is_null()).then(|| {
+            unsafe { crate::ffi::c_str(v.extra) }
+                .map_or_else(String::new, |s| s.to_string_lossy().into_owned())
+        })
     }
 
     #[test]

@@ -21,6 +21,7 @@ use asdf_core::block::header::CHECKSUM_SIZE;
 use asdf_core::compression::Compression;
 use asdf_core::{ChecksumStatus, PendingBlock};
 
+use crate::ffi::write_out;
 use crate::file_ffi::{AsdfFile, file_blocks_mut, file_reader};
 use crate::panic::guard;
 
@@ -123,7 +124,7 @@ impl AsdfBlock {
 }
 
 fn block_ref<'a>(block: *mut AsdfBlock) -> Option<&'a mut AsdfBlock> {
-    (!block.is_null()).then(|| unsafe { &mut *block })
+    unsafe { crate::ffi::as_mut(block) }
 }
 
 /// Open a view of a block the file owns.
@@ -498,7 +499,7 @@ pub unsafe extern "C" fn asdf_block_data(block: *mut AsdfBlock, size: *mut usize
     guard("asdf_block_data", std::ptr::null(), || {
         let Some(handle) = block_ref(block) else {
             if !size.is_null() {
-                unsafe { *size = 0 };
+                unsafe { write_out(size, 0) };
             }
             return std::ptr::null();
         };
@@ -506,7 +507,7 @@ pub unsafe extern "C" fn asdf_block_data(block: *mut AsdfBlock, size: *mut usize
         if handle.compression == Compression::None {
             let slice = handle.data.as_slice();
             if !size.is_null() {
-                unsafe { *size = slice.len() };
+                unsafe { write_out(size, slice.len()) };
             }
             return if slice.is_empty() {
                 std::ptr::null()
@@ -522,7 +523,7 @@ pub unsafe extern "C" fn asdf_block_data(block: *mut AsdfBlock, size: *mut usize
                 Ok(bytes) => handle.decompressed = Some(bytes),
                 Err(_) => {
                     if !size.is_null() {
-                        unsafe { *size = 0 };
+                        unsafe { write_out(size, 0) };
                     }
                     return std::ptr::null();
                 }
@@ -530,7 +531,7 @@ pub unsafe extern "C" fn asdf_block_data(block: *mut AsdfBlock, size: *mut usize
         }
         let bytes = handle.decompressed.as_ref().expect("just decompressed");
         if !size.is_null() {
-            unsafe { *size = bytes.len() };
+            unsafe { write_out(size, bytes.len()) };
         }
         bytes.as_ptr().cast::<c_void>()
     })
@@ -548,13 +549,13 @@ pub unsafe extern "C" fn asdf_block_data_raw(
     guard("asdf_block_data_raw", std::ptr::null(), || {
         let Some(handle) = block_ref(block) else {
             if !size.is_null() {
-                unsafe { *size = 0 };
+                unsafe { write_out(size, 0) };
             }
             return std::ptr::null();
         };
         let slice = handle.data.as_slice();
         if !size.is_null() {
-            unsafe { *size = slice.len() };
+            unsafe { write_out(size, slice.len()) };
         }
         if slice.is_empty() { std::ptr::null() } else { slice.as_ptr().cast::<c_void>() }
     })

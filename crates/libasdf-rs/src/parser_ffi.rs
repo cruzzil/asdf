@@ -20,6 +20,7 @@
 //!
 //! An event's strings belong to the event and stay valid until it is freed.
 
+use crate::ffi::write_out;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
 use asdf_core::events::{Event as CoreEvent, EventOptions, events, render_event};
@@ -264,15 +265,15 @@ fn yaml_sub(event: &YamlEvent) -> YamlSub {
 }
 
 fn parser_ref<'a>(parser: *const AsdfParser) -> Option<&'a AsdfParser> {
-    (!parser.is_null()).then(|| unsafe { &*parser })
+    unsafe { crate::ffi::as_ref(parser) }
 }
 
 fn parser_mut<'a>(parser: *mut AsdfParser) -> Option<&'a mut AsdfParser> {
-    (!parser.is_null()).then(|| unsafe { &mut *parser })
+    unsafe { crate::ffi::as_mut(parser) }
 }
 
 fn event_ref<'a>(event: *const AsdfEvent) -> Option<&'a AsdfEvent> {
-    (!event.is_null()).then(|| unsafe { &*event })
+    unsafe { crate::ffi::as_ref(event) }
 }
 
 // ---- Parser lifecycle ------------------------------------------------
@@ -672,13 +673,13 @@ pub unsafe extern "C" fn asdf_yaml_event_scalar_value(
         match text {
             Some(value) => {
                 if !lenp.is_null() {
-                    unsafe { *lenp = value.as_bytes().len() };
+                    unsafe { write_out(lenp, value.as_bytes().len()) };
                 }
                 value.as_ptr()
             }
             None => {
                 if !lenp.is_null() {
-                    unsafe { *lenp = 0 };
+                    unsafe { write_out(lenp, 0) };
                 }
                 std::ptr::null()
             }
@@ -703,13 +704,13 @@ pub unsafe extern "C" fn asdf_yaml_event_tag(
         match tag {
             Some(value) => {
                 if !lenp.is_null() {
-                    unsafe { *lenp = value.as_bytes().len() };
+                    unsafe { write_out(lenp, value.as_bytes().len()) };
                 }
                 value.as_ptr()
             }
             None => {
                 if !lenp.is_null() {
-                    unsafe { *lenp = 0 };
+                    unsafe { write_out(lenp, 0) };
                 }
                 std::ptr::null()
             }

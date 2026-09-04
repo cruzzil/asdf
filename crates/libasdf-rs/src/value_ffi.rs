@@ -18,6 +18,7 @@
 //! loop breaks early. Each step also frees the previous `value`, which the
 //! iterator owns.
 
+use crate::ffi::write_out;
 use std::ffi::{CStr, CString, c_char, c_int};
 
 use asdf_core::yaml::{NodeData, NodeId, Resolved, ScalarStyle, Schema, resolve};
@@ -183,7 +184,7 @@ pub unsafe extern "C" fn asdf_value_as_mapping(
             return AsdfValueErr::TypeMismatch;
         }
         if !out.is_null() {
-            unsafe { *out = value };
+            unsafe { write_out(out, value) };
         }
         AsdfValueErr::Ok
     })
@@ -339,7 +340,7 @@ pub unsafe extern "C" fn asdf_mapping_iter_next(iter_ptr: *mut *mut asdf_mapping
 
         if iter.position >= iter.entries.len() {
             unsafe { asdf_mapping_iter_destroy(raw) };
-            unsafe { *iter_ptr = std::ptr::null_mut() };
+            unsafe { write_out(iter_ptr, std::ptr::null_mut()) };
             return false;
         }
 
@@ -402,7 +403,7 @@ pub unsafe extern "C" fn asdf_value_as_sequence(
             return AsdfValueErr::TypeMismatch;
         }
         if !out.is_null() {
-            unsafe { *out = value };
+            unsafe { write_out(out, value) };
         }
         AsdfValueErr::Ok
     })
@@ -537,7 +538,7 @@ pub unsafe extern "C" fn asdf_sequence_iter_next(iter_ptr: *mut *mut asdf_sequen
 
         if iter.position >= iter.items.len() {
             unsafe { asdf_sequence_iter_destroy(raw) };
-            unsafe { *iter_ptr = std::ptr::null_mut() };
+            unsafe { write_out(iter_ptr, std::ptr::null_mut()) };
             return false;
         }
 
@@ -615,7 +616,7 @@ macro_rules! value_int_accessors {
                     _ => return AsdfValueErr::TypeMismatch,
                 };
                 if !out.is_null() {
-                    unsafe { *out = truncated };
+                    unsafe { write_out(out, truncated) };
                 }
                 if fits { AsdfValueErr::Ok } else { AsdfValueErr::Overflow }
             })
@@ -660,7 +661,7 @@ pub unsafe extern "C" fn asdf_value_as_double(
             _ => return AsdfValueErr::TypeMismatch,
         };
         if !out.is_null() {
-            unsafe { *out = converted };
+            unsafe { write_out(out, converted) };
         }
         AsdfValueErr::Ok
     })
@@ -680,7 +681,7 @@ pub unsafe extern "C" fn asdf_value_as_float(value: *mut AsdfValue, out: *mut f3
         }
         let narrow = wide as f32;
         if !out.is_null() {
-            unsafe { *out = narrow };
+            unsafe { write_out(out, narrow) };
         }
         // A finite `double` with no `float` becomes an infinity. The value
         // is still handed over -- the caller may not care -- but the loss is
@@ -749,7 +750,7 @@ pub unsafe extern "C" fn asdf_value_as_bool(value: *mut AsdfValue, out: *mut boo
             return AsdfValueErr::TypeMismatch;
         };
         if !out.is_null() {
-            unsafe { *out = converted };
+            unsafe { write_out(out, converted) };
         }
         AsdfValueErr::Ok
     })
@@ -840,7 +841,7 @@ fn intern_scalar(value: *mut AsdfValue, out: *mut *const c_char) -> AsdfValueErr
         return AsdfValueErr::Oom;
     }
     if !out.is_null() {
-        unsafe { *out = ptr };
+        unsafe { write_out(out, ptr) };
     }
     AsdfValueErr::Ok
 }
@@ -966,7 +967,7 @@ pub unsafe extern "C" fn asdf_container_iter_next(
 
         if iter.position >= iter.entries.len() {
             unsafe { asdf_container_iter_destroy(raw) };
-            unsafe { *iter_ptr = std::ptr::null_mut() };
+            unsafe { write_out(iter_ptr, std::ptr::null_mut()) };
             return false;
         }
 
@@ -1889,10 +1890,10 @@ fn scalar_with_len(
         return AsdfValueErr::Oom;
     }
     if !out.is_null() {
-        unsafe { *out = ptr };
+        unsafe { write_out(out, ptr) };
     }
     if !out_len.is_null() {
-        unsafe { *out_len = text.len() };
+        unsafe { write_out(out_len, text.len()) };
     }
     AsdfValueErr::Ok
 }
@@ -2318,7 +2319,7 @@ pub unsafe extern "C" fn asdf_value_find_iter_next(
             return true;
         }
         unsafe { asdf_find_iter_destroy(current) };
-        unsafe { *iter = std::ptr::null_mut() };
+        unsafe { write_out(iter, std::ptr::null_mut()) };
         false
     })
 }
