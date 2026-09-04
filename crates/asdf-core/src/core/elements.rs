@@ -8,7 +8,7 @@
 use asdf_yaml::{CollectionStyle, Document, Node, NodeData, NodeId, ScalarStyle};
 
 use crate::core::datatype::{ByteOrder, Datatype, ScalarType};
-use crate::core::ndarray::Ndarray;
+use crate::core::ndarray::{Ndarray, Source};
 use crate::error::{Result, err};
 
 /// One decoded array element.
@@ -208,6 +208,194 @@ pub fn decode_all(nd: &Ndarray, shape: &[u64], bytes: &[u8]) -> Result<Vec<Eleme
     Ok(out)
 }
 
+/// Decode an array whose data is inline in the tree rather than in a block.
+///
+/// The elements are already text in the document, so this is the mirror of
+/// [`inline_ndarray`]: walk the nested sequences under `data` in row-major
+/// order and read each scalar as the array's datatype.
+///
+/// The descent is driven by `shape`, not by how deeply the sequences happen
+/// to nest. That distinction matters for a compound array, whose innermost
+/// "sequence" is one record's fields rather than another dimension.
+///
+/// A `mask`ed value written as `null` decodes to the datatype's zero, since
+/// [`Element`] carries no missing-value marker; `mask` itself is available on
+/// the [`Ndarray`] for a caller that needs to know which those were.
+pub fn decode_inline(doc: &Document, array: &Ndarray, shape: &[u64]) -> Result<Vec<Element>> {
+    let Source::Inline(root) = array.source else {
+        return Err(err!(InvalidArgument, "this array's data is not inline"));
+    };
+
+    let expected: u64 = shape.iter().copied().product();
+    let mut out = Vec::with_capacity(usize::try_from(expected).unwrap_or(0));
+    collect_inline(doc, root, &array.datatype, shape, &mut out)?;
+
+    if out.len() as u64 != expected {
+        return Err(err!(
+            InvalidArgument,
+            "inline data holds {} elements but the shape calls for {expected}",
+            out.len()
+        ));
+    }
+    Ok(out)
+}
+
+/// Walk `shape.len()` levels of sequences, reading each leaf as `datatype`.
+fn collect_inline(
+    doc: &Document,
+    node: NodeId,
+    datatype: &Datatype,
+    shape: &[u64],
+    out: &mut Vec<Element>,
+) -> Result<()> {
+    let resolved = doc.resolve(node);
+
+    let Some((dim, rest)) = shape.split_first() else {
+        // Past the last dimension: this is one element.
+        out.push(leaf_element(doc, resolved, datatype)?);
+        return Ok(());
+    };
+
+    let items = doc.sequence_items(resolved).map(<[_]>::to_vec).ok_or_else(|| {
+        err!(InvalidArgument, "inline array data is not nested {} deep", shape.len())
+    })?;
+    if items.len() as u64 != *dim {
+        return Err(err!(
+            InvalidArgument,
+            "inline dimension holds {} entries but the shape calls for {dim}",
+            items.len()
+        ));
+    }
+    for item in items {
+        collect_inline(doc, item, datatype, rest, out)?;
+    }
+    Ok(())
+}
+
+/// Read one element: a scalar, or a record for a compound datatype.
+fn leaf_element(doc: &Document, node: NodeId, datatype: &Datatype) -> Result<Element> {
+    if !datatype.fields.is_empty() {
+        let items = doc.sequence_items(node).map(<[_]>::to_vec).ok_or_else(|| {
+            err!(InvalidArgument, "a compound element must be a sequence of its fields")
+        })?;
+        if items.len() != datatype.fields.len() {
+            return Err(err!(
+                InvalidArgument,
+                "a compound element holds {} values but the datatype has {} fields",
+                items.len(),
+                datatype.fields.len()
+            ));
+        }
+        let mut record = Vec::with_capacity(items.len());
+        for (item, field) in items.iter().zip(datatype.fields.iter()) {
+            record.push(leaf_element(doc, doc.resolve(*item), &field.datatype)?);
+        }
+        return Ok(Element::Record(record));
+    }
+
+    let text = doc
+        .resolved(node)
+        .as_str()
+        .ok_or_else(|| err!(InvalidArgument, "inline array data holds a non-scalar leaf"))?;
+    scalar_element(text, datatype.scalar)
+}
+
+/// Read one inline scalar as `scalar`.
+fn scalar_element(text: &str, scalar: ScalarType) -> Result<Element> {
+    use ScalarType as S;
+
+    // A masked element is written `null`; there is no missing marker in
+    // `Element`, so it reads as the type's zero.
+    if matches!(text, "null" | "~" | "") {
+        return Ok(match scalar {
+            S::Float16 | S::Float32 | S::Float64 => Element::Float(0.0),
+            S::Complex64 | S::Complex128 => Element::Complex(0.0, 0.0),
+            S::Bool8 => Element::Bool(false),
+            S::Ascii | S::Ucs4 => Element::Text(String::new()),
+            S::Uint8 | S::Uint16 | S::Uint32 | S::Uint64 => Element::Uint(0),
+            _ => Element::Int(0),
+        });
+    }
+
+    let bad = |what: &str| err!(InvalidArgument, "inline {what} value {text:?} does not parse");
+    match scalar {
+        S::Uint8 | S::Uint16 | S::Uint32 | S::Uint64 => {
+            Ok(Element::Uint(text.parse::<u64>().map_err(|_| bad("unsigned"))?))
+        }
+        S::Int8 | S::Int16 | S::Int32 | S::Int64 => {
+            Ok(Element::Int(text.parse::<i64>().map_err(|_| bad("integer"))?))
+        }
+        S::Float16 | S::Float32 | S::Float64 => Ok(Element::Float(parse_inline_float(text)?)),
+        S::Complex64 | S::Complex128 => {
+            let (re, im) = parse_inline_complex(text)?;
+            Ok(Element::Complex(re, im))
+        }
+        S::Bool8 => Ok(Element::Bool(matches!(text, "true" | "True" | "1"))),
+        S::Ascii | S::Ucs4 => Ok(Element::Text(text.to_string())),
+        S::Unknown | S::Structured => {
+            Err(err!(InvalidArgument, "inline data needs a known scalar datatype"))
+        }
+    }
+}
+
+/// Parse a float, accepting YAML's non-finite spellings and Python's.
+fn parse_inline_float(text: &str) -> Result<f64> {
+    match text {
+        ".nan" | ".NaN" | ".NAN" | "nan" => return Ok(f64::NAN),
+        ".inf" | ".Inf" | ".INF" | "inf" => return Ok(f64::INFINITY),
+        "-.inf" | "-.Inf" | "-.INF" | "-inf" => return Ok(f64::NEG_INFINITY),
+        _ => {}
+    }
+    text.parse::<f64>()
+        .map_err(|_| err!(InvalidArgument, "inline float value {text:?} does not parse"))
+}
+
+/// Parse a complex number in the spellings the `core/complex` schema allows.
+///
+/// Both `(1+2j)` and `1+2j` are valid, as is a pure imaginary `3j` or a pure
+/// real `1`. The imaginary unit may be `i` or `j`, either case.
+fn parse_inline_complex(text: &str) -> Result<(f64, f64)> {
+    let body = text.trim();
+    let body = body.strip_prefix('(').map_or(body, |rest| rest.strip_suffix(')').unwrap_or(rest));
+
+    let imaginary_unit = |c: char| matches!(c, 'i' | 'I' | 'j' | 'J');
+    let Some(unit) = body.char_indices().rev().find(|(_, c)| imaginary_unit(*c)) else {
+        // No imaginary part at all: a plain real number.
+        return Ok((parse_inline_float(body)?, 0.0));
+    };
+    // The unit must be last; anything after it is not a complex number.
+    if unit.0 + unit.1.len_utf8() != body.len() {
+        return Err(err!(InvalidArgument, "inline complex value {text:?} does not parse"));
+    }
+    let without_unit = &body[..unit.0];
+
+    // Split off the imaginary part at the sign that separates the two, which
+    // is the last `+`/`-` not part of an exponent and not the leading sign.
+    let split = without_unit
+        .char_indices()
+        .rev()
+        .find(|(index, c)| {
+            (*c == '+' || *c == '-')
+                && *index > 0
+                && !matches!(without_unit.as_bytes()[index - 1], b'e' | b'E')
+        })
+        .map(|(index, _)| index);
+
+    match split {
+        None => Ok((0.0, parse_inline_float(without_unit)?)),
+        Some(index) => {
+            let (real, imaginary) = without_unit.split_at(index);
+            // The imaginary part keeps its sign; a bare sign means one.
+            let imaginary = match imaginary {
+                "+" => "1",
+                "-" => "-1",
+                other => other,
+            };
+            Ok((parse_inline_float(real)?, parse_inline_float(imaginary)?))
+        }
+    }
+}
+
 /// The tag Python asdf puts on every inline complex value.
 const COMPLEX_TAG: &str = "tag:stsci.edu:asdf/core/complex-1.0.0";
 
@@ -355,6 +543,144 @@ mod tests {
         let doc = parse_document(yaml).unwrap();
         let root = doc.root().unwrap();
         Ndarray::parse(&doc, doc.mapping_get(root, "a").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn inline_integers_decode_from_the_tree() {
+        let doc = parse_document(
+            "a:\n  data: [[1, 2, 3], [4, 5, 6]]\n  datatype: int32\n  shape: [2, 3]\n",
+        )
+        .unwrap();
+        let root = doc.root().unwrap();
+        let nd = Ndarray::parse(&doc, doc.mapping_get(root, "a").unwrap()).unwrap();
+        let shape = nd.resolved_shape(None).unwrap();
+        assert_eq!(shape, vec![2, 3]);
+
+        let els = decode_inline(&doc, &nd, &shape).unwrap();
+        assert_eq!(
+            els,
+            (1..=6).map(Element::Int).collect::<Vec<_>>(),
+            "row-major order, flattened"
+        );
+    }
+
+    #[test]
+    fn inline_floats_accept_yamls_non_finite_spellings() {
+        let doc = parse_document(
+            "a:\n  data: [1.5, .inf, -.inf, .nan]\n  datatype: float64\n  shape: [4]\n",
+        )
+        .unwrap();
+        let root = doc.root().unwrap();
+        let nd = Ndarray::parse(&doc, doc.mapping_get(root, "a").unwrap()).unwrap();
+        let els = decode_inline(&doc, &nd, &[4]).unwrap();
+
+        assert_eq!(els[0], Element::Float(1.5));
+        assert_eq!(els[1], Element::Float(f64::INFINITY));
+        assert_eq!(els[2], Element::Float(f64::NEG_INFINITY));
+        let Element::Float(nan) = els[3] else { panic!("{:?}", els[3]) };
+        assert!(nan.is_nan());
+    }
+
+    /// The schema allows a family of spellings; all of them must read.
+    #[test]
+    fn inline_complex_accepts_every_spelling_the_schema_allows() {
+        let cases = [
+            ("0j", (0.0, 0.0)),
+            ("(1+2j)", (1.0, 2.0)),
+            ("1+2j", (1.0, 2.0)),
+            ("(1-2j)", (1.0, -2.0)),
+            ("-1j", (0.0, -1.0)),
+            ("(-0+0j)", (-0.0, 0.0)),
+            ("3", (3.0, 0.0)),
+            ("2i", (0.0, 2.0)),
+            ("(1.5e-3+2.5e+4j)", (1.5e-3, 2.5e4)),
+            // A bare sign before the unit means one.
+            ("(1+j)", (1.0, 1.0)),
+            ("(1-j)", (1.0, -1.0)),
+        ];
+        for (text, (re, im)) in cases {
+            let got = parse_inline_complex(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(got.0, re, "real part of {text}");
+            assert_eq!(got.1, im, "imaginary part of {text}");
+        }
+
+        // The non-finites, which the corpus does carry.
+        let (re, im) = parse_inline_complex("(nan-infj)").unwrap();
+        assert!(re.is_nan());
+        assert_eq!(im, f64::NEG_INFINITY);
+    }
+
+    /// Everything we write must read back, which is the property that
+    /// matters for a round trip through inline form.
+    #[test]
+    fn complex_spellings_round_trip_through_the_parser() {
+        let values = [
+            (0.0, 0.0),
+            (-0.0, 0.0),
+            (1.0, 2.0),
+            (1.0, -2.0),
+            (0.0, -1.0),
+            (1.5e-3, 2.5e4),
+            (f64::MAX, f64::MIN_POSITIVE),
+        ];
+        for (re, im) in values {
+            let text = crate::core::pyrepr::repr_complex(re, im);
+            let (back_re, back_im) = parse_inline_complex(&text).unwrap();
+            assert_eq!(back_re.to_bits(), re.to_bits(), "{text}");
+            assert_eq!(back_im.to_bits(), im.to_bits(), "{text}");
+        }
+    }
+
+    #[test]
+    fn inline_compound_records_stay_grouped() {
+        let doc = parse_document(
+            "a:\n  data: [[1, 2.5], [3, 4.5]]\n  shape: [2]\n  datatype:\n  \
+             - {name: n, datatype: int32}\n  - {name: x, datatype: float64}\n",
+        )
+        .unwrap();
+        let root = doc.root().unwrap();
+        let nd = Ndarray::parse(&doc, doc.mapping_get(root, "a").unwrap()).unwrap();
+        let els = decode_inline(&doc, &nd, &[2]).unwrap();
+        assert_eq!(
+            els,
+            vec![
+                Element::Record(vec![Element::Int(1), Element::Float(2.5)]),
+                Element::Record(vec![Element::Int(3), Element::Float(4.5)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_data_must_match_the_declared_shape() {
+        let doc =
+            parse_document("a:\n  data: [1, 2, 3]\n  datatype: int32\n  shape: [4]\n").unwrap();
+        let root = doc.root().unwrap();
+        let nd = Ndarray::parse(&doc, doc.mapping_get(root, "a").unwrap()).unwrap();
+        let err = decode_inline(&doc, &nd, &[4]).unwrap_err();
+        assert!(err.message().contains("shape calls for 4"), "{err}");
+    }
+
+    /// A block-backed array decoded and re-read through inline form must
+    /// come back the same, which is the property `tree_inlined` relies on.
+    #[test]
+    fn a_block_array_survives_a_trip_through_inline_form() {
+        let nd =
+            ndarray("a:\n  source: 0\n  shape: [5]\n  datatype: float64\n  byteorder: little\n");
+        let values = [1.5f64, -2.25, 0.0, f64::MAX, -0.125];
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let original = decode_all(&nd, &[5], &bytes).unwrap();
+
+        let mut doc = parse_document(
+            "a:\n  source: 0\n  shape: [5]\n  datatype: float64\n  byteorder: little\n",
+        )
+        .unwrap();
+        let root = doc.root().unwrap();
+        let node = doc.mapping_get(root, "a").unwrap();
+        inline_ndarray(&mut doc, node, &original, &[5]).unwrap();
+
+        let inlined = Ndarray::parse(&doc, node).unwrap();
+        let read_back = decode_inline(&doc, &inlined, &[5]).unwrap();
+        assert_eq!(read_back, original);
     }
 
     #[test]

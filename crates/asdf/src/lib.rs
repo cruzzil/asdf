@@ -170,31 +170,54 @@ impl AsdfFile {
         }
     }
 
-    /// Read every element of an array in its own types.
+    /// Read every element of a block-backed or external array.
+    ///
+    /// An array whose `source` names another file -- the standard's exploded
+    /// form -- is followed, provided this file was opened from a path and the
+    /// name resolves to a file beneath its directory.
+    ///
+    /// An array whose data is *inline* in the tree carries no block, so it is
+    /// an error here; read one with [`Tree::read_array`], which has the tree
+    /// the values live in.
     pub fn read_array(&self, array: &Ndarray) -> Result<Vec<Element>> {
+        if let Source::External(uri) = &array.source {
+            let data = self.reader.external_block(uri)?;
+            let shape = array.resolved_shape(Some(data.len() as u64))?;
+            return decode_all(array, &shape, &data);
+        }
         let index = self.block_for(array)?;
         let data = self.block_data(index)?;
         let shape = array.resolved_shape(Some(data.len() as u64))?;
         decode_all(array, &shape, &data)
     }
 
+    /// Read every element of the array at `path`, wherever its data lives.
+    ///
+    /// The one call that covers all four cases: a block in this file, the
+    /// last block, another file, or inline in the tree. It parses the tree
+    /// each time, so a loop over many arrays is better served by holding a
+    /// [`Tree`] and using [`Tree::read_array`] or [`AsdfFile::read_array`].
+    pub fn read_array_at(&self, path: &str) -> Result<Vec<Element>> {
+        let tree = self.tree()?.ok_or_else(|| {
+            Error::new(ErrorCode::InvalidArgument, "this file has no tree to look in")
+        })?;
+        let value = tree.get(path).ok_or_else(|| {
+            Error::new(ErrorCode::InvalidArgument, format!("no value at {path:?}"))
+        })?;
+        let array = value.as_ndarray().ok_or_else(|| {
+            Error::new(ErrorCode::InvalidArgument, format!("the value at {path:?} is not an array"))
+        })?;
+        match array.source {
+            Source::Inline(_) => tree.read_array(&array),
+            _ => self.read_array(&array),
+        }
+    }
+
     /// Read an array converted to `f64`.
     ///
     /// Every numeric type converts; a string or compound array does not.
     pub fn read_array_f64(&self, array: &Ndarray) -> Result<Vec<f64>> {
-        self.read_array(array)?
-            .into_iter()
-            .map(|element| match element {
-                Element::Float(v) => Ok(v),
-                Element::Int(v) => Ok(v as f64),
-                Element::Uint(v) => Ok(v as f64),
-                Element::Bool(v) => Ok(if v { 1.0 } else { 0.0 }),
-                other => Err(Error::new(
-                    ErrorCode::InvalidArgument,
-                    format!("{other:?} cannot be read as a number"),
-                )),
-            })
-            .collect()
+        as_f64(self.read_array(array)?)
     }
 
     /// Read an array converted to `i64`.
@@ -202,22 +225,54 @@ impl AsdfFile {
     /// A float with a fractional part is an error rather than being
     /// truncated silently.
     pub fn read_array_i64(&self, array: &Ndarray) -> Result<Vec<i64>> {
-        self.read_array(array)?
-            .into_iter()
-            .map(|element| match element {
-                Element::Int(v) => Ok(v),
-                Element::Uint(v) => i64::try_from(v).map_err(|_| {
-                    Error::new(ErrorCode::InvalidArgument, format!("{v} does not fit an i64"))
-                }),
-                Element::Bool(v) => Ok(i64::from(v)),
-                Element::Float(v) if v.fract() == 0.0 => Ok(v as i64),
-                other => Err(Error::new(
-                    ErrorCode::InvalidArgument,
-                    format!("{other:?} cannot be read as an integer"),
-                )),
-            })
-            .collect()
+        as_i64(self.read_array(array)?)
     }
+
+    /// [`AsdfFile::read_array_at`] converted to `f64`.
+    pub fn read_array_f64_at(&self, path: &str) -> Result<Vec<f64>> {
+        as_f64(self.read_array_at(path)?)
+    }
+
+    /// [`AsdfFile::read_array_at`] converted to `i64`.
+    pub fn read_array_i64_at(&self, path: &str) -> Result<Vec<i64>> {
+        as_i64(self.read_array_at(path)?)
+    }
+}
+
+/// Convert decoded elements to `f64`.
+fn as_f64(elements: Vec<Element>) -> Result<Vec<f64>> {
+    elements
+        .into_iter()
+        .map(|element| match element {
+            Element::Float(v) => Ok(v),
+            Element::Int(v) => Ok(v as f64),
+            Element::Uint(v) => Ok(v as f64),
+            Element::Bool(v) => Ok(if v { 1.0 } else { 0.0 }),
+            other => Err(Error::new(
+                ErrorCode::InvalidArgument,
+                format!("{other:?} cannot be read as a number"),
+            )),
+        })
+        .collect()
+}
+
+/// Convert decoded elements to `i64`.
+fn as_i64(elements: Vec<Element>) -> Result<Vec<i64>> {
+    elements
+        .into_iter()
+        .map(|element| match element {
+            Element::Int(v) => Ok(v),
+            Element::Uint(v) => i64::try_from(v).map_err(|_| {
+                Error::new(ErrorCode::InvalidArgument, format!("{v} does not fit an i64"))
+            }),
+            Element::Bool(v) => Ok(i64::from(v)),
+            Element::Float(v) if v.fract() == 0.0 => Ok(v as i64),
+            other => Err(Error::new(
+                ErrorCode::InvalidArgument,
+                format!("{other:?} cannot be read as an integer"),
+            )),
+        })
+        .collect()
 }
 
 /// A parsed ASDF tree.
@@ -238,6 +293,16 @@ impl Tree {
     /// depending on what its parent is; negative indices count from the end.
     pub fn get(&self, path: &str) -> Option<Value<'_>> {
         self.document.lookup_str(path).map(|node| Value { document: &self.document, node })
+    }
+
+    /// Read every element of an array whose data is inline in this tree.
+    ///
+    /// Inline data needs no file: the values are already here. An array
+    /// backed by a block is read through [`AsdfFile::read_array`] instead,
+    /// and is an error here.
+    pub fn read_array(&self, array: &Ndarray) -> Result<Vec<Element>> {
+        let shape = array.resolved_shape(None)?;
+        asdf_core::core::decode_inline(&self.document, array, &shape)
     }
 
     /// The underlying document, for callers needing the lower-level model.
@@ -628,6 +693,107 @@ mod tests {
     }
 
     #[test]
+    fn an_inline_array_is_read_from_the_tree() {
+        // Inline data needs no block, so it reads without a file behind it.
+        let bytes = b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n\
+%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n\
+grid: !core/ndarray-1.1.0\n  data: [[1, 2, 3], [4, 5, 6]]\n  datatype: int32\n  shape: [2, 3]\n\
+...\n"
+            .to_vec();
+        let file = AsdfFile::from_bytes(bytes).unwrap();
+        let tree = file.tree().unwrap().unwrap();
+        let array = tree.get("grid").unwrap().as_ndarray().unwrap();
+
+        let elements = tree.read_array(&array).unwrap();
+        assert_eq!(elements, (1..=6).map(Element::Int).collect::<Vec<_>>());
+
+        // Through the file it is an error, since there is no block to read.
+        assert!(file.read_array(&array).is_err());
+
+        // `read_array_at` dispatches for the caller.
+        assert_eq!(file.read_array_at("grid").unwrap().len(), 6);
+    }
+
+    #[test]
+    fn read_array_at_covers_a_block_backed_array() {
+        let values: Vec<i64> = vec![3, 1, 4, 1, 5];
+        let mut builder = AsdfBuilder::new();
+        builder.set_array_i64("data", &values).unwrap();
+        let file = round_trip(&builder);
+
+        assert_eq!(
+            file.read_array_at("data").unwrap(),
+            values.iter().map(|v| Element::Int(*v)).collect::<Vec<_>>()
+        );
+        assert!(file.read_array_at("missing").is_err());
+    }
+
+    #[test]
+    fn an_external_array_is_followed_to_the_neighbouring_file() {
+        let dir = std::env::temp_dir().join(format!("asdf-api-exploded-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The data file, written with our own builder.
+        let values: Vec<i64> = vec![10, 20, 30, 40];
+        let mut holder = AsdfBuilder::new();
+        holder.set_array_i64("data", &values).unwrap();
+        holder.write_to_path(dir.join("split0000.asdf")).unwrap();
+
+        // The referring file, whose array names it.
+        let referring = format!(
+            "#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n\
+%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n\
+data: !core/ndarray-1.1.0\n  source: split0000.asdf\n  datatype: int64\n  \
+byteorder: little\n  shape: [{}]\n...\n",
+            values.len()
+        );
+        let path = dir.join("split.asdf");
+        std::fs::write(&path, referring).unwrap();
+
+        let file = AsdfFile::open(&path).unwrap();
+        assert_eq!(file.block_count(), 0, "the referring file has no blocks of its own");
+        assert_eq!(file.read_array_i64_at("data").unwrap(), values);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_external_array_read_from_memory_is_refused() {
+        // A file held in memory has no directory to resolve the name
+        // against, so following it would mean guessing at the working
+        // directory. The error says so rather than reporting "not found".
+        let bytes = b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n\
+%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n\
+data: !core/ndarray-1.1.0\n  source: elsewhere.asdf\n  datatype: int64\n  shape: [2]\n\
+...\n"
+            .to_vec();
+        let file = AsdfFile::from_bytes(bytes).unwrap();
+        let err = file.read_array_at("data").unwrap_err();
+        assert!(err.message().contains("not read from disk"), "{}", err.message());
+    }
+
+    #[test]
+    fn an_external_array_may_not_escape_its_directory() {
+        let dir = std::env::temp_dir().join(format!("asdf-api-escape-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nosy.asdf");
+        std::fs::write(
+            &path,
+            "#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n\
+%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n\
+data: !core/ndarray-1.1.0\n  source: ../../../etc/passwd\n  datatype: int64\n  shape: [2]\n\
+...\n",
+        )
+        .unwrap();
+
+        let file = AsdfFile::open(&path).unwrap();
+        let err = file.read_array_at("data").unwrap_err();
+        assert!(err.message().contains("climbs out"), "{}", err.message());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn writes_and_reads_scalars() {
         let mut builder = AsdfBuilder::new();
         builder.set_str("name", "Dennis Richie").unwrap();
@@ -830,21 +996,6 @@ mod tests {
         let file = round_trip(&builder);
         assert_eq!(file.format_version().triple(), (1, 0, 0));
         assert_eq!(file.standard_version().unwrap().triple(), (1, 6, 0));
-    }
-
-    #[test]
-    fn reading_an_external_array_is_a_clear_error() {
-        let doc = yaml::parse_document(
-            "d: !<tag:stsci.edu:asdf/core/ndarray-1.1.0>\n  source: other.asdf\n  \
-             shape: [4]\n  datatype: int64\n  byteorder: little\n",
-        )
-        .unwrap();
-        let tree = Tree { document: doc };
-        let array = tree.get("d").unwrap().as_ndarray().unwrap();
-
-        let file = AsdfFile::from_bytes(AsdfBuilder::new().to_bytes().unwrap()).unwrap();
-        let err = file.read_array(&array).unwrap_err();
-        assert!(err.message().contains("another file"), "{}", err.message());
     }
 
     #[test]

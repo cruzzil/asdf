@@ -7,7 +7,7 @@ pub mod pyrepr;
 pub mod time;
 
 pub use datatype::{ByteOrder, Datatype, Field, ScalarType};
-pub use elements::{Element, decode_all, inline_ndarray};
+pub use elements::{Element, decode_all, decode_inline, inline_ndarray};
 pub use ndarray::{Mask, Ndarray, Source};
 pub use pyrepr::{repr_complex, repr_f64};
 pub use time::{Civil, Location, Time, TimeFormat, TimeScale};
