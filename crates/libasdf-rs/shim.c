@@ -138,3 +138,17 @@ _Float16 asdf_ndarray_read_float16_at(
     return out;
 }
 #endif /* ASDF_HAVE_FLOAT16 */
+
+/*
+ * Register the core-schema extensions before main.
+ *
+ * ASDF_REGISTER_EXTENSION gives each of upstream's core extensions a
+ * __attribute__((constructor)), so they are in the registry before any
+ * caller runs. Rust has no equivalent attribute on stable, so the one
+ * constructor lives here and calls into the Rust side.
+ */
+extern void asdf_shim_register_core_extensions(void);
+
+__attribute__((constructor)) static void asdf_shim_register_core(void) {
+    asdf_shim_register_core_extensions();
+}

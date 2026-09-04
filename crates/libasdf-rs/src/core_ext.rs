@@ -91,8 +91,19 @@ macro_rules! declare_extension {
         array_copy_fn: $array_copy_fn:ident,
         deinit_fn: $deinit_fn:ident,
         destroy_fn: $destroy_fn:ident,
+        tags: $tags:expr,
+        ext_build_fn: $ext_build_fn:ident,
+        ext_deserialize_fn: $ext_deserialize_fn:ident,
+        ext_serialize_fn: $ext_serialize_fn:ident,
+        ext_copy_fn: $ext_copy_fn:ident,
+        ext_deinit_fn: $ext_deinit_fn:ident,
     ) => {
-        /// Whether a value carries this extension's tag.
+        /// Whether a value carries one of this extension's tags.
+        ///
+        /// Every schema version the extension declares counts, not just the
+        /// newest: `core/asdf-1.0.0` and `-1.1.0` share a deserializer, and
+        /// `time/time` has five versions behind one. Matching only the
+        /// newest would leave most of the reference corpus unreadable.
         ///
         /// # Safety
         /// `value` must be null or a valid value handle.
@@ -102,7 +113,11 @@ macro_rules! declare_extension {
                 let (Some(doc), Some(node)) = (value_document(value), value_node(value)) else {
                     return false;
                 };
-                doc.tag_of(node).is_some_and(|t| t.full() == $tag)
+                doc.tag_of(node).is_some_and(|found| {
+                    let found = found.full();
+                    let tags: &[&CStr] = $tags;
+                    tags.iter().any(|t| t.to_bytes() == found.as_bytes())
+                })
             })
         }
 
@@ -346,6 +361,97 @@ macro_rules! declare_extension {
                 Box::into_raw(boxed).cast::<*mut $ty>()
             })
         }
+
+        // ---- Registry entry ------------------------------------------
+        //
+        // `ASDF_REGISTER_EXTENSION` puts each core extension in the
+        // process-wide registry, and generic code reaches them only that
+        // way: `asdf_extension_get(file, tag)` followed by
+        // `asdf_value_as_extension_type`. Upstream's own
+        // `test-reference-files` drives every tagged value in the corpus
+        // through exactly that path, so the typed functions above are not
+        // enough on their own.
+
+        /// Deserialize through the registry's generic entry point.
+        ///
+        /// # Safety
+        /// `value` must be a valid value handle and `out` writable.
+        unsafe extern "C" fn $ext_deserialize_fn(
+            value: *mut AsdfValue,
+            _userdata: *const std::ffi::c_void,
+            out: *mut *mut std::ffi::c_void,
+        ) -> AsdfValueErr {
+            let mut typed: *mut $ty = std::ptr::null_mut();
+            let err = unsafe { $value_as_fn(value, &mut typed) };
+            if err == AsdfValueErr::Ok && !out.is_null() {
+                unsafe { *out = typed.cast::<std::ffi::c_void>() };
+            }
+            err
+        }
+
+        /// Serialize through the registry's generic entry point.
+        ///
+        /// # Safety
+        /// `obj` must be a valid object of this extension's type.
+        unsafe extern "C" fn $ext_serialize_fn(
+            file: *mut AsdfFile,
+            obj: *const std::ffi::c_void,
+            _userdata: *const std::ffi::c_void,
+        ) -> *mut AsdfValue {
+            unsafe { $value_of_fn(file, obj.cast::<$ty>()) }
+        }
+
+        /// Deep-copy through the registry's generic entry point.
+        ///
+        /// # Safety
+        /// `src` and `dst` must be valid objects of this extension's type.
+        unsafe extern "C" fn $ext_copy_fn(
+            file: *mut AsdfFile,
+            src: *const std::ffi::c_void,
+            dst: *mut std::ffi::c_void,
+        ) -> bool {
+            unsafe { $copy_into_fn(file, src.cast::<$ty>(), dst.cast::<$ty>()) }
+        }
+
+        /// De-initialise through the registry's generic entry point.
+        ///
+        /// # Safety
+        /// `obj` must be a valid object of this extension's type.
+        unsafe extern "C" fn $ext_deinit_fn(obj: *mut std::ffi::c_void) {
+            unsafe { $deinit_fn(obj.cast::<$ty>()) };
+        }
+
+        /// Build this extension's registry entry.
+        ///
+        /// The parts are leaked deliberately: `ASDF_REGISTER_EXTENSION`
+        /// makes them file-scope `static`s, and the registry stores the
+        /// pointer rather than a copy, so they must outlive every use. Seven
+        /// of these exist for the life of the process.
+        fn $ext_build_fn() -> *mut crate::extension_ffi::asdf_extension_t {
+            use crate::extension_ffi::{asdf_extension_t, asdf_extension_vtab_t, libasdf_software};
+
+            let mut tags: Vec<*const c_char> = $tags.iter().map(|t: &&CStr| t.as_ptr()).collect();
+            tags.push(std::ptr::null());
+            let tags = Box::leak(tags.into_boxed_slice());
+
+            let vtab = Box::leak(Box::new(asdf_extension_vtab_t {
+                serialize: Some($ext_serialize_fn),
+                deserialize: Some($ext_deserialize_fn),
+                copy: Some($ext_copy_fn),
+                deinit: Some($ext_deinit_fn),
+                _reserved: [None; 4],
+            }));
+
+            Box::leak(Box::new(asdf_extension_t {
+                tags: tags.as_ptr(),
+                software: (&raw const libasdf_software)
+                    .cast::<crate::extension_ffi::asdf_software_t>()
+                    .cast_mut(),
+                vtab: std::ptr::from_ref(vtab),
+                size: std::mem::size_of::<$ty>(),
+                userdata: std::ptr::null_mut(),
+            }))
+        }
     };
 }
 
@@ -455,6 +561,13 @@ declare_extension! {
     array_copy_fn: asdf_software_array_copy,
     deinit_fn: asdf_software_deinit,
     destroy_fn: asdf_software_destroy,
+    // The tag list upstream's `ASDF_REGISTER_EXTENSION` declares.
+    tags: &[c"tag:stsci.edu:asdf/core/software-1.0.0"],
+    ext_build_fn: build_software_extension,
+    ext_deserialize_fn: software_ext_deserialize,
+    ext_serialize_fn: software_ext_serialize,
+    ext_copy_fn: software_ext_copy,
+    ext_deinit_fn: software_ext_deinit,
 }
 
 // ---- core/extension_metadata ----------------------------------------
@@ -585,6 +698,13 @@ declare_extension! {
     array_copy_fn: asdf_extension_metadata_array_copy,
     deinit_fn: asdf_extension_metadata_deinit,
     destroy_fn: asdf_extension_metadata_destroy,
+    // The tag list upstream's `ASDF_REGISTER_EXTENSION` declares.
+    tags: &[c"tag:stsci.edu:asdf/core/extension_metadata-1.0.0"],
+    ext_build_fn: build_extension_metadata_extension,
+    ext_deserialize_fn: extension_metadata_ext_deserialize,
+    ext_serialize_fn: extension_metadata_ext_serialize,
+    ext_copy_fn: extension_metadata_ext_copy,
+    ext_deinit_fn: extension_metadata_ext_deinit,
 }
 
 /// Override the `asdf_library` metadata written to a file.
@@ -883,6 +1003,19 @@ declare_extension! {
     array_copy_fn: asdf_time_array_copy,
     deinit_fn: asdf_time_deinit,
     destroy_fn: asdf_time_destroy,
+    // The tag list upstream's `ASDF_REGISTER_EXTENSION` declares.
+    tags: &[
+        c"tag:stsci.edu:asdf/time/time-1.4.0",
+        c"tag:stsci.edu:asdf/time/time-1.3.0",
+        c"tag:stsci.edu:asdf/time/time-1.2.0",
+        c"tag:stsci.edu:asdf/time/time-1.1.0",
+        c"tag:stsci.edu:asdf/time/time-1.0.0",
+    ],
+    ext_build_fn: build_time_extension,
+    ext_deserialize_fn: time_ext_deserialize,
+    ext_serialize_fn: time_ext_serialize,
+    ext_copy_fn: time_ext_copy,
+    ext_deinit_fn: time_ext_deinit,
 }
 
 // ---- core/history_entry ----------------------------------------------
@@ -1069,6 +1202,13 @@ declare_extension! {
     array_copy_fn: asdf_history_entry_array_copy,
     deinit_fn: asdf_history_entry_deinit,
     destroy_fn: asdf_history_entry_destroy,
+    // The tag list upstream's `ASDF_REGISTER_EXTENSION` declares.
+    tags: &[c"tag:stsci.edu:asdf/core/history_entry-1.0.0"],
+    ext_build_fn: build_history_entry_extension,
+    ext_deserialize_fn: history_entry_ext_deserialize,
+    ext_serialize_fn: history_entry_ext_serialize,
+    ext_copy_fn: history_entry_ext_copy,
+    ext_deinit_fn: history_entry_ext_deinit,
 }
 
 /// Append a history entry to the file.
@@ -1500,6 +1640,13 @@ declare_extension! {
     array_copy_fn: asdf_datatype_array_copy,
     deinit_fn: asdf_datatype_deinit,
     destroy_fn: asdf_datatype_destroy,
+    // The tag list upstream's `ASDF_REGISTER_EXTENSION` declares.
+    tags: &[c"tag:stsci.edu:asdf/core/datatype-1.0.0"],
+    ext_build_fn: build_datatype_extension,
+    ext_deserialize_fn: datatype_ext_deserialize,
+    ext_serialize_fn: datatype_ext_serialize,
+    ext_copy_fn: datatype_ext_copy,
+    ext_deinit_fn: datatype_ext_deinit,
 }
 
 // ---- core/asdf (the tree's own metadata) -----------------------------
@@ -1732,6 +1879,16 @@ declare_extension! {
     array_copy_fn: asdf_meta_array_copy,
     deinit_fn: asdf_meta_deinit,
     destroy_fn: asdf_meta_destroy,
+    // The tag list upstream's `ASDF_REGISTER_EXTENSION` declares.
+    tags: &[
+        c"tag:stsci.edu:asdf/core/asdf-1.1.0",
+        c"tag:stsci.edu:asdf/core/asdf-1.0.0",
+    ],
+    ext_build_fn: build_meta_extension,
+    ext_deserialize_fn: meta_ext_deserialize,
+    ext_serialize_fn: meta_ext_serialize,
+    ext_copy_fn: meta_ext_copy,
+    ext_deinit_fn: meta_ext_deinit,
 }
 
 #[cfg(test)]
@@ -1902,4 +2059,49 @@ mod meta_tests {
         unsafe { asdf_datatype_deinit(&mut datatype) };
         unsafe { asdf_datatype_deinit(std::ptr::null_mut()) };
     }
+}
+
+// ---- Registering the core schemas ------------------------------------
+
+/// Put the seven core-schema extensions in the process-wide registry.
+///
+/// `ASDF_REGISTER_EXTENSION` does this with a `__attribute__((constructor))`
+/// per extension, so upstream's are in the registry before `main`. Rust has
+/// no equivalent attribute, so `shim.c` carries one constructor that calls
+/// this — which also keeps the ordering guarantee, since a third-party
+/// extension's own constructor may run before or after ours and the registry
+/// is const-constructed either way.
+///
+/// Idempotent: calling it twice registers nothing new.
+pub fn register_core_extensions() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static REGISTERED: AtomicBool = AtomicBool::new(false);
+    if REGISTERED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let extensions = [
+        build_meta_extension(),
+        build_software_extension(),
+        build_extension_metadata_extension(),
+        build_history_entry_extension(),
+        build_datatype_extension(),
+        build_time_extension(),
+        crate::ndarray_ffi::build_ndarray_extension(),
+    ];
+    for extension in extensions {
+        // SAFETY: each was just leaked, so it outlives the process's use of
+        // the library, which is what registration requires.
+        unsafe { crate::extension_ffi::asdf_extension_register(extension) };
+    }
+}
+
+/// The entry point `shim.c`'s constructor calls.
+///
+/// # Safety
+/// Safe to call at any time, including before `main`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_shim_register_core_extensions() {
+    guard("asdf_shim_register_core_extensions", (), register_core_extensions);
 }
