@@ -24,11 +24,9 @@
 //!     println!("instrument: {name}");
 //! }
 //!
-//! // Arrays are read through their block.
-//! if let Some(array) = tree.get("data").and_then(|v| v.as_ndarray()) {
-//!     let values = file.read_array_f64(&array)?;
-//!     println!("{} elements", values.len());
-//! }
+//! // An array reads back as whatever scalar type its values fit.
+//! let values: Vec<f64> = file.read_array_of("data")?;
+//! println!("{} elements", values.len());
 //! # Ok(())
 //! # }
 //! ```
@@ -45,9 +43,26 @@
 //!
 //! // An array's data goes in a binary block, referenced from the tree.
 //! let squares: Vec<u64> = (0..100).map(|i| i * i).collect();
-//! builder.set_array_u64("powers/squares", &squares)?;
+//! builder.set_array("powers/squares", &squares)?;
 //!
 //! builder.write_to_path("out.asdf")?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Editing
+//!
+//! An existing file is changed through [`AsdfFile::edit`], which carries the
+//! tree and the blocks over so every `source: N` still points where it did.
+//!
+//! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use asdf::{AsdfFile, Compression};
+//!
+//! let file = AsdfFile::open("observation.asdf")?;
+//! let mut edited = file.edit()?;
+//! edited.set_str("meta/observer", "M. Curie")?;
+//! edited.recompress(Compression::Zlib).write_to_path("observation.asdf")?;
 //! # Ok(())
 //! # }
 //! ```
@@ -69,10 +84,104 @@ use asdf_core::{PendingBlock, Reader, Writer};
 pub use asdf_core::ChecksumStatus;
 pub use asdf_core::compression::Compression;
 pub use asdf_core::error::{Error, ErrorCode};
+pub use asdf_core::events::{Event, EventOptions, render_event};
+pub use asdf_core::info::InfoOptions;
 pub use asdf_core::version::Version;
 
 /// The result type used throughout this crate.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// A scalar type an array can be written from and read back as.
+///
+/// Implemented for the numeric types ASDF's `core/ndarray` schema names, so
+/// [`AsdfBuilder::set_array`] and [`AsdfFile::read_array_of`] work for any of
+/// them without a method per type.
+///
+/// Sealed: the set of scalar types is the schema's, not the caller's.
+pub trait ArrayElement: sealed::Sealed + Copy {
+    /// The schema's name for this type.
+    const SCALAR: ScalarType;
+
+    /// This value's bytes in the machine's own order.
+    fn to_bytes(self) -> Vec<u8>;
+
+    /// Read a decoded element as this type, or `None` if it is not one.
+    ///
+    /// Narrowing that would lose the value is a `None` rather than a silent
+    /// truncation: a caller asking for `Vec<i32>` wants the numbers, not
+    /// whatever survives the cast.
+    fn from_element(element: &Element) -> Option<Self>;
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Implement [`ArrayElement`] for an integer type.
+macro_rules! integer_element {
+    ($ty:ty, $scalar:ident) => {
+        impl sealed::Sealed for $ty {}
+        impl ArrayElement for $ty {
+            const SCALAR: ScalarType = ScalarType::$scalar;
+
+            fn to_bytes(self) -> Vec<u8> {
+                self.to_ne_bytes().to_vec()
+            }
+
+            fn from_element(element: &Element) -> Option<Self> {
+                match element {
+                    Element::Int(v) => <$ty>::try_from(*v).ok(),
+                    Element::Uint(v) => <$ty>::try_from(*v).ok(),
+                    Element::Bool(v) => Some(<$ty>::from(*v)),
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+integer_element!(i8, Int8);
+integer_element!(i16, Int16);
+integer_element!(i32, Int32);
+integer_element!(i64, Int64);
+integer_element!(u8, Uint8);
+integer_element!(u16, Uint16);
+integer_element!(u32, Uint32);
+integer_element!(u64, Uint64);
+
+/// Implement [`ArrayElement`] for a float type.
+macro_rules! float_element {
+    ($ty:ty, $scalar:ident) => {
+        impl sealed::Sealed for $ty {}
+        impl ArrayElement for $ty {
+            const SCALAR: ScalarType = ScalarType::$scalar;
+
+            fn to_bytes(self) -> Vec<u8> {
+                self.to_ne_bytes().to_vec()
+            }
+
+            fn from_element(element: &Element) -> Option<Self> {
+                match element {
+                    Element::Float(v) => Some(*v as $ty),
+                    // An integer converts only while it is exact; a
+                    // `u64` beyond a float's precision is not this value.
+                    Element::Int(v) => {
+                        let converted = *v as $ty;
+                        (converted as i64 == *v).then_some(converted)
+                    }
+                    Element::Uint(v) => {
+                        let converted = *v as $ty;
+                        (converted as u64 == *v).then_some(converted)
+                    }
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+float_element!(f32, Float32);
+float_element!(f64, Float64);
 
 /// An ASDF file opened for reading.
 #[derive(Debug)]
@@ -237,6 +346,91 @@ impl AsdfFile {
     pub fn read_array_i64_at(&self, path: &str) -> Result<Vec<i64>> {
         as_i64(self.read_array_at(path)?)
     }
+
+    /// Read an array as a `Vec` of any scalar type.
+    ///
+    /// A value that will not fit the requested type is an error rather than
+    /// a silent truncation: a caller asking for `Vec<i32>` wants the numbers
+    /// the file holds, not whatever survives the cast.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let file = asdf::AsdfFile::open("observation.asdf")?;
+    /// let counts: Vec<u16> = file.read_array_of("data")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn read_array_of<T: ArrayElement>(&self, path: &str) -> Result<Vec<T>> {
+        as_type(self.read_array_at(path)?)
+    }
+
+    /// A builder holding this file's tree and blocks, for editing.
+    ///
+    /// This is how a file is changed and written back: open it, edit the
+    /// builder, write it out. The blocks are carried over decompressed and
+    /// with their block indices intact, so every `source: N` in the tree
+    /// still points where it did.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use asdf::AsdfFile;
+    ///
+    /// let file = AsdfFile::open("observation.asdf")?;
+    /// let mut edited = file.edit()?;
+    /// edited.set_str("meta/observer", "M. Curie")?;
+    /// edited.write_to_path("observation.asdf")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn edit(&self) -> Result<AsdfBuilder> {
+        let document = self.reader.tree()?.unwrap_or_else(Document::new_asdf);
+
+        // Each block's data comes across decompressed and is recompressed on
+        // the way out, so a builder that changes the compression setting
+        // applies it to what was already there as well as to what it adds.
+        let mut blocks = Vec::with_capacity(self.reader.block_count());
+        for index in 0..self.reader.block_count() {
+            let compression = self.reader.block_compression(index)?;
+            let data = self.reader.block_data(index)?.into_owned();
+            blocks.push(PendingBlock::compressed(data, compression));
+        }
+
+        Ok(AsdfBuilder { document, blocks, compression: Compression::None })
+    }
+
+    /// Render the file the way `asdf info` does.
+    ///
+    /// The rendering is what the command-line tool prints, so it is a
+    /// human-readable summary rather than anything to parse.
+    pub fn info(&self, options: InfoOptions) -> Result<String> {
+        asdf_core::info::render(&self.reader, options)
+    }
+
+    /// The low-level event stream: what the file contains, in order.
+    ///
+    /// Rather than building a tree, this reports what is there -- the version
+    /// headers, any comments, the block index, the tree's extent and
+    /// optionally the YAML events inside it, then each block. It is what
+    /// `asdf events` prints, and what a tool inspecting a damaged file wants,
+    /// since a tree that will not parse still yields everything around it.
+    pub fn events(&self, options: EventOptions) -> Vec<Event> {
+        asdf_core::events::events_from(self.reader.bytes(), self.reader.layout(), options)
+    }
+}
+
+/// Convert decoded elements to a requested scalar type.
+fn as_type<T: ArrayElement>(elements: Vec<Element>) -> Result<Vec<T>> {
+    elements
+        .into_iter()
+        .map(|element| {
+            T::from_element(&element).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::InvalidArgument,
+                    format!("{element:?} does not fit {}", T::SCALAR.name()),
+                )
+            })
+        })
+        .collect()
 }
 
 /// Convert decoded elements to `f64`.
@@ -510,8 +704,25 @@ impl AsdfBuilder {
     }
 
     /// Compress every array written from here on.
+    ///
+    /// Blocks already in the builder -- those an [`AsdfFile::edit`] brought
+    /// over -- keep the compression they had. Use
+    /// [`AsdfBuilder::recompress`] to change those too.
     pub fn with_compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Compress every block, including those already here.
+    ///
+    /// This is how a whole file's compression is changed: open it, edit it,
+    /// recompress, write it back. Each block's data is already decompressed
+    /// in the builder, so this only decides how it goes out.
+    pub fn recompress(mut self, compression: Compression) -> Self {
+        self.compression = compression;
+        for block in &mut self.blocks {
+            block.compression = compression;
+        }
         self
     }
 
@@ -568,7 +779,7 @@ impl AsdfBuilder {
     }
 
     /// Write an array into a binary block and reference it from the tree.
-    fn set_array(
+    fn set_array_bytes(
         &mut self,
         path: &str,
         bytes: Vec<u8>,
@@ -606,31 +817,27 @@ impl AsdfBuilder {
         self.insert(path, array)
     }
 
-    /// Write a one-dimensional `u64` array.
-    pub fn set_array_u64(&mut self, path: &str, values: &[u64]) -> Result<()> {
-        let bytes = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
-        self.set_array(path, bytes, &[values.len() as u64], ScalarType::Uint64)
+    /// Write a one-dimensional array of any scalar type.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), asdf::Error> {
+    /// let mut builder = asdf::AsdfBuilder::new();
+    /// builder.set_array("counts", &[1u16, 2, 3])?;
+    /// builder.set_array("ratios", &[0.5f32, 1.5])?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_array<T: ArrayElement>(&mut self, path: &str, values: &[T]) -> Result<()> {
+        self.set_array_shaped(path, values, &[values.len() as u64])
     }
 
-    /// Write a one-dimensional `i64` array.
-    pub fn set_array_i64(&mut self, path: &str, values: &[i64]) -> Result<()> {
-        let bytes = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
-        self.set_array(path, bytes, &[values.len() as u64], ScalarType::Int64)
-    }
-
-    /// Write a one-dimensional `f64` array.
-    pub fn set_array_f64(&mut self, path: &str, values: &[f64]) -> Result<()> {
-        let bytes = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
-        self.set_array(path, bytes, &[values.len() as u64], ScalarType::Float64)
-    }
-
-    /// Write a multi-dimensional `f64` array.
+    /// Write a multi-dimensional array of any scalar type.
     ///
     /// The data is taken in C order, and its length must match the shape.
-    pub fn set_array_f64_shaped(
+    pub fn set_array_shaped<T: ArrayElement>(
         &mut self,
         path: &str,
-        values: &[f64],
+        values: &[T],
         shape: &[u64],
     ) -> Result<()> {
         let expected: u64 = shape.iter().product();
@@ -640,8 +847,35 @@ impl AsdfBuilder {
                 format!("shape {shape:?} needs {expected} values, got {}", values.len()),
             ));
         }
-        let bytes = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
-        self.set_array(path, bytes, shape, ScalarType::Float64)
+        let bytes = values.iter().flat_map(|v| v.to_bytes()).collect();
+        self.set_array_bytes(path, bytes, shape, T::SCALAR)
+    }
+
+    /// Write a one-dimensional `u64` array. See [`AsdfBuilder::set_array`].
+    pub fn set_array_u64(&mut self, path: &str, values: &[u64]) -> Result<()> {
+        self.set_array(path, values)
+    }
+
+    /// Write a one-dimensional `i64` array. See [`AsdfBuilder::set_array`].
+    pub fn set_array_i64(&mut self, path: &str, values: &[i64]) -> Result<()> {
+        self.set_array(path, values)
+    }
+
+    /// Write a one-dimensional `f64` array. See [`AsdfBuilder::set_array`].
+    pub fn set_array_f64(&mut self, path: &str, values: &[f64]) -> Result<()> {
+        self.set_array(path, values)
+    }
+
+    /// Write a multi-dimensional `f64` array.
+    ///
+    /// See [`AsdfBuilder::set_array_shaped`].
+    pub fn set_array_f64_shaped(
+        &mut self,
+        path: &str,
+        values: &[f64],
+        shape: &[u64],
+    ) -> Result<()> {
+        self.set_array_shaped(path, values, shape)
     }
 
     /// Add a raw binary block, returning its index.
@@ -791,6 +1025,159 @@ data: !core/ndarray-1.1.0\n  source: ../../../etc/passwd\n  datatype: int64\n  s
         assert!(err.message().contains("climbs out"), "{}", err.message());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every scalar type round-trips through a file, at its own width.
+    #[test]
+    fn arrays_of_every_scalar_type_round_trip() {
+        macro_rules! round_trip {
+            ($ty:ty, $values:expr) => {{
+                let values: Vec<$ty> = $values;
+                let mut builder = AsdfBuilder::new();
+                builder.set_array("data", &values).unwrap();
+                let file = round_trip(&builder);
+
+                // The block holds exactly the elements, at the type's width.
+                assert_eq!(
+                    file.block_data(0).unwrap().len(),
+                    values.len() * std::mem::size_of::<$ty>(),
+                    "{}",
+                    <$ty as ArrayElement>::SCALAR.name()
+                );
+
+                let back: Vec<$ty> = file.read_array_of("data").unwrap();
+                assert_eq!(back, values, "{}", <$ty as ArrayElement>::SCALAR.name());
+            }};
+        }
+
+        round_trip!(i8, vec![i8::MIN, -1, 0, 1, i8::MAX]);
+        round_trip!(i16, vec![i16::MIN, -1, 0, i16::MAX]);
+        round_trip!(i32, vec![i32::MIN, -1, 0, i32::MAX]);
+        round_trip!(i64, vec![i64::MIN, -1, 0, i64::MAX]);
+        round_trip!(u8, vec![0u8, 1, u8::MAX]);
+        round_trip!(u16, vec![0u16, 1, u16::MAX]);
+        round_trip!(u32, vec![0u32, 1, u32::MAX]);
+        round_trip!(u64, vec![0u64, 1, u64::MAX]);
+        round_trip!(f32, vec![f32::MIN, -0.5, 0.0, 0.5, f32::MAX]);
+        round_trip!(f64, vec![f64::MIN, -0.5, 0.0, 0.5, f64::MAX]);
+    }
+
+    /// A value that will not fit the requested type is an error, not a
+    /// truncation.
+    #[test]
+    fn reading_an_array_as_too_narrow_a_type_is_refused() {
+        let mut builder = AsdfBuilder::new();
+        builder.set_array("data", &[1i64, 70_000, 3]).unwrap();
+        let file = round_trip(&builder);
+
+        assert_eq!(file.read_array_of::<i64>("data").unwrap(), [1, 70_000, 3]);
+        assert!(file.read_array_of::<i16>("data").is_err(), "70000 has no i16");
+        // The ones that do fit are not affected.
+        assert_eq!(file.read_array_of::<i32>("data").unwrap(), [1, 70_000, 3]);
+    }
+
+    #[test]
+    fn a_shaped_array_keeps_its_shape() {
+        let mut builder = AsdfBuilder::new();
+        let values: Vec<u8> = (0..6).collect();
+        builder.set_array_shaped("grid", &values, &[2, 3]).unwrap();
+
+        // The length has to match the shape.
+        assert!(builder.set_array_shaped("bad", &values, &[2, 4]).is_err());
+
+        let file = round_trip(&builder);
+        let tree = file.tree().unwrap().unwrap();
+        let array = tree.get("grid").unwrap().as_ndarray().unwrap();
+        assert_eq!(array.resolved_shape(None).unwrap(), vec![2, 3]);
+        assert_eq!(file.read_array_of::<u8>("grid").unwrap(), values);
+    }
+
+    /// Open, change something, write it back: the workflow the API could not
+    /// do at all before `edit`.
+    #[test]
+    fn a_file_can_be_opened_edited_and_written_back() {
+        let mut original = AsdfBuilder::new();
+        original.set_str("meta/observer", "A. Eddington").unwrap();
+        original.set_array("data", &[1u16, 2, 3]).unwrap();
+        let file = round_trip(&original);
+
+        let mut edited = file.edit().unwrap();
+        edited.set_str("meta/observer", "M. Curie").unwrap();
+        edited.set_i64("meta/exposure", 300).unwrap();
+        let rewritten = round_trip(&edited);
+
+        let tree = rewritten.tree().unwrap().unwrap();
+        assert_eq!(tree.get("meta/observer").and_then(|v| v.as_str()), Some("M. Curie"));
+        assert_eq!(tree.get("meta/exposure").and_then(|v| v.as_i64()), Some(300));
+
+        // The block came across, and the `source: 0` in the tree still
+        // points at it.
+        assert_eq!(rewritten.block_count(), 1);
+        assert_eq!(rewritten.read_array_of::<u16>("data").unwrap(), [1, 2, 3]);
+    }
+
+    /// Editing a file with several blocks keeps their indices aligned.
+    #[test]
+    fn editing_preserves_block_indices() {
+        let mut original = AsdfBuilder::new();
+        original.set_array("first", &[1u8, 2]).unwrap();
+        original.set_array("second", &[10u8, 20, 30]).unwrap();
+        let file = round_trip(&original);
+
+        let mut edited = file.edit().unwrap();
+        // A block added while editing goes after the ones already there.
+        edited.set_array("third", &[7u8]).unwrap();
+        let rewritten = round_trip(&edited);
+
+        assert_eq!(rewritten.block_count(), 3);
+        assert_eq!(rewritten.read_array_of::<u8>("first").unwrap(), [1, 2]);
+        assert_eq!(rewritten.read_array_of::<u8>("second").unwrap(), [10, 20, 30]);
+        assert_eq!(rewritten.read_array_of::<u8>("third").unwrap(), [7]);
+    }
+
+    /// Editing recompresses, so a builder's compression setting applies to
+    /// blocks that were already there.
+    #[test]
+    fn editing_can_change_a_files_compression() {
+        let mut original = AsdfBuilder::new();
+        original.set_array("data", &vec![0u8; 4096]).unwrap();
+        let file = round_trip(&original);
+        assert_eq!(file.block_compression(0).unwrap(), Compression::None);
+
+        // `with_compression` is for new arrays; `recompress` is what
+        // changes the blocks that were already there.
+        assert_eq!(
+            round_trip(&file.edit().unwrap().with_compression(Compression::Zlib))
+                .block_compression(0)
+                .unwrap(),
+            Compression::None,
+            "an existing block keeps its own compression"
+        );
+
+        let edited = file.edit().unwrap().recompress(Compression::Zlib);
+        let rewritten = round_trip(&edited);
+
+        assert_eq!(rewritten.block_compression(0).unwrap(), Compression::Zlib);
+        assert!(rewritten.block_raw(0).unwrap().len() < 4096, "it should have shrunk");
+        assert_eq!(rewritten.read_array_of::<u8>("data").unwrap(), vec![0u8; 4096]);
+    }
+
+    #[test]
+    fn info_and_events_are_reachable_from_rust() {
+        let mut builder = AsdfBuilder::new();
+        builder.set_array("data", &[1u8, 2, 3]).unwrap();
+        let file = round_trip(&builder);
+
+        let rendered = file
+            .info(InfoOptions { print_tree: true, print_blocks: true, verify_checksums: false })
+            .unwrap();
+        assert!(rendered.contains("data"), "{rendered}");
+
+        let stream = file.events(EventOptions::default());
+        let names: Vec<&str> = stream.iter().map(Event::type_name).collect();
+        assert_eq!(names.first(), Some(&"ASDF_ASDF_VERSION_EVENT"));
+        assert_eq!(names.last(), Some(&"ASDF_END_EVENT"));
+        assert!(names.contains(&"ASDF_BLOCK_EVENT"));
     }
 
     #[test]

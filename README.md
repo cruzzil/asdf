@@ -33,14 +33,27 @@ use asdf::{AsdfBuilder, AsdfFile};
 let mut builder = AsdfBuilder::new();
 builder.set_str("name", "Dennis Richie")?;
 let squares: Vec<u64> = (0..100).map(|i| i * i).collect();
-builder.set_array_u64("powers/squares", &squares)?;
+builder.set_array("powers/squares", &squares)?;
 builder.write_to_path("out.asdf")?;
 
 let file = AsdfFile::open("out.asdf")?;
 let tree = file.tree()?.expect("a tree");
-let array = tree.get("powers/squares").unwrap().as_ndarray().unwrap();
-let values = file.read_array_i64(&array)?;
-# Ok::<(), asdf::Error>(())
+println!("{:?}", tree.get("name").and_then(|v| v.as_str()));
+
+// Arrays read back as whatever scalar type they fit.
+let values: Vec<u64> = file.read_array_of("powers/squares")?;
+```
+
+Editing an existing file goes through `edit`, which carries the tree and the
+blocks over so every `source: N` still points where it did:
+
+```rust
+use asdf::{AsdfFile, Compression};
+
+let file = AsdfFile::open("observation.asdf")?;
+let mut edited = file.edit()?;
+edited.set_str("meta/observer", "M. Curie")?;
+edited.recompress(Compression::Zlib).write_to_path("observation.asdf")?;
 ```
 
 ## Using it from C
