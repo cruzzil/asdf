@@ -199,9 +199,24 @@ impl ErrorState {
     }
 }
 
-/// `strerror`, without going through C.
+/// The message C's `strerror` gives for an `errno`.
+///
+/// Rust's own `io::Error` display appends " (os error N)", which is helpful
+/// in a Rust message and wrong here: `asdf_error` hands this to a C caller
+/// that expects exactly what `strerror` would have said, and upstream's own
+/// tests compare it against that string.
+///
+/// `strerror_r` rather than `strerror`, since the message must not be
+/// clobbered by another thread between formatting and use.
 fn strerror(errnum: i32) -> String {
-    std::io::Error::from_raw_os_error(errnum).to_string()
+    let mut buffer = [0 as c_char; 256];
+    // SAFETY: the buffer is ours and its length is passed correctly.
+    let rc = unsafe { libc::strerror_r(errnum, buffer.as_mut_ptr(), buffer.len()) };
+    if rc != 0 {
+        // The XSI form failed; fall back to something truthful.
+        return format!("errno {errnum}");
+    }
+    unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy().into_owned()
 }
 
 /// The format string for an error code, or null.
@@ -321,10 +336,15 @@ unsafe fn state_for(obj: *mut c_void, is_value: c_int) -> Option<&'static ErrorS
     if obj.is_null() {
         return None;
     }
-    // Wired up once file and value handles exist; until then errors are
-    // logged but not recorded against a handle.
-    let _ = is_value;
-    None
+    // A value's errors belong to its file: `ASDF_ERROR_COMMON(value, ..)`
+    // followed by `asdf_error_code(file)` is how upstream's own tests read
+    // them back.
+    let file = if is_value != 0 {
+        crate::file_ffi::value_file(obj.cast::<crate::file_ffi::AsdfValue>())?
+    } else {
+        obj.cast::<crate::file_ffi::AsdfFile>()
+    };
+    crate::file_ffi::error_state(file)
 }
 
 /// Write a log line if it meets the active threshold.

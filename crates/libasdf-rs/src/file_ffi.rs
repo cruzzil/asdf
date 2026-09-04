@@ -86,6 +86,18 @@ impl AsdfValue {
     }
 }
 
+/// A handle's error state, for the `ASDF_ERROR_*` macros.
+///
+/// A value's errors are recorded against the file it came from, which is
+/// what `asdf_error_code(file)` reads after `ASDF_ERROR_COMMON(value, ..)`.
+pub(crate) fn error_state(file: *mut AsdfFile) -> Option<&'static ErrorState> {
+    if file.is_null() {
+        return None;
+    }
+    // The C contract has the file outlive every handle taken from it.
+    Some(&unsafe { &*file }.error)
+}
+
 /// The file a value belongs to.
 pub(crate) fn value_file(value: *mut AsdfValue) -> Option<*mut AsdfFile> {
     if value.is_null() {
@@ -146,6 +158,18 @@ impl AsdfFile {
             error: ErrorState::default(),
             interned: Mutex::new(Vec::new()),
         }
+    }
+
+    /// A file opened for writing, with the empty tree it starts from.
+    ///
+    /// The tree exists from the moment the file is opened rather than
+    /// appearing with the first `asdf_set_*`, because upstream's does:
+    /// `asdf_get_value(asdf_open(NULL), "")` hands back the root, and its
+    /// own tests rely on that.
+    fn new_for_writing() -> Self {
+        let mut file = Self::new(FileMode::Write);
+        file.document_for_write();
+        file
     }
 
     /// The tree, creating an empty one if the file does not have it yet.
@@ -240,7 +264,7 @@ pub unsafe extern "C" fn asdf_open_file_ex(
         // all -- upstream ignores it too, and the destination is named later
         // by `asdf_write_to`.
         if mode == FileMode::Write {
-            return Box::into_raw(Box::new(AsdfFile::new(FileMode::Write)));
+            return Box::into_raw(Box::new(AsdfFile::new_for_writing()));
         }
         if filename.is_null() {
             return std::ptr::null_mut();
@@ -269,7 +293,7 @@ pub unsafe extern "C" fn asdf_open_mem_ex(
         // `asdf_open(NULL)` expands to `asdf_open_mem(NULL, 0)`, which is how
         // the C API asks for a new, empty file to write into.
         if buf.is_null() || size == 0 {
-            return Box::into_raw(Box::new(AsdfFile::new(FileMode::Write)));
+            return Box::into_raw(Box::new(AsdfFile::new_for_writing()));
         }
         // A buffer-backed file is read-*write* upstream: its tree may be
         // edited and written out elsewhere.

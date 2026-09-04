@@ -50,9 +50,9 @@ const SUITES: &[Suite] = &[
     Suite { name: "test-version", expect_pass: 4, total: 4 },
     Suite { name: "test-tag", expect_pass: 1, total: 1 },
     Suite { name: "test-tests", expect_pass: 3, total: 3 },
-    Suite { name: "test-error", expect_pass: 0, total: 3 },
+    Suite { name: "test-error", expect_pass: 3, total: 3 },
     Suite { name: "test-time", expect_pass: 11, total: 17 },
-    Suite { name: "test-core-extensions", expect_pass: 8, total: 16 },
+    Suite { name: "test-core-extensions", expect_pass: 9, total: 16 },
     Suite { name: "test-extension", expect_pass: 7, total: 13 },
     Suite { name: "test-reference-files", expect_pass: 113, total: 113 },
 ];
