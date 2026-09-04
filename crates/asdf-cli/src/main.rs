@@ -66,12 +66,16 @@ Options:
 ";
 
 const VERIFY_USAGE: &str = "\
-Usage: asdf verify-checksums FILENAME
+Usage: asdf verify-checksums [OPTIONS] FILENAME
 
 Verify the MD5 checksum of each binary block in the file.
 
+A mismatch is always reported and sets a failing exit status. Blocks that
+verify are reported only with --verbose.
+
 Options:
-  -h, --help  Show this help
+  -v, --verbose  Report every block, not just the failures
+  -h, --help     Show this help
 ";
 
 fn main() -> ExitCode {
@@ -286,12 +290,14 @@ fn cmd_events(args: &[String]) -> Result<ExitCode, String> {
 
 fn cmd_verify(args: &[String]) -> Result<ExitCode, String> {
     let mut filename = None;
+    let mut verbose = false;
     for arg in args {
         match arg.as_str() {
             "-h" | "--help" => {
                 print!("{VERIFY_USAGE}");
                 return Ok(ExitCode::SUCCESS);
             }
+            "-v" | "--verbose" => verbose = true,
             other if other.starts_with('-') && other.len() > 1 => {
                 return Err(format!("unrecognised option {other:?}"));
             }
@@ -302,20 +308,41 @@ fn cmd_verify(args: &[String]) -> Result<ExitCode, String> {
     let filename = filename.ok_or("verify-checksums requires a FILENAME")?;
     let reader = Reader::open(&filename).map_err(|e| format!("{filename}: {e}"))?;
 
+    let hex = |bytes: &[u8]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
     let mut failed = false;
+    let mut report = String::new();
+
     for index in 0..reader.block_count() {
         let (status, computed) = reader
             .verify_block_checksum(index)
             .map_err(|e| format!("{filename}: block {index}: {e}"))?;
-        let hex: String = computed.iter().map(|b| format!("{b:02x}")).collect();
+        let expected = hex(&reader.block(index).map_err(|e| e.to_string())?.header.checksum);
+
         match status {
-            ChecksumStatus::Valid => println!("block {index}: OK {hex}"),
-            ChecksumStatus::Absent => println!("block {index}: no checksum"),
+            // A block with no checksum has nothing to disagree with, so it
+            // is not a failure; its recorded digest is all zeros and is
+            // printed as such, which is what libasdf does.
+            ChecksumStatus::Valid | ChecksumStatus::Absent => {
+                if verbose {
+                    report.push_str(&format!("Block {index}: OK\n  checksum: {expected}\n"));
+                }
+            }
             ChecksumStatus::Invalid => {
-                println!("block {index}: FAILED (computed {hex})");
                 failed = true;
+                report.push_str(&format!(
+                    "Block {index}: checksum mismatch\n  expected: {expected}\n  computed: {}\n",
+                    hex(&computed)
+                ));
             }
         }
+    }
+
+    // Failures go to stderr unless the caller asked to see everything, so a
+    // quiet run's output is only what went wrong.
+    if verbose {
+        print!("{report}");
+    } else {
+        eprint!("{report}");
     }
     Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }

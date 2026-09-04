@@ -72,6 +72,7 @@ rendered output against upstream's committed fixtures byte for byte:
 |---|---|
 | `info_goldens` | `asdf info` reproduces all 17 of upstream's `.info.txt` captures, ANSI styling included. |
 | `event_goldens` | `asdf events --verbose` reproduces all 4 of upstream's `.events.txt` captures. These pin the event *order*, which is not the file's own — the block index is reported before the tree — and the names libfyaml gives YAML events (`+MAP`, `=VAL`, `-SEQ`), which appear in no header. |
+| `verify_goldens` | `asdf verify-checksums --verbose` reproduces all 3 of upstream's captures, one of which has a deliberately wrong digest — so the failure path is pinned as precisely as the success one. |
 
 ## Upstream's own C test suite
 
