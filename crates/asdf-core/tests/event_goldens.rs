@@ -58,7 +58,7 @@ fn event_output_matches_the_committed_goldens() {
 
         // `test-events.sh` passes `--verbose`, and YAML events are on by
         // default.
-        let stream = match events(&buf, EventOptions { yaml: true }) {
+        let stream = match events(&buf, EventOptions { yaml: true, ..Default::default() }) {
             Ok(stream) => stream,
             Err(e) => {
                 differed.push((*name, format!("could not read: {e}")));

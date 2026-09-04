@@ -35,7 +35,10 @@ pub enum Event {
     /// One YAML event from inside the tree.
     Yaml(YamlEvent),
     /// The YAML tree ends here.
-    TreeEnd { start: usize, end: usize },
+    ///
+    /// `text` carries the tree itself when [`EventOptions::buffer_tree`] was
+    /// asked for, which is what `asdf events --cap-tree` prints.
+    TreeEnd { start: usize, end: usize, text: Option<String> },
     /// A binary block.
     Block(BlockLocation),
     /// The end of the file.
@@ -47,6 +50,8 @@ pub enum Event {
 pub struct EventOptions {
     /// Report the YAML events inside the tree, not just its extent.
     pub yaml: bool,
+    /// Keep the tree's text, so the end-of-tree event can carry it.
+    pub buffer_tree: bool,
 }
 
 /// The event stream for a file already in memory.
@@ -81,7 +86,8 @@ pub fn events_from(buf: &[u8], layout: &Layout, options: EventOptions) -> Vec<Ev
         {
             out.extend(parsed.into_iter().map(Event::Yaml));
         }
-        out.push(Event::TreeEnd { start: tree.start, end: tree.end });
+        let text = options.buffer_tree.then(|| layout.tree_str(buf).map(str::to_string)).flatten();
+        out.push(Event::TreeEnd { start: tree.start, end: tree.end, text });
     }
     for block in &layout.blocks {
         out.push(Event::Block(block.clone()));
@@ -150,8 +156,12 @@ pub fn render_event(event: &Event, verbose: bool) -> String {
         Event::TreeStart { start } => {
             out.push_str(&format!("  Tree start position: {start} (0x{start:x})\n"));
         }
-        Event::TreeEnd { end, .. } => {
+        Event::TreeEnd { end, text, .. } => {
             out.push_str(&format!("  Tree end position: {end} (0x{end:x})\n"));
+            if let Some(text) = text {
+                out.push_str(text);
+                out.push('\n');
+            }
         }
         Event::Yaml(yaml) => {
             out.push_str(&format!("  Type: {}\n", yaml_event_name(yaml)));
@@ -240,10 +250,38 @@ mod tests {
         let quiet = names(EventOptions::default());
         assert!(!quiet.contains(&"ASDF_YAML_EVENT"));
 
-        let loud = names(EventOptions { yaml: true });
+        let loud = names(EventOptions { yaml: true, ..Default::default() });
         // +STR +DOC +MAP =VAL(n) =VAL(1) =VAL(list) +SEQ =VAL(a) -SEQ -MAP
         // -DOC -STR.
         assert_eq!(loud.iter().filter(|n| **n == "ASDF_YAML_EVENT").count(), 12);
+    }
+
+    /// `--cap-tree` keeps the tree's text so the end-of-tree event carries
+    /// it; without it nothing is retained.
+    #[test]
+    fn the_tree_text_is_kept_only_when_asked_for() {
+        let buf = sample();
+
+        let quiet = events(&buf, EventOptions::default()).unwrap();
+        assert!(quiet.iter().any(|e| matches!(e, Event::TreeEnd { text: None, .. })));
+
+        let loud = events(&buf, EventOptions { yaml: false, buffer_tree: true }).unwrap();
+        let text = loud
+            .iter()
+            .find_map(|e| match e {
+                Event::TreeEnd { text, .. } => text.clone(),
+                _ => None,
+            })
+            .expect("the tree text");
+        assert!(text.starts_with("%YAML 1.1"), "{text}");
+        assert!(text.contains("list: [a]"), "{text}");
+
+        // And it is rendered under the end-of-tree event, as libasdf prints
+        // it.
+        let rendered: String =
+            loud.iter().map(|e| render_event(e, true)).collect::<Vec<_>>().join("");
+        let end = rendered.find("Tree end position").expect("the end event");
+        assert!(rendered[end..].contains("list: [a]"));
     }
 
     #[test]
@@ -261,7 +299,7 @@ mod tests {
 
     #[test]
     fn rendering_is_the_header_line_alone_unless_verbose() {
-        let stream = events(&sample(), EventOptions { yaml: true }).unwrap();
+        let stream = events(&sample(), EventOptions { yaml: true, ..Default::default() }).unwrap();
         for event in &stream {
             let terse = render_event(event, false);
             assert_eq!(terse, format!("Event: {}\n", event.type_name()));
@@ -278,7 +316,7 @@ mod tests {
         buf.extend_from_slice(b"a: [1, 2\n");
         buf.extend_from_slice(b"...\n");
 
-        let stream = events(&buf, EventOptions { yaml: true }).unwrap();
+        let stream = events(&buf, EventOptions { yaml: true, ..Default::default() }).unwrap();
         let names: Vec<&str> = stream.iter().map(Event::type_name).collect();
         assert!(names.contains(&"ASDF_TREE_START_EVENT"));
         assert!(names.contains(&"ASDF_TREE_END_EVENT"));

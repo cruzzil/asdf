@@ -45,7 +45,9 @@ Dump the data of an ASDF binary block to a file, or to standard output.
 
 Options:
   -b, --block=INDEX  Index of the block to dump (default 0)
-      --raw          Dump the block's stored bytes without decompressing
+  -n, --ndarray=PATH Tree path of an ndarray whose block to dump
+  -r, --raw          Dump the block's stored bytes without decompressing
+  -c, --chunk-size=N Read and write in chunks of N bytes
   -h, --help         Show this help
 ";
 
@@ -57,9 +59,10 @@ comments, the block index, the tree's extent and the YAML events inside it,
 then each binary block.
 
 Options:
-      --no-yaml   Report the tree's extent but not the YAML events inside it
-  -v, --verbose   Print each event's details, not just its type
-  -h, --help      Show this help
+      --no-yaml    Report the tree's extent but not the YAML events inside it
+      --cap-tree   Capture the YAML tree and print it with the end-of-tree event
+  -v, --verbose    Print each event's details, not just its type
+  -h, --help       Show this help
 ";
 
 const VERIFY_USAGE: &str = "\
@@ -140,8 +143,22 @@ fn cmd_info(args: &[String]) -> Result<ExitCode, String> {
 fn cmd_dd(args: &[String]) -> Result<ExitCode, String> {
     let mut index = 0usize;
     let mut raw = false;
+    let mut ndarray_path: Option<String> = None;
+    let mut chunk_size = 0usize;
     let mut positional = Vec::new();
     let mut iter = args.iter().peekable();
+
+    /// Read an option's argument, from `--opt=value` or the next word.
+    fn value_of<'a>(
+        arg: &'a str,
+        prefix: &str,
+        iter: &mut impl Iterator<Item = &'a String>,
+    ) -> Result<String, String> {
+        match arg.strip_prefix(prefix).and_then(|rest| rest.strip_prefix('=')) {
+            Some(value) => Ok(value.to_string()),
+            None => iter.next().cloned().ok_or(format!("{prefix} requires a value")),
+        }
+    }
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -149,14 +166,17 @@ fn cmd_dd(args: &[String]) -> Result<ExitCode, String> {
                 print!("{DD_USAGE}");
                 return Ok(ExitCode::SUCCESS);
             }
-            "--raw" => raw = true,
-            "-b" | "--block" => {
-                let value = iter.next().ok_or("--block requires an index")?;
+            "-r" | "--raw" => raw = true,
+            other if other == "-b" || other.starts_with("--block") => {
+                let value = value_of(other, "--block", &mut iter)?;
                 index = value.parse().map_err(|_| format!("bad block index {value:?}"))?;
             }
-            other if other.starts_with("--block=") => {
-                let value = &other["--block=".len()..];
-                index = value.parse().map_err(|_| format!("bad block index {value:?}"))?;
+            other if other == "-n" || other.starts_with("--ndarray") => {
+                ndarray_path = Some(value_of(other, "--ndarray", &mut iter)?);
+            }
+            other if other == "-c" || other.starts_with("--chunk-size") => {
+                let value = value_of(other, "--chunk-size", &mut iter)?;
+                chunk_size = value.parse().map_err(|_| format!("bad chunk size {value:?}"))?;
             }
             other if other.starts_with('-') && other.len() > 1 && other != "-" => {
                 return Err(format!("unrecognised option {other:?}"));
@@ -168,6 +188,12 @@ fn cmd_dd(args: &[String]) -> Result<ExitCode, String> {
     let input = positional.first().ok_or("dd requires an INPUT file")?;
     let reader = Reader::open(input).map_err(|e| format!("{input}: {e}"))?;
 
+    // `--ndarray` names the array rather than the block, which is how a
+    // caller who knows the tree but not the block layout asks for its data.
+    if let Some(path) = &ndarray_path {
+        index = block_of_ndarray(&reader, path).map_err(|e| format!("{input}: {e}"))?;
+    }
+
     let data = if raw {
         reader.block_raw(index).map(|d| d.to_vec()).map_err(|e| format!("{input}: {e}"))?
     } else {
@@ -175,13 +201,50 @@ fn cmd_dd(args: &[String]) -> Result<ExitCode, String> {
     };
 
     match positional.get(1).map(String::as_str) {
-        None | Some("-") => {
-            let stdout = std::io::stdout();
-            stdout.lock().write_all(&data).map_err(|e| e.to_string())?;
+        None | Some("-") => write_chunked(&mut std::io::stdout().lock(), &data, chunk_size)?,
+        Some(path) => {
+            let file = std::fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
+            let mut out = std::io::BufWriter::new(file);
+            write_chunked(&mut out, &data, chunk_size)?;
         }
-        Some(path) => std::fs::write(path, &data).map_err(|e| format!("{path}: {e}"))?,
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The block index the ndarray at `path` reads from.
+fn block_of_ndarray(reader: &Reader, path: &str) -> Result<usize, String> {
+    use asdf_core::core::ndarray::{Ndarray, Source};
+
+    let doc = reader
+        .tree()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "the file has no tree to look in".to_string())?;
+    let node = doc.lookup_str(path).ok_or_else(|| format!("no value at {path:?}"))?;
+    let array = Ndarray::parse(&doc, node).map_err(|_| format!("{path:?} is not an ndarray"))?;
+
+    match array.source {
+        Source::Block(index) => Ok(index),
+        Source::LastBlock => {
+            reader.block_count().checked_sub(1).ok_or_else(|| "the file has no blocks".to_string())
+        }
+        Source::External(uri) => Err(format!("{path:?} reads from another file: {uri}")),
+        Source::Inline(_) => Err(format!("{path:?} has inline data, not a block")),
+    }
+}
+
+/// Write `data`, in chunks when a size was asked for.
+///
+/// The chunking is what upstream's `--chunk-size` controls; it changes how
+/// the bytes reach the sink, never which bytes they are.
+fn write_chunked(out: &mut impl Write, data: &[u8], chunk_size: usize) -> Result<(), String> {
+    if chunk_size == 0 {
+        out.write_all(data).map_err(|e| e.to_string())?;
+    } else {
+        for chunk in data.chunks(chunk_size) {
+            out.write_all(chunk).map_err(|e| e.to_string())?;
+        }
+    }
+    out.flush().map_err(|e| e.to_string())
 }
 
 /// `asdf events`: the low-level parser event stream, as upstream prints it.
@@ -190,6 +253,7 @@ fn cmd_events(args: &[String]) -> Result<ExitCode, String> {
     let mut verbose = false;
     // Upstream emits YAML events by default and takes `--no-yaml` to stop.
     let mut yaml = true;
+    let mut buffer_tree = false;
 
     for arg in args {
         match arg.as_str() {
@@ -199,6 +263,7 @@ fn cmd_events(args: &[String]) -> Result<ExitCode, String> {
             }
             "-v" | "--verbose" => verbose = true,
             "--no-yaml" => yaml = false,
+            "--cap-tree" => buffer_tree = true,
             other if other.starts_with('-') && other.len() > 1 => {
                 return Err(format!("unrecognised option {other:?}"));
             }
@@ -208,7 +273,8 @@ fn cmd_events(args: &[String]) -> Result<ExitCode, String> {
 
     let filename = filename.ok_or("events requires a FILENAME")?;
     let buf = std::fs::read(&filename).map_err(|e| format!("{filename}: {e}"))?;
-    let stream = events(&buf, EventOptions { yaml }).map_err(|e| format!("{filename}: {e}"))?;
+    let stream =
+        events(&buf, EventOptions { yaml, buffer_tree }).map_err(|e| format!("{filename}: {e}"))?;
 
     let mut out = String::new();
     for event in &stream {

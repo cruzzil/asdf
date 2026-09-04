@@ -134,7 +134,7 @@ impl AsdfParser {
         self.steps.clear();
         self.finished = false;
 
-        let options = EventOptions { yaml: self.emits_yaml() };
+        let options = EventOptions { yaml: self.emits_yaml(), buffer_tree: self.buffers_tree() };
         match events(&self.buffer, options) {
             Ok(stream) => {
                 self.steps.extend(stream);
@@ -166,15 +166,10 @@ impl AsdfParser {
                 let info = Box::new(asdf_tree_info_t { start, end: 0, buf: std::ptr::null() });
                 Some((AsdfEventType::TreeStart, Payload::Tree { info, text: None }))
             }
-            CoreEvent::TreeEnd { start, end } => {
+            CoreEvent::TreeEnd { start, end, text } => {
                 // `ASDF_PARSER_OPT_BUFFER_TREE` asks for the tree's text to
                 // be kept; without it `buf` stays null, as upstream's does.
-                let text = self
-                    .buffers_tree()
-                    .then(|| {
-                        self.buffer.get(start..end).and_then(|b| CString::new(b.to_vec()).ok())
-                    })
-                    .flatten();
+                let text = text.and_then(|text| CString::new(text).ok());
                 let buf = text.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
                 let info = Box::new(asdf_tree_info_t { start, end, buf });
                 Some((AsdfEventType::TreeEnd, Payload::Tree { info, text }))
