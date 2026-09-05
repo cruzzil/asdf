@@ -1,7 +1,7 @@
 [package]
 name = "libasdf-rs"
 description = "Drop-in C ABI replacement for libasdf, implemented in Rust"
-version.workspace = true
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 # The crate ships the vendored upstream headers under `include/`, which stay on

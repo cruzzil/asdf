@@ -144,6 +144,40 @@ Plus the one pre-`main` constructor, since Rust has no stable equivalent of
 `__attribute__((constructor))`. It is spelled twice: the GCC/Clang attribute,
 and a `.CRT$XCU` section pointer for MSVC.
 
+## Releasing
+
+The five crates have **independent versions** and are released on their own
+cadence: a release bumps only the crates that actually changed. There is no
+shared `version` in `[workspace.package]`.
+
+The one thing that is easy to get wrong: `[workspace.dependencies]` in the
+root manifest carries the version a *published* dependant requires. Raising it
+is itself a change to every crate that depends on it, so those need releases
+too. The dependency order is:
+
+```
+asdf-yaml  <-  asdf-core  <-  asdf-rs, libasdf-rs, asdf-cli
+```
+
+To cut a release:
+
+1. Work out what changed since the last tag, per crate:
+   `git diff --name-only vX.Y.Z..HEAD -- crates/<name>`.
+2. Bump the `version` in each changed crate's own `Cargo.toml`. Additive API
+   is a patch bump while the crates are `0.x`, since cargo treats all of
+   `0.1.*` as compatible.
+3. If `asdf-core` or `asdf-yaml` moved and dependants need the new version,
+   raise it in `[workspace.dependencies]` and bump those dependants too.
+4. Add a CHANGELOG section, newest first, and a link definition at the bottom.
+5. Push, and **wait for CI to be green before tagging or publishing** --
+   publishing cannot be undone, only yanked.
+6. Tag `vX.Y.Z` for the release as a whole and push the tag.
+7. `cargo publish -p <crate>` for each changed crate, in the dependency order
+   above. A dependant cannot be published until the version it requires is
+   actually on crates.io.
+8. Check crates.io rather than trusting cargo's output, and ideally build a
+   throwaway crate against the published version.
+
 ## Re-vendoring the headers
 
 `crates/libasdf-rs/include/` holds upstream's public headers copied verbatim.

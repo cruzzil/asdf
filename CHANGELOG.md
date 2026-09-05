@@ -14,7 +14,12 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- The five crates now carry **independent versions** rather than a shared one,
+  so a release bumps only what changed. No published version moves as a result
+  of this; all five stay at 0.1.2 until something in them changes. The release
+  procedure is in [`docs/DEVELOPING.md`](docs/DEVELOPING.md#releasing).
 
 ## [0.1.2] - 2026-09-05
 

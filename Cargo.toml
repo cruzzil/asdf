@@ -9,7 +9,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+# No shared `version`: each crate carries its own and is released on its
+# own cadence, so a release bumps only what actually changed. Everything
+# else here is genuinely common to all five.
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -17,6 +19,10 @@ repository = "https://github.com/cruzzil/asdf"
 authors = ["The libasdf-rs Developers"]
 
 [workspace.dependencies]
+# `version` is what a *published* dependant requires; `path` is what a
+# local build uses. Raise it when the crate it names has a release that
+# dependants need -- and note that raising it is itself a change to those
+# dependants, so they need a release of their own.
 asdf-core = { path = "crates/asdf-core", version = "0.1.2" }
 asdf-yaml = { path = "crates/asdf-yaml", version = "0.1.2" }
 
