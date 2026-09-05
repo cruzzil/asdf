@@ -1,0 +1,8 @@
+# Keep line endings as committed. Several test suites compare generated output
+# against committed captures byte for byte, so a checkout that rewrites LF to
+# CRLF turns every one of them into a failure.
+* text=auto eol=lf
+
+# The vendored upstream headers are a verbatim copy; leave them exactly as
+# they were vendored so the provenance diff stays meaningful.
+crates/libasdf-rs/include/** -text

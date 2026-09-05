@@ -38,6 +38,15 @@ jobs:
           - { name: windows-x64,   os: windows-latest,   unix: false, exclude_ffi: true }
           - { name: windows-arm64, os: windows-11-arm,   unix: false, exclude_ffi: true, bootstrap: true }
     steps:
+      # Must precede every checkout. Git on Windows rewrites text files to
+      # CRLF as it checks them out, and several suites here compare against
+      # committed captures byte for byte -- upstream's `asdf events` output
+      # among them. Those comparisons are the point, so the fix is to stop
+      # the rewriting rather than to loosen the comparison.
+      - name: Check out with the line endings the files actually have
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@v4
 
       # The windows-11-arm image ships no Rust toolchain.

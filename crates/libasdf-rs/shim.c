@@ -1,6 +1,10 @@
 /*
  * C shim for the parts of libasdf's ABI that Rust cannot express on stable.
  *
+ * None of these carries its public name. Each is `asdf_shim_*` and hidden,
+ * and the public symbol is a naked tail-call trampoline on the Rust side --
+ * see `trampoline.rs` for why a C definition could not keep the name.
+ *
  * Two categories land here, and only these two:
  *
  *   1. Variadic functions. `asdf_file_log`, `asdf_file_error_common` and
@@ -64,7 +68,7 @@ static void shim_format_error(
     asdf_shim_error_set(obj, is_value, code, src_file, lineno, msg);
 }
 
-void asdf_file_error_common(
+ASDF_LOCAL void asdf_shim_file_error_common(
     asdf_file_t *file, asdf_error_code_t code, const char *src_file, int lineno, ...) {
     va_list args;
     va_start(args, lineno);
@@ -72,7 +76,7 @@ void asdf_file_error_common(
     va_end(args);
 }
 
-void asdf_value_error_common(
+ASDF_LOCAL void asdf_shim_value_error_common(
     asdf_value_t *value, asdf_error_code_t code, const char *src_file, int lineno, ...) {
     va_list args;
     va_start(args, lineno);
@@ -80,7 +84,7 @@ void asdf_value_error_common(
     va_end(args);
 }
 
-void asdf_file_log(
+ASDF_LOCAL void asdf_shim_file_log_v(
     const asdf_file_t *file,
     asdf_log_level_t level,
     const char *src_file,
@@ -100,7 +104,7 @@ void asdf_file_log(
 /* ---- _Float16 ------------------------------------------------------ */
 
 #ifdef ASDF_HAVE_FLOAT16
-_Float16 asdf_ndarray_read_float16_at(
+ASDF_LOCAL _Float16 asdf_shim_read_float16_at(
     asdf_ndarray_t *ndarray, const uint64_t *indices, asdf_ndarray_err_t *err) {
     int local_err = 0;
     uint16_t bits = asdf_shim_ndarray_read_float16_bits_at((void *)ndarray, indices, &local_err);
