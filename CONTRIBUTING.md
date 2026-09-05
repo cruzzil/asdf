@@ -23,7 +23,7 @@ often sink a well-meant patch are worth checking against your idea early:
 ## Getting set up
 
 ```console
-$ git clone https://github.com/cruzzil/libasdf-rs
+$ git clone https://github.com/cruzzil/asdf
 $ cd libasdf-rs
 $ cargo test --workspace
 ```

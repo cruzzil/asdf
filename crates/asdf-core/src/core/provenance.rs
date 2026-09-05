@@ -34,7 +34,7 @@ impl Software {
             name: "libasdf-rs".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             author: Some("The libasdf-rs Developers".to_string()),
-            homepage: Some("https://github.com/cruzzil/libasdf-rs".to_string()),
+            homepage: Some("https://github.com/cruzzil/asdf".to_string()),
         }
     }
 

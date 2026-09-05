@@ -76,4 +76,4 @@ is listed here so the first release notes are not written from scratch.
   libasdf does not do either. The reasoning is in
   [`KNOWN-DIVERGENCES.md`](KNOWN-DIVERGENCES.md).
 
-[Unreleased]: https://github.com/cruzzil/libasdf-rs/commits/main
+[Unreleased]: https://github.com/cruzzil/asdf/commits/main

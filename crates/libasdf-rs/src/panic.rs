@@ -45,7 +45,7 @@ fn report(what: &'static str, payload: &Box<dyn std::any::Any + Send>) {
     eprintln!(
         "libasdf-rs: internal error: a panic escaped {what}: {msg}\n\
          libasdf-rs: this is a bug; the call returned a failure value instead.\n\
-         libasdf-rs: please report it at https://github.com/cruzzil/libasdf-rs/issues"
+         libasdf-rs: please report it at https://github.com/cruzzil/asdf/issues"
     );
 }
 
