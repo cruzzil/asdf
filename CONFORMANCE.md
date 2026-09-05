@@ -157,6 +157,25 @@ than a test. Run with `-Zmiri-ignore-leaks`: the extension registry is
 populated before `main` and never torn down, matching upstream's
 constructor-built one.
 
+## Platforms
+
+Linux and macOS, on x86-64 and aarch64, build and test everything.
+
+**Windows builds the four pure-Rust crates only.** The C ABI crate cannot be
+built there, and the obstacle is upstream's public headers rather than
+anything here:
+
+- `asdf/value.h` takes an `ssize_t` in two prototypes. That is a POSIX type,
+  not a C one, and the MSVC CRT does not define it.
+- `asdf/emitter.h` and `asdf/parser.h` assert `X < (1UL << 63)`. `unsigned
+  long` is 32 bits on Windows, so the shift is undefined and the assertion
+  fails.
+
+Both are one-line fixes, neither changes the ABI, and both are reported as
+[libasdf#251](https://github.com/asdf-format/libasdf/issues/251). The vendored
+headers are copied verbatim and are not ours to patch, so until that lands a
+Windows consumer gets the Rust API and not the C one.
+
 ## Not yet wired up
 - **Differential testing against the real libasdf.** Blocked on building the C
   library locally, which needs `libfyaml`, `cmake`, `libbz2`, `liblz4` and

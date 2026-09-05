@@ -263,6 +263,77 @@ pub fn error_log_level(code: i32) -> LogLevel {
         .unwrap_or(LogLevel::Error)
 }
 
+// ---- The non-variadic error entry points -----------------------------
+//
+// These four were in `shim.c` because they sit beside the variadic ones, not
+// because they had to be. Being C cost them their export: rustc gives a
+// cdylib its own symbol list, naming only Rust `#[no_mangle]` symbols, and a
+// C symbol not in that list is localised. On Linux the version script this
+// crate's `build.rs` emits puts them back; Mach-O has no version script, so
+// on macOS they simply were not in the dylib, and a C caller using
+// `ASDF_ERROR_OOM` failed to link. Defining them in Rust makes rustc export
+// them on every platform, which is the fix rather than a workaround.
+
+/// Record an out-of-memory error against a file handle.
+///
+/// # Safety
+/// `file` must be null or a valid file handle; `src_file` a C string or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_file_error_oom(
+    file: *mut crate::file_ffi::AsdfFile,
+    src_file: *const c_char,
+    lineno: c_int,
+) {
+    unsafe { asdf_shim_error_set(file.cast(), 0, OOM_CODE, src_file, lineno, OOM_MESSAGE.as_ptr()) }
+}
+
+/// Record an out-of-memory error against a value handle.
+///
+/// # Safety
+/// As [`asdf_file_error_oom`], for a value handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_value_error_oom(
+    value: *mut crate::file_ffi::AsdfValue,
+    src_file: *const c_char,
+    lineno: c_int,
+) {
+    unsafe {
+        asdf_shim_error_set(value.cast(), 1, OOM_CODE, src_file, lineno, OOM_MESSAGE.as_ptr())
+    }
+}
+
+/// Record an OS-level error against a file handle.
+///
+/// # Safety
+/// As [`asdf_file_error_oom`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_file_error_system(
+    file: *mut crate::file_ffi::AsdfFile,
+    errnum: c_int,
+    src_file: *const c_char,
+    lineno: c_int,
+) {
+    unsafe { asdf_shim_error_set_system(file.cast(), 0, errnum, src_file, lineno) }
+}
+
+/// Record an OS-level error against a value handle.
+///
+/// # Safety
+/// As [`asdf_file_error_oom`], for a value handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_value_error_system(
+    value: *mut crate::file_ffi::AsdfValue,
+    errnum: c_int,
+    src_file: *const c_char,
+    lineno: c_int,
+) {
+    unsafe { asdf_shim_error_set_system(value.cast(), 1, errnum, src_file, lineno) }
+}
+
+/// `ASDF_ERR_OUT_OF_MEMORY`, and the message upstream's shim passed with it.
+const OOM_CODE: c_int = ErrorCode::OutOfMemory as c_int;
+const OOM_MESSAGE: &CStr = c"out of memory";
+
 /// Record an already-formatted error against a handle.
 ///
 /// # Safety

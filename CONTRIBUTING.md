@@ -94,7 +94,6 @@ finds out what was actually wrong.
 ## Licensing
 
 Contributions are accepted under the MIT licence covering the rest of the
-project. Do not add a dependency without checking its licence — the MIT story
-only holds while the whole graph stays permissive, and
-`crates/asdf-core/tests/dependencies.rs` will fail until a new one is added to
-its pinned list deliberately.
+project. Do not add a dependency without checking its licence: the MIT story
+only holds while the whole graph stays permissive, and nothing checks that
+automatically.

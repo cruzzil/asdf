@@ -26,8 +26,17 @@ jobs:
           - { name: linux-arm64,   os: ubuntu-24.04-arm, unix: true }
           - { name: macos-arm64,   os: macos-latest,     unix: true }
           - { name: macos-x64,     os: macos-15-intel,   unix: true }
-          - { name: windows-x64,   os: windows-latest,   unix: false }
-          - { name: windows-arm64, os: windows-11-arm,   unix: false, bootstrap: true }
+          # `--exclude libasdf-rs`: the C ABI crate cannot be built on Windows
+          # yet, and the reason is upstream's headers rather than anything
+          # here. `asdf/value.h` takes an `ssize_t`, which is POSIX and absent
+          # from the MSVC CRT, and `asdf/parser.h` and `asdf/emitter.h` assert
+          # `X < (1UL << 63)`, which is a shift past the width of `unsigned
+          # long` on LLP64. Reported as libasdf#251. The vendored headers are
+          # copied verbatim and are not ours to patch, so until that lands
+          # Windows covers the four pure-Rust crates, which is where a Windows
+          # user of the Rust API lives anyway.
+          - { name: windows-x64,   os: windows-latest,   unix: false, exclude_ffi: true }
+          - { name: windows-arm64, os: windows-11-arm,   unix: false, exclude_ffi: true, bootstrap: true }
     steps:
       - uses: actions/checkout@v4
 
@@ -63,19 +72,20 @@ jobs:
           submodules: true
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets ${{ matrix.exclude_ffi && '--exclude libasdf-rs' || '' }}
 
       - name: Test
         env:
           ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
           LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf
-        run: cargo test --workspace
+        run: cargo test --workspace ${{ matrix.exclude_ffi && '--exclude libasdf-rs' || '' }}
 
       # Real C programs against the vendored headers: symbols, struct layouts,
       # enum discriminants, the `_Generic` macros, and an extension
       # registering before `main`. Run separately so its counts appear in the
       # log rather than buried in the workspace run.
       - name: ABI conformance
+        if: ${{ !matrix.exclude_ffi }}
         env:
           ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
           LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf

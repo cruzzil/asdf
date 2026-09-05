@@ -39,10 +39,6 @@ extern const char *asdf_shim_error_format(int code);
 extern void asdf_shim_error_set(
     void *obj, int is_value, int code, const char *src_file, int lineno, const char *msg);
 
-/* Records an OS-level error. */
-extern void asdf_shim_error_set_system(
-    void *obj, int is_value, int errnum, const char *src_file, int lineno);
-
 /* Emits an already-formatted log message. */
 extern void asdf_shim_log_message(
     const void *file, int level, const char *src_file, int lineno, const char *msg);
@@ -99,24 +95,6 @@ void asdf_file_log(
     va_end(args);
 
     asdf_shim_log_message((const void *)file, (int)level, src_file, lineno, msg);
-}
-
-/* ---- Non-variadic helpers that share the same paths ---------------- */
-
-void asdf_file_error_oom(asdf_file_t *file, const char *src_file, int lineno) {
-    asdf_shim_error_set((void *)file, 0, ASDF_ERR_OUT_OF_MEMORY, src_file, lineno, "out of memory");
-}
-
-void asdf_value_error_oom(asdf_value_t *value, const char *src_file, int lineno) {
-    asdf_shim_error_set((void *)value, 1, ASDF_ERR_OUT_OF_MEMORY, src_file, lineno, "out of memory");
-}
-
-void asdf_file_error_system(asdf_file_t *file, int errnum, const char *src_file, int lineno) {
-    asdf_shim_error_set_system((void *)file, 0, errnum, src_file, lineno);
-}
-
-void asdf_value_error_system(asdf_value_t *value, int errnum, const char *src_file, int lineno) {
-    asdf_shim_error_set_system((void *)value, 1, errnum, src_file, lineno);
 }
 
 /* ---- _Float16 ------------------------------------------------------ */

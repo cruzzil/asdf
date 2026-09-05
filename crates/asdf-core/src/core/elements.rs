@@ -129,7 +129,8 @@ fn decode_one(datatype: &Datatype, bytes: &[u8], array_order: ByteOrder) -> Resu
         }
         ScalarType::Ucs4 => {
             let mut out = String::new();
-            for chunk in raw.chunks_exact(4) {
+            let (quads, _) = raw.as_chunks::<4>();
+            for chunk in quads {
                 let cp = read_uint(chunk, order) as u32;
                 if cp == 0 {
                     break;
