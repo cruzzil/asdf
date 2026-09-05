@@ -153,6 +153,7 @@ which upstream libasdf does not do either.
 | [`CONFORMANCE.md`](CONFORMANCE.md) | The ABI baseline, every gate, and what Miri found. |
 | [`KNOWN-DIVERGENCES.md`](KNOWN-DIVERGENCES.md) | Deliberate differences from upstream libasdf and from Python `asdf`, each with the test that pins it. |
 | [`SYNC_COMMIT.md`](SYNC_COMMIT.md) | The libasdf commit this implementation is synchronised with. |
+| [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | Benchmarks, how they are run, and how this compares to the reference implementation. |
 | [`CHANGELOG.md`](CHANGELOG.md) | What has changed. |
 
 ## Licence
