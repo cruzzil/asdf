@@ -15,13 +15,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
-name = "asdf"
-version = "0.1.0"
-dependencies = [
- "asdf-core",
-]
-
-[[package]]
 name = "asdf-cli"
 version = "0.1.0"
 dependencies = [
@@ -40,6 +33,13 @@ dependencies = [
  "md-5",
  "memmap2",
  "thiserror",
+]
+
+[[package]]
+name = "asdf-rs"
+version = "0.1.0"
+dependencies = [
+ "asdf-core",
 ]
 
 [[package]]

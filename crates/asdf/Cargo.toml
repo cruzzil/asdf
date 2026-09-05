@@ -1,5 +1,5 @@
 [package]
-name = "asdf"
+name = "asdf-rs"
 description = "Idiomatic Rust API for the ASDF (Advanced Scientific Data Format) file format"
 version.workspace = true
 edition.workspace = true
@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+[lib]
+name = "asdf"
+path = "src/lib.rs"
 
 [dependencies]
 asdf-core.workspace = true

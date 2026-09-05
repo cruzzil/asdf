@@ -314,7 +314,7 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// The inverse of [`days_from_civil`].
+/// The inverse of `days_from_civil`.
 fn civil_from_days(days: i64) -> (i32, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -407,7 +407,7 @@ pub fn julian_to_civil(jd: f64) -> Civil {
 /// Uses the same calendar convention as the forward direction -- Julian
 /// before 1582-10-15, Gregorian from then on -- so the two are mutual
 /// inverses across the whole range. Deriving this from
-/// [`days_from_civil`] instead would be proleptic Gregorian and disagree
+/// `days_from_civil` instead would be proleptic Gregorian and disagree
 /// with the forward conversion for any date before the switch.
 pub fn civil_to_julian(civil: &Civil) -> f64 {
     let (mut year, mut month) = (civil.year, civil.month as i32);

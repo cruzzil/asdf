@@ -10,49 +10,57 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # Six platforms, because this crate is more platform-sensitive than most.
+  # Struct layouts involve `struct tm`, `off_t` and `size_t`; the `_Float16`
+  # ABI differs by architecture; the pre-`main` constructor is spelled one way
+  # for GCC/Clang and another for MSVC; and `strerror_r` does not exist on the
+  # Windows CRT. A single-platform green build would prove very little.
   test:
-    name: test (${{ matrix.os }})
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # Struct layouts involve struct tm, off_t and size_t, and the
-        # _Float16 ABI differs by architecture, so a single-platform green
-        # build would prove little.
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - { name: linux-x64,     os: ubuntu-latest,    unix: true }
+          - { name: linux-arm64,   os: ubuntu-24.04-arm, unix: true }
+          - { name: macos-arm64,   os: macos-latest,     unix: true }
+          - { name: macos-x64,     os: macos-15-intel,   unix: true }
+          - { name: windows-x64,   os: windows-latest,   unix: false }
+          - { name: windows-arm64, os: windows-11-arm,   unix: false, bootstrap: true }
     steps:
       - uses: actions/checkout@v4
 
+      # The windows-11-arm image ships no Rust toolchain.
+      - name: Install rustup (Windows ARM64)
+        if: matrix.bootstrap
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe" -OutFile rustup-init.exe
+          .\rustup-init.exe --default-toolchain stable -y
+          "$env:USERPROFILE\.cargo\bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+          "CARGO_HOME=$env:USERPROFILE\.cargo" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !matrix.bootstrap }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The corpora make the difference between a real run and a run that
+      # skips most of its evidence, so they are checked out everywhere. The
+      # libasdf submodules carry munit and STC, which its C suite needs.
       - name: Check out the ASDF Standard
         uses: actions/checkout@v4
         with:
           repository: asdf-format/asdf-standard
           path: corpora/asdf-standard
 
-      # `submodules: true` brings in tests/munit, which upstream's own C
-      # test suite needs; without it the `upstream_suite` gate skips.
       - name: Check out libasdf
         uses: actions/checkout@v4
         with:
           repository: asdf-format/libasdf
           path: corpora/libasdf
           submodules: true
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      # Differential tests compare against the reference implementation.
-      # They skip with a note when it is absent, so this is not required for
-      # the suite to pass -- but it is the strongest evidence available.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install Python asdf
-        run: |
-          python -m venv /tmp/asdf-venv
-          /tmp/asdf-venv/bin/pip install --quiet asdf lz4
 
       - name: Build
         run: cargo build --workspace --all-targets
@@ -63,9 +71,10 @@ jobs:
           LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf
         run: cargo test --workspace
 
-      # The C gates load the shared library, so they build it first. The
-      # tests do that themselves, but running them separately reports their
-      # counts in the log rather than burying them in the workspace run.
+      # Real C programs against the vendored headers: symbols, struct layouts,
+      # enum discriminants, the `_Generic` macros, and an extension
+      # registering before `main`. Run separately so its counts appear in the
+      # log rather than buried in the workspace run.
       - name: ABI conformance
         env:
           ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
@@ -74,25 +83,50 @@ jobs:
           cargo build -p libasdf-rs
           cargo test -p libasdf-rs --test abi -- --nocapture
 
-      # Upstream's own C test suite, compiled against the vendored headers
-      # and linked against our shared library. Its pass count is pinned in
-      # the test, so a regression fails here.
+      # Upstream's own C suite. Unix only: its sources use POSIX headers, so
+      # on Windows the gate would skip rather than fail, and a skipping gate
+      # in the log is worse than an absent one.
       - name: Upstream C test suite
+        if: matrix.unix
         env:
           ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
           LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf
         run: cargo test -p libasdf-rs --test upstream_suite -- --nocapture
 
+  # Differential testing against the reference implementation. Kept off the
+  # platform matrix because it proves something about our semantics, not about
+  # any platform, and one run of it says everything six would.
+  differential:
+    name: differential (vs Python asdf)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: asdf-format/asdf-standard
+          path: corpora/asdf-standard
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python asdf
+        run: pip install --quiet asdf lz4
+      - name: Differential tests
+        env:
+          ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
+        run: cargo test -p asdf-core --test differential -- --nocapture
+
   # Every unsafe block in the workspace is in `libasdf-rs` -- `asdf-core` has
-  # one (the memory map), and the other three crates have none -- so this is
-  # the whole of the code Miri has anything to say about.
+  # one (the memory map) and the other three crates have none -- so this one
+  # job covers all of it.
   #
   # It earns its place: it found two real defects that every other gate
   # passed. An `asdf_ndarray_data` buffer aligned to 1 that C casts to
   # `int32_t *`, and a tree-text pointer invalidated by moving its owning
-  # `CString`. Both are undefined behaviour that glibc's allocator and
-  # LLVM's current choices happen to render harmless, which is exactly the
-  # class of bug a test cannot see.
+  # `CString`. Both are undefined behaviour that glibc's allocator and LLVM's
+  # current choices happen to render harmless -- exactly the class of bug a
+  # test cannot see.
   miri:
     runs-on: ubuntu-latest
     steps:
@@ -103,9 +137,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Miri
         # Leaks are not undefined behaviour, and the extension registry is
-        # deliberately immortal: it is populated before `main` and never torn
-        # down, as upstream's constructor-built registry is. Isolation is off
-        # because the tests open files from the corpus.
+        # deliberately immortal: populated before `main` and never torn down,
+        # as upstream's constructor-built registry is. Isolation is off
+        # because the tests open files.
         env:
           MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-ignore-leaks
         run: cargo +nightly miri test -p libasdf-rs --lib
@@ -122,5 +156,22 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets
+      # Two invocations, because `libasdf-rs`'s library target must be named
+      # `asdf` to produce `libasdf.so`, which collides in rustdoc's output
+      # with the `asdf` library from `asdf-rs`. They get separate trees.
       - name: Documentation
-        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo doc --workspace --exclude libasdf-rs --no-deps
+          cargo doc -p libasdf-rs --no-deps --target-dir target/doc-ffi
+
+  # The declared `rust-version` is a promise to dependants, so it is checked
+  # rather than asserted.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets

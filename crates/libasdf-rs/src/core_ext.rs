@@ -2,7 +2,7 @@
 //!
 //! `ASDF_REGISTER_EXTENSION` generates eleven public functions for each
 //! extension type. C gets them from the macro; here they are produced by
-//! [`declare_extension`], which mirrors the macro's naming and semantics
+//! `declare_extension`, which mirrors the macro's naming and semantics
 //! exactly so a caller cannot tell the difference:
 //!
 //! `asdf_get_<name>`, `asdf_set_<name>`, `asdf_is_<name>`,

@@ -11,6 +11,9 @@ authors.workspace = true
 [[bin]]
 name = "asdf"
 path = "src/main.rs"
+# The binary shares its name with the `asdf` library, so rustdoc would
+# write both to `doc/asdf/`. A `main.rs` has no public API to publish.
+doc = false
 
 [dependencies]
 asdf-core.workspace = true

@@ -19,7 +19,7 @@ authors = ["The libasdf-rs Developers"]
 [workspace.dependencies]
 asdf-core = { path = "crates/asdf-core", version = "0.1.0" }
 asdf-yaml = { path = "crates/asdf-yaml", version = "0.1.0" }
-asdf = { path = "crates/asdf", version = "0.1.0" }
+asdf-rs = { path = "crates/asdf", version = "0.1.0" }
 
 saphyr-parser = "0.0.12"
 thiserror = "2"

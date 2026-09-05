@@ -149,6 +149,24 @@ _Float16 asdf_ndarray_read_float16_at(
  */
 extern void asdf_shim_register_core_extensions(void);
 
-__attribute__((constructor)) static void asdf_shim_register_core(void) {
+static void asdf_shim_register_core(void) {
     asdf_shim_register_core_extensions();
 }
+
+#if defined(_MSC_VER)
+/*
+ * MSVC has no __attribute__((constructor)). Its equivalent is a function
+ * pointer placed in the .CRT$XCU section, which the CRT walks before main.
+ * The pragma is required: without it the section is not marked as read-only
+ * initialised data and the linker discards it.
+ */
+#pragma section(".CRT$XCU", read)
+__declspec(allocate(".CRT$XCU")) static void (*asdf_shim_register_core_ptr)(void) =
+    asdf_shim_register_core;
+/* Nothing references the pointer, so keep the linker from dropping it. */
+#pragma comment(linker, "/include:asdf_shim_register_core_ptr")
+#else
+__attribute__((constructor)) static void asdf_shim_register_core_ctor(void) {
+    asdf_shim_register_core();
+}
+#endif

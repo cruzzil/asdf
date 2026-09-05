@@ -212,6 +212,7 @@ impl ErrorState {
 ///
 /// `strerror_r` rather than `strerror`, since the message must not be
 /// clobbered by another thread between formatting and use.
+#[cfg(unix)]
 fn strerror(errnum: i32) -> String {
     let mut buffer = [0 as c_char; 256];
     // SAFETY: the buffer is ours and its length is passed correctly.
@@ -220,7 +221,20 @@ fn strerror(errnum: i32) -> String {
         // The XSI form failed; fall back to something truthful.
         return format!("errno {errnum}");
     }
-    unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy().into_owned()
+    unsafe { crate::ffi::c_string_lossy(buffer.as_ptr()) }.unwrap_or_default()
+}
+
+/// The Windows CRT has no `strerror_r`; its thread-safe spelling is
+/// `strerror_s`, which the `libc` crate does not bind either. `strerror`
+/// itself is what remains, and on the Windows CRT it returns a pointer into
+/// per-thread storage rather than a shared static, so the race the POSIX
+/// branch avoids does not arise here.
+#[cfg(not(unix))]
+fn strerror(errnum: i32) -> String {
+    // SAFETY: `strerror` never returns null, and on this CRT the storage is
+    // per-thread, so it is stable until this thread calls `strerror` again.
+    unsafe { crate::ffi::c_string_lossy(libc::strerror(errnum)) }
+        .unwrap_or_else(|| format!("errno {errnum}"))
 }
 
 /// The format string for an error code, or null.

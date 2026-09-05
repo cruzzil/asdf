@@ -19,13 +19,18 @@ Telescope.
 | `asdf-core` | The engine. File layout, blocks, compression, ndarray, rendering. All the behaviour lives here. |
 | `asdf-yaml` | The ASDF YAML layer: document model, parser and emitter. |
 | `libasdf-rs` | The C ABI. Builds `libasdf.so`; every entry point is panic-guarded. |
-| `asdf` | The idiomatic Rust API. |
+| `asdf-rs` | The idiomatic Rust API. Published as `asdf-rs`; the library is `asdf`, so you write `use asdf::...`. |
 | `asdf-cli` | The `asdf` command-line tool. |
 
-`libasdf-rs` and `asdf` are both thin projections of `asdf-core`, so the two
+`libasdf-rs` and `asdf-rs` are both thin projections of `asdf-core`, so the two
 public faces cannot drift apart in semantics.
 
 ## Using it from Rust
+
+```toml
+[dependencies]
+asdf-rs = "0.1"
+```
 
 ```rust
 use asdf::{AsdfBuilder, AsdfFile};
@@ -139,8 +144,16 @@ Feature-complete against upstream libasdf, and past it in a few places.
 Not implemented: schema validation against the ASDF Standard's JSON schemas,
 which upstream libasdf does not do either.
 
-See `CONFORMANCE.md` for the ABI baseline and the gates, and
-`KNOWN-DIVERGENCES.md` for the deliberate differences from upstream.
+## Documentation
+
+| | |
+|---|---|
+| [`docs/DEVELOPING.md`](docs/DEVELOPING.md) | How the crates fit together, the gates, and the conventions of the C ABI layer. |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | What a change needs before it can land. |
+| [`CONFORMANCE.md`](CONFORMANCE.md) | The ABI baseline, every gate, and what Miri found. |
+| [`KNOWN-DIVERGENCES.md`](KNOWN-DIVERGENCES.md) | Deliberate differences from upstream libasdf and from Python `asdf`, each with the test that pins it. |
+| [`SYNC_COMMIT.md`](SYNC_COMMIT.md) | The libasdf commit this implementation is synchronised with. |
+| [`CHANGELOG.md`](CHANGELOG.md) | What has changed. |
 
 ## Licence
 
