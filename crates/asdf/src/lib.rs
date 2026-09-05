@@ -73,16 +73,21 @@
 use std::borrow::Cow;
 use std::path::Path;
 
-use asdf_core::core::datatype::{ByteOrder, Datatype, ScalarType};
-use asdf_core::core::elements::{Element, decode_all};
-use asdf_core::core::ndarray::{Ndarray, Source};
+use asdf_core::core::elements::decode_all;
 use asdf_core::yaml::{
     self, CompareOptions, Document, NodeData, NodeId, Resolved, ScalarStyle, Schema, Tag,
 };
 use asdf_core::{PendingBlock, Reader, Writer};
 
 pub use asdf_core::ChecksumStatus;
+// These name types that already appear in this crate's public signatures --
+// `as_ndarray` returns an `Ndarray`, `native_byte_order` a `ByteOrder`,
+// `scalar_datatype` a `Datatype` -- so without re-exporting them a caller
+// could not name what they were given without depending on `asdf-core`.
 pub use asdf_core::compression::Compression;
+pub use asdf_core::core::datatype::{ByteOrder, Datatype, Field, ScalarType};
+pub use asdf_core::core::elements::Element;
+pub use asdf_core::core::ndarray::{Mask, Ndarray, Source};
 pub use asdf_core::core::provenance::{ExtensionMetadata, History, HistoryEntry, Meta, Software};
 pub use asdf_core::core::time::{Civil, Location, Time, TimeFormat, TimeScale};
 pub use asdf_core::error::{Error, ErrorCode};
@@ -113,6 +118,27 @@ pub trait ArrayElement: sealed::Sealed + Copy {
     /// truncation: a caller asking for `Vec<i32>` wants the numbers, not
     /// whatever survives the cast.
     fn from_element(element: &Element) -> Option<Self>;
+
+    /// Decode a whole buffer that is already this exact type, in `order`.
+    ///
+    /// The general path decodes to [`Element`] first, which costs an
+    /// intermediate allocation several times the size of the data and a
+    /// branch per element. When the stored type already *is* `Self` and the
+    /// array is contiguous, none of that is needed -- and that is the common
+    /// case, because a writer stores what it had. On a little-endian host
+    /// reading little-endian data this is a load per element and vectorises
+    /// into roughly a `memcpy`.
+    #[doc(hidden)]
+    fn decode_native(bytes: &[u8], order: ByteOrder) -> Vec<Self>;
+
+    /// Encode a whole slice of this type into the machine's own order.
+    ///
+    /// The counterpart to [`decode_native`](ArrayElement::decode_native), and
+    /// it exists for the same reason: doing this an element at a time meant
+    /// `to_bytes` returning a fresh `Vec` per element, so writing a
+    /// four-million-element array made four million heap allocations.
+    #[doc(hidden)]
+    fn encode_native(values: &[Self]) -> Vec<u8>;
 }
 
 mod sealed {
@@ -137,6 +163,22 @@ macro_rules! integer_element {
                     Element::Bool(v) => Some(<$ty>::from(*v)),
                     _ => None,
                 }
+            }
+
+            fn decode_native(bytes: &[u8], order: ByteOrder) -> Vec<Self> {
+                let (chunks, _) = bytes.as_chunks::<{ size_of::<$ty>() }>();
+                match order {
+                    ByteOrder::Big => chunks.iter().map(|c| <$ty>::from_be_bytes(*c)).collect(),
+                    _ => chunks.iter().map(|c| <$ty>::from_le_bytes(*c)).collect(),
+                }
+            }
+
+            fn encode_native(values: &[Self]) -> Vec<u8> {
+                let mut out = Vec::with_capacity(values.len() * size_of::<$ty>());
+                for value in values {
+                    out.extend_from_slice(&value.to_ne_bytes());
+                }
+                out
             }
         }
     };
@@ -177,6 +219,22 @@ macro_rules! float_element {
                     }
                     _ => None,
                 }
+            }
+
+            fn decode_native(bytes: &[u8], order: ByteOrder) -> Vec<Self> {
+                let (chunks, _) = bytes.as_chunks::<{ size_of::<$ty>() }>();
+                match order {
+                    ByteOrder::Big => chunks.iter().map(|c| <$ty>::from_be_bytes(*c)).collect(),
+                    _ => chunks.iter().map(|c| <$ty>::from_le_bytes(*c)).collect(),
+                }
+            }
+
+            fn encode_native(values: &[Self]) -> Vec<u8> {
+                let mut out = Vec::with_capacity(values.len() * size_of::<$ty>());
+                for value in values {
+                    out.extend_from_slice(&value.to_ne_bytes());
+                }
+                out
             }
         }
     };
@@ -363,7 +421,45 @@ impl AsdfFile {
     /// # }
     /// ```
     pub fn read_array_of<T: ArrayElement>(&self, path: &str) -> Result<Vec<T>> {
-        as_type(self.read_array_at(path)?)
+        let tree = self.tree()?.ok_or_else(|| {
+            Error::new(ErrorCode::InvalidArgument, "this file has no tree to look in")
+        })?;
+        let value = tree.get(path).ok_or_else(|| {
+            Error::new(ErrorCode::InvalidArgument, format!("no value at {path:?}"))
+        })?;
+        let array = value.as_ndarray().ok_or_else(|| {
+            Error::new(ErrorCode::InvalidArgument, format!("the value at {path:?} is not an array"))
+        })?;
+
+        // Take the bulk path when the stored elements already are `T` laid
+        // out end to end. Anything else -- a different width, a compound
+        // type, custom strides, an offset into the block -- goes the general
+        // way, which handles every case and is what correctness is judged on.
+        if let Some(bytes) = self.contiguous_bytes_of(&array)?
+            && bulk_readable::<T>(&array)
+        {
+            return Ok(T::decode_native(&bytes, element_order(&array)));
+        }
+
+        match array.source {
+            Source::Inline(_) => as_type(tree.read_array(&array)?),
+            _ => as_type(self.read_array(&array)?),
+        }
+    }
+
+    /// The array's bytes, when they are one contiguous run this file owns.
+    ///
+    /// `None` for an inline array, whose elements live in the tree rather
+    /// than in a block.
+    fn contiguous_bytes_of(&self, array: &Ndarray) -> Result<Option<Cow<'_, [u8]>>> {
+        match &array.source {
+            Source::Inline(_) => Ok(None),
+            Source::External(uri) => Ok(Some(Cow::Owned(self.reader.external_block(uri)?))),
+            _ => {
+                let index = self.block_for(array)?;
+                Ok(Some(self.block_data(index)?))
+            }
+        }
     }
 
     /// A builder holding this file's tree and blocks, for editing.
@@ -433,6 +529,36 @@ fn as_type<T: ArrayElement>(elements: Vec<Element>) -> Result<Vec<T>> {
             })
         })
         .collect()
+}
+
+/// The byte order an array's elements are stored in.
+///
+/// The datatype's own order wins where it sets one, as the schema says; the
+/// array's order is the default for its elements.
+fn element_order(array: &Ndarray) -> ByteOrder {
+    match array.datatype.byteorder {
+        ByteOrder::Big | ByteOrder::Little => array.datatype.byteorder,
+        _ => array.byteorder,
+    }
+}
+
+/// Whether `array` is a plain contiguous run of `T`.
+///
+/// Every condition here is one the bulk path cannot honour:
+///
+/// - a different scalar type, or a compound one, needs real conversion;
+/// - a `size` disagreeing with `T` means the stored width is not `T`'s;
+/// - explicit strides mean the elements are not end to end;
+/// - a non-zero offset means the run does not start where the block does;
+/// - a mask marks missing values, which a raw copy would silently keep.
+fn bulk_readable<T: ArrayElement>(array: &Ndarray) -> bool {
+    array.datatype.scalar == T::SCALAR
+        && array.datatype.size == size_of::<T>() as u64
+        && array.datatype.fields.is_empty()
+        && array.datatype.shape.is_empty()
+        && array.strides.is_none()
+        && array.offset == 0
+        && array.mask.is_none()
 }
 
 /// Convert decoded elements to `f64`.
@@ -885,7 +1011,7 @@ impl AsdfBuilder {
                 format!("shape {shape:?} needs {expected} values, got {}", values.len()),
             ));
         }
-        let bytes = values.iter().flat_map(|v| v.to_bytes()).collect();
+        let bytes = T::encode_native(values);
         self.set_array_bytes(path, bytes, shape, T::SCALAR)
     }
 

@@ -38,6 +38,25 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+### Fixed
+
+- **`read_array_of` was twelve times slower than the reference
+  implementation** on large arrays: 153 MB/s against Python asdf's 1806 MB/s.
+  It decoded every element into an `Element` enum and then converted that,
+  costing three passes and an intermediate several times the size of the data,
+  to deliver bytes already laid out correctly in the mapping. It now takes a
+  bulk path when the stored type already is the requested one, and falls back
+  for anything else. See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+- `set_array` allocated a `Vec<u8>` per element while encoding.
+
+### Added
+
+- Benchmarks, in `crates/asdf/benches/throughput.rs`.
+- `asdf-rs` re-exports `ByteOrder`, `Datatype`, `Element`, `Field`, `Mask`,
+  `Ndarray`, `ScalarType` and `Source`. They already appeared in its public
+  signatures, so a caller could not name what they were given without also
+  depending on `asdf-core`.
+
 Nothing released yet. Everything below is the initial development series and
 is listed here so the first release notes are not written from scratch.
 
