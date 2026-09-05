@@ -12,31 +12,11 @@ Two version numbers matter here and they are not the same thing:
   [`SYNC_COMMIT.md`](SYNC_COMMIT.md). A change to that is an ABI event and is
   always called out.
 
-## [0.1.1] - 2026-09-05
-
-### Fixed
-
-- **`libasdf-rs` could not be linked on Linux aarch64.** The version script
-  the build emitted to export the C shim's symbols is a second one, and GNU ld
-  rejects that: "anonymous version tag cannot be combined with other version
-  tags". The public names are now naked tail-call trampolines in Rust, so
-  rustc exports them and no version script is needed.
-- **Four exported symbols were missing on macOS** -- `asdf_file_log`,
-  `asdf_file_error_common`, `asdf_value_error_common` and
-  `asdf_ndarray_read_float16_at`. Mach-O has no version script, so the
-  workaround above never applied there and a C caller using `ASDF_LOG` or
-  `ASDF_ERROR` failed to link. Same fix.
-- Eight symbols carried an `@@LIBASDF` version tag. Upstream's are
-  unversioned, so a program built against one library and run against the
-  other met a version mismatch that need not exist.
-- `strerror_r` is POSIX and absent from the Windows CRT; it is now behind
-  `cfg(unix)`.
-- The pre-`main` extension-registry constructor was spelled only for
-  GCC/Clang; MSVC's `.CRT$XCU` form is now there too.
-- `asdf-core` reads a file whole rather than mapping it under `cfg(miri)`, so
-  dependants can run Miri.
-
 ## [Unreleased]
+
+Nothing yet.
+
+## [0.1.2] - 2026-09-05
 
 ### Fixed
 
@@ -119,4 +99,32 @@ is listed here so the first release notes are not written from scratch.
   libasdf does not do either. The reasoning is in
   [`KNOWN-DIVERGENCES.md`](KNOWN-DIVERGENCES.md).
 
-[Unreleased]: https://github.com/cruzzil/asdf/commits/main
+
+## [0.1.1] - 2026-09-05
+
+### Fixed
+
+- **`libasdf-rs` could not be linked on Linux aarch64.** The version script
+  the build emitted to export the C shim's symbols is a second one, and GNU ld
+  rejects that: "anonymous version tag cannot be combined with other version
+  tags". The public names are now naked tail-call trampolines in Rust, so
+  rustc exports them and no version script is needed.
+- **Four exported symbols were missing on macOS** -- `asdf_file_log`,
+  `asdf_file_error_common`, `asdf_value_error_common` and
+  `asdf_ndarray_read_float16_at`. Mach-O has no version script, so the
+  workaround above never applied there and a C caller using `ASDF_LOG` or
+  `ASDF_ERROR` failed to link. Same fix.
+- Eight symbols carried an `@@LIBASDF` version tag. Upstream's are
+  unversioned, so a program built against one library and run against the
+  other met a version mismatch that need not exist.
+- `strerror_r` is POSIX and absent from the Windows CRT; it is now behind
+  `cfg(unix)`.
+- The pre-`main` extension-registry constructor was spelled only for
+  GCC/Clang; MSVC's `.CRT$XCU` form is now there too.
+- `asdf-core` reads a file whole rather than mapping it under `cfg(miri)`, so
+  dependants can run Miri.
+
+[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/cruzzil/asdf/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/cruzzil/asdf/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/cruzzil/asdf/releases/tag/v0.1.0

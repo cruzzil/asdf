@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -17,8 +17,8 @@ repository = "https://github.com/cruzzil/asdf"
 authors = ["The libasdf-rs Developers"]
 
 [workspace.dependencies]
-asdf-core = { path = "crates/asdf-core", version = "0.1.1" }
-asdf-yaml = { path = "crates/asdf-yaml", version = "0.1.1" }
+asdf-core = { path = "crates/asdf-core", version = "0.1.2" }
+asdf-yaml = { path = "crates/asdf-yaml", version = "0.1.2" }
 
 saphyr-parser = "0.0.12"
 thiserror = "2"
