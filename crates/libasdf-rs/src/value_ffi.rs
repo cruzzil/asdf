@@ -20,7 +20,8 @@
 
 use crate::ffi::write_out;
 use crate::file_ffi::file_document_mut;
-use std::ffi::{CStr, CString, c_char, c_int};
+use alloc::ffi::CString;
+use core::ffi::{CStr, c_char, c_int};
 
 use asdf_core::yaml::{NodeData, NodeId, Resolved, ScalarStyle, Schema, resolve};
 
@@ -71,9 +72,9 @@ pub(crate) fn make_value(file: *mut AsdfFile, node: NodeId) -> *mut AsdfValue {
 /// with `asdf_value_destroy`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_copy(value: *mut AsdfValue) -> *mut AsdfValue {
-    guard("asdf_value_copy", std::ptr::null_mut(), || {
+    guard("asdf_value_copy", core::ptr::null_mut(), || {
         let (Some(file), Some(node)) = (value_file(value), value_node(value)) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         make_value(file, node)
     })
@@ -85,8 +86,8 @@ pub unsafe extern "C" fn asdf_value_copy(value: *mut AsdfValue) -> *mut AsdfValu
 /// `value` must be null or a valid value handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_file(value: *mut AsdfValue) -> *mut AsdfFile {
-    guard("asdf_value_file", std::ptr::null_mut(), || {
-        value_file(value).unwrap_or(std::ptr::null_mut())
+    guard("asdf_value_file", core::ptr::null_mut(), || {
+        value_file(value).unwrap_or(core::ptr::null_mut())
     })
 }
 
@@ -229,19 +230,19 @@ pub unsafe extern "C" fn asdf_mapping_get(
     mapping: *mut AsdfMapping,
     key: *const c_char,
 ) -> *mut AsdfValue {
-    guard("asdf_mapping_get", std::ptr::null_mut(), || {
+    guard("asdf_mapping_get", core::ptr::null_mut(), || {
         if key.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let (Some(doc), Some(node), Some(file)) =
             (value_document(mapping), value_node(mapping), value_file(mapping))
         else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         let key = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
         match doc.mapping_get(node, &key) {
             Some(found) => make_value(file, found),
-            None => std::ptr::null_mut(),
+            None => core::ptr::null_mut(),
         }
     })
 }
@@ -271,10 +272,10 @@ fn mapping_iter_init(mapping: *mut AsdfMapping, reverse: bool) -> *mut asdf_mapp
     let (Some(doc), Some(node), Some(file)) =
         (value_document(mapping), value_node(mapping), value_file(mapping))
     else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
     let Some(entries) = doc.mapping_entries(node) else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
 
     let mut collected: Vec<(Option<String>, NodeId)> = entries
@@ -291,12 +292,12 @@ fn mapping_iter_init(mapping: *mut AsdfMapping, reverse: bool) -> *mut asdf_mapp
     }
 
     let iter = Box::new(MappingIter {
-        public: asdf_mapping_iter_t { key: std::ptr::null(), value: std::ptr::null_mut() },
+        public: asdf_mapping_iter_t { key: core::ptr::null(), value: core::ptr::null_mut() },
         file,
         entries: collected,
         position: 0,
         current_key: None,
-        current_value: std::ptr::null_mut(),
+        current_value: core::ptr::null_mut(),
     });
     // The public head is the first field, so the pointers are interchangeable.
     Box::into_raw(iter).cast::<asdf_mapping_iter_t>()
@@ -310,7 +311,7 @@ fn mapping_iter_init(mapping: *mut AsdfMapping, reverse: bool) -> *mut asdf_mapp
 pub unsafe extern "C" fn asdf_mapping_iter_init(
     mapping: *mut AsdfMapping,
 ) -> *mut asdf_mapping_iter_t {
-    guard("asdf_mapping_iter_init", std::ptr::null_mut(), || mapping_iter_init(mapping, false))
+    guard("asdf_mapping_iter_init", core::ptr::null_mut(), || mapping_iter_init(mapping, false))
 }
 
 /// Start iterating a mapping in reverse.
@@ -321,7 +322,7 @@ pub unsafe extern "C" fn asdf_mapping_iter_init(
 pub unsafe extern "C" fn asdf_mapping_reverse_iter_init(
     mapping: *mut AsdfMapping,
 ) -> *mut asdf_mapping_iter_t {
-    guard("asdf_mapping_reverse_iter_init", std::ptr::null_mut(), || {
+    guard("asdf_mapping_reverse_iter_init", core::ptr::null_mut(), || {
         mapping_iter_init(mapping, true)
     })
 }
@@ -350,12 +351,12 @@ pub unsafe extern "C" fn asdf_mapping_iter_next(iter_ptr: *mut *mut asdf_mapping
         // Each step releases the handle the previous step handed out.
         if !iter.current_value.is_null() {
             drop(unsafe { Box::from_raw(iter.current_value) });
-            iter.current_value = std::ptr::null_mut();
+            iter.current_value = core::ptr::null_mut();
         }
 
         if iter.position >= iter.entries.len() {
             mapping_iter_destroy(raw);
-            unsafe { write_out(iter_ptr, std::ptr::null_mut()) };
+            unsafe { write_out(iter_ptr, core::ptr::null_mut()) };
             return false;
         }
 
@@ -363,7 +364,7 @@ pub unsafe extern "C" fn asdf_mapping_iter_next(iter_ptr: *mut *mut asdf_mapping
         iter.position += 1;
 
         iter.current_key = key.and_then(|k| CString::new(k).ok());
-        iter.public.key = iter.current_key.as_ref().map_or(std::ptr::null(), |k| k.as_ptr());
+        iter.public.key = iter.current_key.as_ref().map_or(core::ptr::null(), |k| k.as_ptr());
 
         iter.current_value = make_value(iter.file, node);
         iter.public.value = iter.current_value.cast();
@@ -392,7 +393,7 @@ pub(crate) fn mapping_iter_destroy(iter: *mut asdf_mapping_iter_t) {
     let mut boxed = unsafe { Box::from_raw(iter.cast::<MappingIter>()) };
     if !boxed.current_value.is_null() {
         drop(unsafe { Box::from_raw(boxed.current_value) });
-        boxed.current_value = std::ptr::null_mut();
+        boxed.current_value = core::ptr::null_mut();
     }
 }
 
@@ -462,15 +463,15 @@ pub unsafe extern "C" fn asdf_sequence_get(
     sequence: *mut AsdfSequence,
     index: c_int,
 ) -> *mut AsdfValue {
-    guard("asdf_sequence_get", std::ptr::null_mut(), || {
+    guard("asdf_sequence_get", core::ptr::null_mut(), || {
         let (Some(doc), Some(node), Some(file)) =
             (value_document(sequence), value_node(sequence), value_file(sequence))
         else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         match doc.sequence_get(node, i64::from(index)) {
             Some(found) => make_value(file, found),
-            None => std::ptr::null_mut(),
+            None => core::ptr::null_mut(),
         }
     })
 }
@@ -493,10 +494,10 @@ fn sequence_iter_init(sequence: *mut AsdfSequence, reverse: bool) -> *mut asdf_s
     let (Some(doc), Some(node), Some(file)) =
         (value_document(sequence), value_node(sequence), value_file(sequence))
     else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
     let Some(items) = doc.sequence_items(node) else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
 
     let mut items = items.to_vec();
@@ -508,12 +509,12 @@ fn sequence_iter_init(sequence: *mut AsdfSequence, reverse: bool) -> *mut asdf_s
     }
 
     let iter = Box::new(SequenceIter {
-        public: asdf_sequence_iter_t { index: -1, value: std::ptr::null_mut() },
+        public: asdf_sequence_iter_t { index: -1, value: core::ptr::null_mut() },
         file,
         items,
         position: 0,
         indices,
-        current_value: std::ptr::null_mut(),
+        current_value: core::ptr::null_mut(),
     });
     Box::into_raw(iter).cast::<asdf_sequence_iter_t>()
 }
@@ -526,7 +527,7 @@ fn sequence_iter_init(sequence: *mut AsdfSequence, reverse: bool) -> *mut asdf_s
 pub unsafe extern "C" fn asdf_sequence_iter_init(
     sequence: *mut AsdfSequence,
 ) -> *mut asdf_sequence_iter_t {
-    guard("asdf_sequence_iter_init", std::ptr::null_mut(), || sequence_iter_init(sequence, false))
+    guard("asdf_sequence_iter_init", core::ptr::null_mut(), || sequence_iter_init(sequence, false))
 }
 
 /// Start iterating a sequence in reverse.
@@ -537,7 +538,7 @@ pub unsafe extern "C" fn asdf_sequence_iter_init(
 pub unsafe extern "C" fn asdf_sequence_reverse_iter_init(
     sequence: *mut AsdfSequence,
 ) -> *mut asdf_sequence_iter_t {
-    guard("asdf_sequence_reverse_iter_init", std::ptr::null_mut(), || {
+    guard("asdf_sequence_reverse_iter_init", core::ptr::null_mut(), || {
         sequence_iter_init(sequence, true)
     })
 }
@@ -562,12 +563,12 @@ pub unsafe extern "C" fn asdf_sequence_iter_next(iter_ptr: *mut *mut asdf_sequen
 
         if !iter.current_value.is_null() {
             drop(unsafe { Box::from_raw(iter.current_value) });
-            iter.current_value = std::ptr::null_mut();
+            iter.current_value = core::ptr::null_mut();
         }
 
         if iter.position >= iter.items.len() {
             sequence_iter_destroy(raw);
-            unsafe { write_out(iter_ptr, std::ptr::null_mut()) };
+            unsafe { write_out(iter_ptr, core::ptr::null_mut()) };
             return false;
         }
 
@@ -602,7 +603,7 @@ pub(crate) fn sequence_iter_destroy(iter: *mut asdf_sequence_iter_t) {
     let mut boxed = unsafe { Box::from_raw(iter.cast::<SequenceIter>()) };
     if !boxed.current_value.is_null() {
         drop(unsafe { Box::from_raw(boxed.current_value) });
-        boxed.current_value = std::ptr::null_mut();
+        boxed.current_value = core::ptr::null_mut();
     }
 }
 
@@ -921,7 +922,7 @@ fn container_iter_init(container: *mut AsdfValue, reverse: bool) -> *mut asdf_co
     let (Some(doc), Some(node), Some(file)) =
         (value_document(container), value_node(container), value_file(container))
     else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
 
     let resolved = doc.resolved(node);
@@ -936,7 +937,7 @@ fn container_iter_init(container: *mut AsdfValue, reverse: bool) -> *mut asdf_co
     } else if resolved.is_sequence() {
         doc.sequence_items(node).unwrap_or(&[]).iter().map(|n| (None, *n)).collect()
     } else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
 
     let mut numbered: Vec<(Option<String>, NodeId, c_int)> = entries
@@ -950,15 +951,15 @@ fn container_iter_init(container: *mut AsdfValue, reverse: bool) -> *mut asdf_co
 
     let iter = Box::new(ContainerIter {
         public: asdf_container_iter_t {
-            key: std::ptr::null(),
+            key: core::ptr::null(),
             index: -1,
-            value: std::ptr::null_mut(),
+            value: core::ptr::null_mut(),
         },
         file,
         entries: numbered,
         position: 0,
         current_key: None,
-        current_value: std::ptr::null_mut(),
+        current_value: core::ptr::null_mut(),
         is_mapping,
     });
     Box::into_raw(iter).cast::<asdf_container_iter_t>()
@@ -972,7 +973,7 @@ fn container_iter_init(container: *mut AsdfValue, reverse: bool) -> *mut asdf_co
 pub unsafe extern "C" fn asdf_container_iter_init(
     container: *mut AsdfValue,
 ) -> *mut asdf_container_iter_t {
-    guard("asdf_container_iter_init", std::ptr::null_mut(), || {
+    guard("asdf_container_iter_init", core::ptr::null_mut(), || {
         container_iter_init(container, false)
     })
 }
@@ -985,7 +986,7 @@ pub unsafe extern "C" fn asdf_container_iter_init(
 pub unsafe extern "C" fn asdf_container_reverse_iter_init(
     container: *mut AsdfValue,
 ) -> *mut asdf_container_iter_t {
-    guard("asdf_container_reverse_iter_init", std::ptr::null_mut(), || {
+    guard("asdf_container_reverse_iter_init", core::ptr::null_mut(), || {
         container_iter_init(container, true)
     })
 }
@@ -1012,12 +1013,12 @@ pub unsafe extern "C" fn asdf_container_iter_next(
 
         if !iter.current_value.is_null() {
             drop(unsafe { Box::from_raw(iter.current_value) });
-            iter.current_value = std::ptr::null_mut();
+            iter.current_value = core::ptr::null_mut();
         }
 
         if iter.position >= iter.entries.len() {
             container_iter_destroy(raw);
-            unsafe { write_out(iter_ptr, std::ptr::null_mut()) };
+            unsafe { write_out(iter_ptr, core::ptr::null_mut()) };
             return false;
         }
 
@@ -1029,10 +1030,10 @@ pub unsafe extern "C" fn asdf_container_iter_next(
         // way round.
         if iter.is_mapping {
             iter.current_key = key.and_then(|k| CString::new(k).ok());
-            iter.public.key = iter.current_key.as_ref().map_or(std::ptr::null(), |k| k.as_ptr());
+            iter.public.key = iter.current_key.as_ref().map_or(core::ptr::null(), |k| k.as_ptr());
         } else {
             iter.current_key = None;
-            iter.public.key = std::ptr::null();
+            iter.public.key = core::ptr::null();
         }
         iter.public.index = index;
 
@@ -1063,7 +1064,7 @@ pub(crate) fn container_iter_destroy(iter: *mut asdf_container_iter_t) {
     let mut boxed = unsafe { Box::from_raw(iter.cast::<ContainerIter>()) };
     if !boxed.current_value.is_null() {
         drop(unsafe { Box::from_raw(boxed.current_value) });
-        boxed.current_value = std::ptr::null_mut();
+        boxed.current_value = core::ptr::null_mut();
     }
 }
 
@@ -1075,10 +1076,10 @@ fn add_node(
     make: impl FnOnce(&mut asdf_core::yaml::Document) -> NodeId,
 ) -> *mut AsdfValue {
     if file.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let Some(doc) = file_document_mut(file) else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
     let node = make(doc);
     make_value(file, node)
@@ -1094,7 +1095,7 @@ macro_rules! value_of {
         /// with `asdf_value_destroy`.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(file: *mut AsdfFile, value: $ty) -> *mut AsdfValue {
-            guard(stringify!($name), std::ptr::null_mut(), || {
+            guard(stringify!($name), core::ptr::null_mut(), || {
                 add_node(file, |doc| doc.add_scalar(value.to_string()))
             })
         }
@@ -1116,7 +1117,7 @@ value_of!(asdf_value_of_uint64, u64);
 /// See the integer constructors.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_of_double(file: *mut AsdfFile, value: f64) -> *mut AsdfValue {
-    guard("asdf_value_of_double", std::ptr::null_mut(), || {
+    guard("asdf_value_of_double", core::ptr::null_mut(), || {
         add_node(file, |doc| doc.add_scalar(asdf_core::core::elements::format_float(value)))
     })
 }
@@ -1127,7 +1128,7 @@ pub unsafe extern "C" fn asdf_value_of_double(file: *mut AsdfFile, value: f64) -
 /// See the integer constructors.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_of_float(file: *mut AsdfFile, value: f32) -> *mut AsdfValue {
-    guard("asdf_value_of_float", std::ptr::null_mut(), || {
+    guard("asdf_value_of_float", core::ptr::null_mut(), || {
         add_node(file, |doc| {
             doc.add_scalar(asdf_core::core::elements::format_float(f64::from(value)))
         })
@@ -1140,7 +1141,7 @@ pub unsafe extern "C" fn asdf_value_of_float(file: *mut AsdfFile, value: f32) ->
 /// See the integer constructors.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_of_bool(file: *mut AsdfFile, value: bool) -> *mut AsdfValue {
-    guard("asdf_value_of_bool", std::ptr::null_mut(), || {
+    guard("asdf_value_of_bool", core::ptr::null_mut(), || {
         add_node(file, |doc| doc.add_scalar(if value { "true" } else { "false" }))
     })
 }
@@ -1151,7 +1152,7 @@ pub unsafe extern "C" fn asdf_value_of_bool(file: *mut AsdfFile, value: bool) ->
 /// See the integer constructors.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_of_null(file: *mut AsdfFile) -> *mut AsdfValue {
-    guard("asdf_value_of_null", std::ptr::null_mut(), || value_of_null(file))
+    guard("asdf_value_of_null", core::ptr::null_mut(), || value_of_null(file))
 }
 
 /// Safe internal form of [`asdf_value_of_null`].
@@ -1175,7 +1176,7 @@ pub unsafe extern "C" fn asdf_value_of_string0(
     file: *mut AsdfFile,
     value: *const c_char,
 ) -> *mut AsdfValue {
-    guard("asdf_value_of_string0", std::ptr::null_mut(), || value_of_string0(file, value))
+    guard("asdf_value_of_string0", core::ptr::null_mut(), || value_of_string0(file, value))
 }
 
 /// Safe internal form of [`asdf_value_of_string0`].
@@ -1185,7 +1186,7 @@ pub unsafe extern "C" fn asdf_value_of_string0(
 /// contract the crate itself is upholding. Callers use this instead.
 pub(crate) fn value_of_string0(file: *mut AsdfFile, value: *const c_char) -> *mut AsdfValue {
     if value.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let text = unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned();
     add_node(file, |doc| {
@@ -1207,7 +1208,7 @@ pub unsafe extern "C" fn asdf_value_of_string(
     value: *const c_char,
     len: usize,
 ) -> *mut AsdfValue {
-    guard("asdf_value_of_string", std::ptr::null_mut(), || value_of_string(file, value, len))
+    guard("asdf_value_of_string", core::ptr::null_mut(), || value_of_string(file, value, len))
 }
 
 /// Safe internal form of [`asdf_value_of_string`].
@@ -1221,9 +1222,9 @@ pub(crate) fn value_of_string(
     len: usize,
 ) -> *mut AsdfValue {
     if value.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
-    let bytes = unsafe { std::slice::from_raw_parts(value.cast::<u8>(), len) };
+    let bytes = unsafe { core::slice::from_raw_parts(value.cast::<u8>(), len) };
     let text = String::from_utf8_lossy(bytes).into_owned();
     add_node(file, |doc| {
         let style = match resolve(&text, ScalarStyle::Plain, Schema::Libasdf) {
@@ -1241,7 +1242,7 @@ pub(crate) fn value_of_string(
 /// `asdf_mapping_destroy`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_mapping_create(file: *mut AsdfFile) -> *mut AsdfMapping {
-    guard("asdf_mapping_create", std::ptr::null_mut(), || {
+    guard("asdf_mapping_create", core::ptr::null_mut(), || {
         add_node(file, |doc| doc.add(asdf_core::yaml::Node::mapping()))
     })
 }
@@ -1253,7 +1254,7 @@ pub unsafe extern "C" fn asdf_mapping_create(file: *mut AsdfFile) -> *mut AsdfMa
 /// `asdf_sequence_destroy`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_sequence_create(file: *mut AsdfFile) -> *mut AsdfSequence {
-    guard("asdf_sequence_create", std::ptr::null_mut(), || sequence_create(file))
+    guard("asdf_sequence_create", core::ptr::null_mut(), || sequence_create(file))
 }
 
 /// Safe internal form of [`asdf_sequence_create`].
@@ -1382,21 +1383,21 @@ pub unsafe extern "C" fn asdf_mapping_pop(
     mapping: *mut AsdfMapping,
     key: *const c_char,
 ) -> *mut AsdfValue {
-    guard("asdf_mapping_pop", std::ptr::null_mut(), || {
+    guard("asdf_mapping_pop", core::ptr::null_mut(), || {
         if key.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let (Some(file), Some(target)) = (value_file(mapping), value_node(mapping)) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         let key = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
 
         let Some(doc) = file_document_mut(file) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         match doc.mapping_remove(target, &key) {
             Some(node) => make_value(file, node),
-            None => std::ptr::null_mut(),
+            None => core::ptr::null_mut(),
         }
     })
 }
@@ -1452,16 +1453,16 @@ pub unsafe extern "C" fn asdf_sequence_pop(
     sequence: *mut AsdfSequence,
     index: c_int,
 ) -> *mut AsdfValue {
-    guard("asdf_sequence_pop", std::ptr::null_mut(), || {
+    guard("asdf_sequence_pop", core::ptr::null_mut(), || {
         let (Some(file), Some(target)) = (value_file(sequence), value_node(sequence)) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         let Some(doc) = file_document_mut(file) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         match doc.sequence_remove(target, i64::from(index)) {
             Some(node) => make_value(file, node),
-            None => std::ptr::null_mut(),
+            None => core::ptr::null_mut(),
         }
     })
 }
@@ -1532,19 +1533,19 @@ macro_rules! container_setters {
             arr: *const $ty,
             size: c_int,
         ) -> *mut AsdfSequence {
-            guard(stringify!($of), std::ptr::null_mut(), || {
+            guard(stringify!($of), core::ptr::null_mut(), || {
                 if arr.is_null() || size < 0 {
-                    return std::ptr::null_mut();
+                    return core::ptr::null_mut();
                 }
                 let sequence = sequence_create(file);
                 if sequence.is_null() {
-                    return std::ptr::null_mut();
+                    return core::ptr::null_mut();
                 }
-                let items = unsafe { std::slice::from_raw_parts(arr, size as usize) };
+                let items = unsafe { core::slice::from_raw_parts(arr, size as usize) };
                 for value in items {
                     if unsafe { $append(sequence, *value) } != AsdfValueErr::Ok {
                         unsafe { asdf_sequence_destroy(sequence) };
-                        return std::ptr::null_mut();
+                        return core::ptr::null_mut();
                     }
                 }
                 sequence
@@ -1861,18 +1862,18 @@ pub unsafe extern "C" fn asdf_sequence_of_null(
     file: *mut AsdfFile,
     size: c_int,
 ) -> *mut AsdfSequence {
-    guard("asdf_sequence_of_null", std::ptr::null_mut(), || {
+    guard("asdf_sequence_of_null", core::ptr::null_mut(), || {
         if size < 0 {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let sequence = sequence_create(file);
         if sequence.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         for _ in 0..size {
             if sequence_append_null(sequence) != AsdfValueErr::Ok {
                 unsafe { asdf_sequence_destroy(sequence) };
-                return std::ptr::null_mut();
+                return core::ptr::null_mut();
             }
         }
         sequence
@@ -1889,19 +1890,19 @@ pub unsafe extern "C" fn asdf_sequence_of_string0(
     arr: *const *const c_char,
     size: c_int,
 ) -> *mut AsdfSequence {
-    guard("asdf_sequence_of_string0", std::ptr::null_mut(), || {
+    guard("asdf_sequence_of_string0", core::ptr::null_mut(), || {
         if arr.is_null() || size < 0 {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let sequence = sequence_create(file);
         if sequence.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         for index in 0..size as isize {
             let text = unsafe { *arr.offset(index) };
             if sequence_append_string0(sequence, text) != AsdfValueErr::Ok {
                 unsafe { asdf_sequence_destroy(sequence) };
-                return std::ptr::null_mut();
+                return core::ptr::null_mut();
             }
         }
         sequence
@@ -1919,20 +1920,20 @@ pub unsafe extern "C" fn asdf_sequence_of_string(
     lens: *const usize,
     size: c_int,
 ) -> *mut AsdfSequence {
-    guard("asdf_sequence_of_string", std::ptr::null_mut(), || {
+    guard("asdf_sequence_of_string", core::ptr::null_mut(), || {
         if arr.is_null() || lens.is_null() || size < 0 {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let sequence = sequence_create(file);
         if sequence.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         for index in 0..size as isize {
             let text = unsafe { *arr.offset(index) };
             let len = unsafe { *lens.offset(index) };
             if sequence_append_string(sequence, text, len) != AsdfValueErr::Ok {
                 unsafe { asdf_sequence_destroy(sequence) };
-                return std::ptr::null_mut();
+                return core::ptr::null_mut();
             }
         }
         sequence
@@ -1948,15 +1949,15 @@ pub unsafe extern "C" fn asdf_sequence_of_string(
 /// `asdf_mapping_destroy`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_mapping_copy(mapping: *mut AsdfMapping) -> *mut AsdfMapping {
-    guard("asdf_mapping_copy", std::ptr::null_mut(), || {
+    guard("asdf_mapping_copy", core::ptr::null_mut(), || {
         let (Some(file), Some(source)) = (value_file(mapping), value_node(mapping)) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         let Some(doc) = file_document_mut(file) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         let Some(entries) = doc.mapping_entries(source).map(<[_]>::to_vec) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         let pairs: Vec<_> = entries.iter().map(|e| (e.key, e.value)).collect();
         let fresh = doc.add_mapping(pairs);
@@ -2086,7 +2087,7 @@ pub unsafe extern "C" fn asdf_value_as_scalar(
 pub unsafe extern "C" fn asdf_value_as_type(
     value: *mut AsdfValue,
     value_type: c_int,
-    out: *mut std::ffi::c_void,
+    out: *mut core::ffi::c_void,
 ) -> AsdfValueErr {
     guard("asdf_value_as_type", AsdfValueErr::Unknown, || unsafe {
         // See `asdf_value_is_type` on why this arrives as an `int`.
@@ -2170,15 +2171,15 @@ pub unsafe extern "C" fn asdf_value_of_sequence(sequence: *mut AsdfSequence) -> 
 /// value's file.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_path(value: *mut AsdfValue) -> *const c_char {
-    guard("asdf_value_path", std::ptr::null(), || {
+    guard("asdf_value_path", core::ptr::null(), || {
         let (Some(doc), Some(node), Some(file)) =
             (value_document(value), value_node(value), value_file(value))
         else {
-            return std::ptr::null();
+            return core::ptr::null();
         };
         match doc.path_of(node) {
             Some(path) => unsafe { &*file }.intern(&path),
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         }
     })
 }
@@ -2190,15 +2191,15 @@ pub unsafe extern "C" fn asdf_value_path(value: *mut AsdfValue) -> *const c_char
 /// with `asdf_value_destroy`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_parent(value: *mut AsdfValue) -> *mut AsdfValue {
-    guard("asdf_value_parent", std::ptr::null_mut(), || {
+    guard("asdf_value_parent", core::ptr::null_mut(), || {
         let (Some(doc), Some(node), Some(file)) =
             (value_document(value), value_node(value), value_file(value))
         else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         match doc.parent_of(node) {
             Some(parent) => make_value(file, parent),
-            None => std::ptr::null_mut(),
+            None => core::ptr::null_mut(),
         }
     })
 }
@@ -2215,7 +2216,7 @@ struct FindIter {
     public: crate::types::asdf_find_iter_t,
     file: *mut AsdfFile,
     /// Nodes still to visit, each with the depth at which it was reached.
-    queue: std::collections::VecDeque<(NodeId, isize)>,
+    queue: alloc::collections::VecDeque<(NodeId, isize)>,
     pred: AsdfValuePred,
     descend_pred: AsdfValuePred,
     depth_first: bool,
@@ -2280,7 +2281,7 @@ impl FindIter {
     fn clear_current(&mut self) {
         if !self.public.value.is_null() {
             unsafe { crate::file_ffi::asdf_value_destroy(self.public.value.cast::<AsdfValue>()) };
-            self.public.value = std::ptr::null_mut();
+            self.public.value = core::ptr::null_mut();
         }
     }
 
@@ -2335,12 +2336,12 @@ fn find_iter_new(
     max_depth: isize,
 ) -> *mut FindIter {
     let (Some(file), Some(node)) = (value_file(root), value_node(root)) else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
-    let mut queue = std::collections::VecDeque::new();
+    let mut queue = alloc::collections::VecDeque::new();
     queue.push_back((node, 0isize));
     Box::into_raw(Box::new(FindIter {
-        public: crate::types::asdf_find_iter_t { value: std::ptr::null_mut() },
+        public: crate::types::asdf_find_iter_t { value: core::ptr::null_mut() },
         file,
         queue,
         pred,
@@ -2379,7 +2380,7 @@ pub unsafe extern "C" fn asdf_value_find_ex(
     descend_pred: AsdfValuePred,
     max_depth: isize,
 ) -> *mut AsdfValue {
-    guard("asdf_value_find_ex", std::ptr::null_mut(), || {
+    guard("asdf_value_find_ex", core::ptr::null_mut(), || {
         value_find_ex(root, pred, depth_first, descend_pred, max_depth)
     })
 }
@@ -2398,15 +2399,15 @@ pub(crate) fn value_find_ex(
 ) -> *mut AsdfValue {
     let iter = find_iter_new(root, pred, depth_first, descend_pred, max_depth);
     if iter.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let mut boxed = unsafe { Box::from_raw(iter) };
     if !boxed.step() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     // Hand the match to the caller rather than letting the drop free it.
     let found = boxed.public.value.cast::<AsdfValue>();
-    boxed.public.value = std::ptr::null_mut();
+    boxed.public.value = core::ptr::null_mut();
     found
 }
 
@@ -2435,7 +2436,7 @@ pub unsafe extern "C" fn asdf_find_iter_init_ex(
     descend_pred: AsdfValuePred,
     max_depth: isize,
 ) -> *mut crate::types::asdf_find_iter_t {
-    guard("asdf_find_iter_init_ex", std::ptr::null_mut(), || {
+    guard("asdf_find_iter_init_ex", core::ptr::null_mut(), || {
         find_iter_init_ex(root, pred, depth_first, descend_pred, max_depth)
     })
 }
@@ -2480,7 +2481,7 @@ pub unsafe extern "C" fn asdf_value_find_iter_next(
             return true;
         }
         find_iter_destroy(current);
-        unsafe { write_out(iter, std::ptr::null_mut()) };
+        unsafe { write_out(iter, core::ptr::null_mut()) };
         false
     })
 }
@@ -2535,7 +2536,7 @@ mod tests {
     fn open() -> Handle {
         let bytes = sample();
         let f =
-            unsafe { asdf_open_mem_ex(bytes.as_ptr().cast(), bytes.len(), std::ptr::null_mut()) };
+            unsafe { asdf_open_mem_ex(bytes.as_ptr().cast(), bytes.len(), core::ptr::null_mut()) };
         assert!(!f.is_null());
         Handle(f)
     }
@@ -2554,7 +2555,7 @@ mod tests {
 
     /// Matches the scalar `deep`, which sits two levels down.
     unsafe extern "C" fn is_deep(value: *mut AsdfValue) -> bool {
-        let mut out = std::ptr::null();
+        let mut out = core::ptr::null();
         if unsafe { asdf_value_as_string0(value, &mut out) } != AsdfValueErr::Ok {
             return false;
         }
@@ -2570,7 +2571,7 @@ mod tests {
         // breadth-first walk reaches the shallower one first.
         let found = unsafe { asdf_value_find(root, Some(is_a_string)) };
         assert!(!found.is_null());
-        let mut text = std::ptr::null();
+        let mut text = core::ptr::null();
         assert_eq!(unsafe { asdf_value_as_string0(found, &mut text) }, AsdfValueErr::Ok);
         assert_eq!(unsafe { CStr::from_ptr(text) }, c"two");
         unsafe { asdf_value_destroy(found) };
@@ -2609,7 +2610,7 @@ mod tests {
         let mut seen = Vec::new();
         while unsafe { asdf_value_find_iter_next(&mut iter) } {
             let current = unsafe { &*iter }.value.cast::<AsdfValue>();
-            let mut text = std::ptr::null();
+            let mut text = core::ptr::null();
             assert_eq!(unsafe { asdf_value_as_string0(current, &mut text) }, AsdfValueErr::Ok);
             seen.push(unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned());
         }
@@ -2677,7 +2678,7 @@ mod tests {
     fn counted_string_accessors_report_lengths() {
         let h = open();
         let b = value_at(&h, "b");
-        let mut text = std::ptr::null();
+        let mut text = core::ptr::null();
         let mut len = 0usize;
         assert_eq!(unsafe { asdf_value_as_string(b, &mut text, &mut len) }, AsdfValueErr::Ok);
         assert_eq!(len, 3);
@@ -2709,7 +2710,7 @@ mod tests {
                 asdf_value_as_type(
                     a,
                     AsdfValueType::Int32 as c_int,
-                    std::ptr::from_mut(&mut narrow).cast(),
+                    core::ptr::from_mut(&mut narrow).cast(),
                 )
             },
             AsdfValueErr::Ok
@@ -2717,13 +2718,13 @@ mod tests {
         assert_eq!(narrow, 1);
 
         // A string request against an integer is a type mismatch.
-        let mut text = std::ptr::null::<c_char>();
+        let mut text = core::ptr::null::<c_char>();
         assert_eq!(
             unsafe {
                 asdf_value_as_type(
                     a,
                     AsdfValueType::String as c_int,
-                    std::ptr::from_mut(&mut text).cast(),
+                    core::ptr::from_mut(&mut text).cast(),
                 )
             },
             AsdfValueErr::TypeMismatch
@@ -2732,7 +2733,7 @@ mod tests {
         let nothing = value_at(&h, "nothing");
         assert_eq!(
             unsafe {
-                asdf_value_as_type(nothing, AsdfValueType::Null as c_int, std::ptr::null_mut())
+                asdf_value_as_type(nothing, AsdfValueType::Null as c_int, core::ptr::null_mut())
             },
             AsdfValueErr::Ok
         );
@@ -2747,7 +2748,7 @@ mod tests {
         use crate::file_ffi::asdf_value_destroy as destroy;
 
         // `asdf_open(NULL)` -- a new, empty file open for writing.
-        let file = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let file = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         assert!(!file.is_null());
         let handle = Handle(file);
 
@@ -2793,7 +2794,7 @@ mod tests {
     fn mapping_update_merges_and_replaces() {
         use crate::file_ffi::asdf_value_destroy as destroy;
 
-        let file = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let file = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         let handle = Handle(file);
 
         let target = unsafe { asdf_mapping_create(handle.0) };
@@ -2981,7 +2982,7 @@ mod tests {
 
         let b = value_at(&h, "b");
         assert!(unsafe { asdf_value_is_string(b) });
-        let mut s: *const c_char = std::ptr::null();
+        let mut s: *const c_char = core::ptr::null();
         assert_eq!(unsafe { asdf_value_as_string0(b, &mut s) }, AsdfValueErr::Ok);
         assert_eq!(unsafe { CStr::from_ptr(s) }.to_str().unwrap(), "two");
 
@@ -3020,12 +3021,12 @@ mod tests {
         let root = value_at(&h, "");
         let list = value_at(&h, "list");
 
-        let mut out: *mut AsdfMapping = std::ptr::null_mut();
+        let mut out: *mut AsdfMapping = core::ptr::null_mut();
         assert_eq!(unsafe { asdf_value_as_mapping(root, &mut out) }, AsdfValueErr::Ok);
         assert_eq!(out, root);
         assert_eq!(unsafe { asdf_value_as_mapping(list, &mut out) }, AsdfValueErr::TypeMismatch);
 
-        let mut seq: *mut AsdfSequence = std::ptr::null_mut();
+        let mut seq: *mut AsdfSequence = core::ptr::null_mut();
         assert_eq!(unsafe { asdf_value_as_sequence(list, &mut seq) }, AsdfValueErr::Ok);
         assert_eq!(unsafe { asdf_value_as_sequence(root, &mut seq) }, AsdfValueErr::TypeMismatch);
 
@@ -3051,7 +3052,7 @@ mod tests {
 
     #[test]
     fn null_handles_are_tolerated_everywhere() {
-        let null = std::ptr::null_mut();
+        let null = core::ptr::null_mut();
         assert!(!unsafe { asdf_value_is_mapping(null) });
         assert!(!unsafe { asdf_value_is_sequence(null) });
         assert!(!unsafe { asdf_value_is_container(null) });
@@ -3060,10 +3061,10 @@ mod tests {
         assert_eq!(unsafe { asdf_sequence_size(null) }, -1);
         assert!(unsafe { asdf_mapping_iter_init(null) }.is_null());
         assert!(unsafe { asdf_sequence_iter_init(null) }.is_null());
-        assert!(!unsafe { asdf_mapping_iter_next(std::ptr::null_mut()) });
-        assert!(!unsafe { asdf_sequence_iter_next(std::ptr::null_mut()) });
-        unsafe { asdf_mapping_iter_destroy(std::ptr::null_mut()) };
-        unsafe { asdf_sequence_iter_destroy(std::ptr::null_mut()) };
+        assert!(!unsafe { asdf_mapping_iter_next(core::ptr::null_mut()) });
+        assert!(!unsafe { asdf_sequence_iter_next(core::ptr::null_mut()) });
+        unsafe { asdf_mapping_iter_destroy(core::ptr::null_mut()) };
+        unsafe { asdf_sequence_iter_destroy(core::ptr::null_mut()) };
         assert!(unsafe { asdf_value_copy(null) }.is_null());
         assert!(unsafe { asdf_value_file(null) }.is_null());
     }
@@ -3083,7 +3084,7 @@ mod build_tests {
     use super::*;
     use crate::file_ffi::{asdf_close, asdf_open_mem_ex, asdf_value_destroy, asdf_write_to_mem};
     use crate::types::AsdfYamlNodeStyle;
-    use std::ffi::c_void;
+    use core::ffi::c_void;
 
     struct Handle(*mut AsdfFile);
     impl Drop for Handle {
@@ -3093,7 +3094,7 @@ mod build_tests {
     }
 
     fn writable() -> Handle {
-        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         assert!(!f.is_null());
         Handle(f)
     }
@@ -3207,15 +3208,15 @@ mod build_tests {
             AsdfValueErr::Ok
         );
 
-        let mut buf: *mut c_void = std::ptr::null_mut();
+        let mut buf: *mut c_void = core::ptr::null_mut();
         let mut size = 0usize;
         assert_eq!(unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) }, 0);
 
-        let reopened = unsafe { asdf_open_mem_ex(buf, size, std::ptr::null_mut()) };
+        let reopened = unsafe { asdf_open_mem_ex(buf, size, core::ptr::null_mut()) };
         let r = Handle(reopened);
 
         let inner = cstr("meta/name");
-        let mut text: *const c_char = std::ptr::null();
+        let mut text: *const c_char = core::ptr::null();
         assert_eq!(
             unsafe { crate::file_ffi::asdf_get_string0(r.0, inner.as_ptr(), &mut text) },
             AsdfValueErr::Ok
@@ -3369,13 +3370,15 @@ mod build_tests {
 
     #[test]
     fn null_handles_are_tolerated() {
-        assert!(unsafe { asdf_mapping_create(std::ptr::null_mut()) }.is_null());
-        assert!(unsafe { asdf_sequence_create(std::ptr::null_mut()) }.is_null());
-        assert!(unsafe { asdf_value_of_int64(std::ptr::null_mut(), 0) }.is_null());
-        assert!(unsafe { asdf_value_of_null(std::ptr::null_mut()) }.is_null());
-        assert!(unsafe { asdf_value_of_string0(std::ptr::null_mut(), std::ptr::null()) }.is_null());
-        assert!(unsafe { asdf_container_iter_init(std::ptr::null_mut()) }.is_null());
-        assert!(!unsafe { asdf_container_iter_next(std::ptr::null_mut()) });
-        unsafe { asdf_container_iter_destroy(std::ptr::null_mut()) };
+        assert!(unsafe { asdf_mapping_create(core::ptr::null_mut()) }.is_null());
+        assert!(unsafe { asdf_sequence_create(core::ptr::null_mut()) }.is_null());
+        assert!(unsafe { asdf_value_of_int64(core::ptr::null_mut(), 0) }.is_null());
+        assert!(unsafe { asdf_value_of_null(core::ptr::null_mut()) }.is_null());
+        assert!(
+            unsafe { asdf_value_of_string0(core::ptr::null_mut(), core::ptr::null()) }.is_null()
+        );
+        assert!(unsafe { asdf_container_iter_init(core::ptr::null_mut()) }.is_null());
+        assert!(!unsafe { asdf_container_iter_next(core::ptr::null_mut()) });
+        unsafe { asdf_container_iter_destroy(core::ptr::null_mut()) };
     }
 }

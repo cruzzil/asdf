@@ -32,7 +32,7 @@
 //! uses, so it is both safer than the reference form and honest about what a
 //! C out-parameter is.
 
-use std::ffi::{CStr, c_char};
+use core::ffi::{CStr, c_char};
 
 /// Write `value` through a C out-parameter, doing nothing if it is null.
 ///
@@ -111,7 +111,7 @@ pub(crate) unsafe fn as_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
 /// calls `malloc`, and it hands ownership over exactly once, at
 /// [`into_raw`](CMallocBuf::into_raw).
 pub(crate) struct CMallocBuf {
-    ptr: std::ptr::NonNull<u8>,
+    ptr: core::ptr::NonNull<u8>,
     len: usize,
 }
 
@@ -123,10 +123,10 @@ impl CMallocBuf {
     pub(crate) fn copy_from(bytes: &[u8]) -> Option<Self> {
         // SAFETY: `malloc` with a non-zero size; the result is checked.
         let raw = unsafe { libc::malloc(bytes.len().max(1)) }.cast::<u8>();
-        let ptr = std::ptr::NonNull::new(raw)?;
+        let ptr = core::ptr::NonNull::new(raw)?;
         // SAFETY: `malloc` returned at least `bytes.len()` writable bytes,
         // aligned for any fundamental type, and it cannot overlap `bytes`.
-        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.as_ptr(), bytes.len()) };
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.as_ptr(), bytes.len()) };
         Some(Self { ptr, len: bytes.len() })
     }
 
@@ -136,9 +136,9 @@ impl CMallocBuf {
     }
 
     /// Hand the allocation to the caller, who frees it with `free`.
-    pub(crate) fn into_raw(self) -> *mut std::ffi::c_void {
-        let ptr = self.ptr.as_ptr().cast::<std::ffi::c_void>();
-        std::mem::forget(self);
+    pub(crate) fn into_raw(self) -> *mut core::ffi::c_void {
+        let ptr = self.ptr.as_ptr().cast::<core::ffi::c_void>();
+        core::mem::forget(self);
         ptr
     }
 }
@@ -154,8 +154,8 @@ impl Drop for CMallocBuf {
     }
 }
 
-impl std::fmt::Debug for CMallocBuf {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for CMallocBuf {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("CMallocBuf").field("len", &self.len).finish_non_exhaustive()
     }
 }
@@ -166,14 +166,14 @@ mod tests {
 
     #[test]
     fn write_out_ignores_a_null_destination() {
-        unsafe { write_out(std::ptr::null_mut::<u32>(), 7) };
+        unsafe { write_out(core::ptr::null_mut::<u32>(), 7) };
     }
 
     #[test]
     fn write_out_does_not_read_the_previous_contents() {
         // The point of `ptr::write`: the destination starts uninitialised,
         // exactly as a C caller's `const char *out;` does.
-        let mut slot = std::mem::MaybeUninit::<*const c_char>::uninit();
+        let mut slot = core::mem::MaybeUninit::<*const c_char>::uninit();
         unsafe { write_out(slot.as_mut_ptr(), c"hi".as_ptr()) };
         let written = unsafe { slot.assume_init() };
         assert_eq!(unsafe { CStr::from_ptr(written) }, c"hi");
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn c_str_rejects_null_and_reads_the_rest() {
-        assert!(unsafe { c_str(std::ptr::null()) }.is_none());
+        assert!(unsafe { c_str(core::ptr::null()) }.is_none());
         assert_eq!(unsafe { c_str(c"abc".as_ptr()) }, Some(c"abc"));
     }
 
@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(buf.len(), 3);
         let raw = buf.into_raw();
         assert!(!raw.is_null());
-        assert_eq!(unsafe { std::slice::from_raw_parts(raw.cast::<u8>(), 3) }, [1, 2, 3]);
+        assert_eq!(unsafe { core::slice::from_raw_parts(raw.cast::<u8>(), 3) }, [1, 2, 3]);
         unsafe { libc::free(raw) };
     }
 

@@ -174,7 +174,7 @@ jobs:
       - name: Formatting
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
       # Two invocations, because `libasdf-rs`'s library target must be named
       # `asdf` to produce `libasdf.so`, which collides in rustdoc's output
       # with the `asdf` library from `asdf-rs`. They get separate trees.

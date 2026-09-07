@@ -9,7 +9,8 @@
 //! this implementation keeps the state it needs.
 
 use crate::file_ffi::file_document_mut;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use alloc::ffi::CString;
+use core::ffi::{CStr, c_char, c_int, c_void};
 
 use asdf_core::compression::Compression;
 use asdf_core::core::datatype::{Datatype, ScalarType};
@@ -147,7 +148,7 @@ impl AlignedBuf {
         // array under a stricter alignment, so it has no padding and no
         // invalid bit patterns.
         let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(self.chunks.as_ptr().cast::<u8>(), self.chunks.len() * 16)
+            core::slice::from_raw_parts(self.chunks.as_ptr().cast::<u8>(), self.chunks.len() * 16)
         };
         &bytes[..self.len]
     }
@@ -155,7 +156,7 @@ impl AlignedBuf {
     fn as_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: as `as_slice`, and the borrow is exclusive.
         let bytes: &mut [u8] = unsafe {
-            std::slice::from_raw_parts_mut(
+            core::slice::from_raw_parts_mut(
                 self.chunks.as_mut_ptr().cast::<u8>(),
                 self.chunks.len() * 16,
             )
@@ -169,7 +170,7 @@ impl AlignedBuf {
     }
 }
 
-impl std::ops::Deref for AlignedBuf {
+impl core::ops::Deref for AlignedBuf {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
@@ -268,22 +269,22 @@ fn build_datatype(
             name: name_ptr,
             byteorder: effective(field.datatype.byteorder) as i32,
             ndim: u32::try_from(shape.len()).unwrap_or(0),
-            shape: if shape.is_empty() { std::ptr::null() } else { shape.as_ptr() },
+            shape: if shape.is_empty() { core::ptr::null() } else { shape.as_ptr() },
             nfields: 0,
-            fields: std::ptr::null(),
+            fields: core::ptr::null(),
         });
     }
 
     asdf_datatype_t {
         type_: scalar_abi(datatype.scalar),
         size: datatype.item_size(),
-        name: std::ptr::null(),
+        name: core::ptr::null(),
         byteorder: effective(datatype.byteorder) as i32,
         ndim: 0,
-        shape: std::ptr::null(),
+        shape: core::ptr::null(),
         nfields: u32::try_from(datatype.fields.len()).unwrap_or(0),
         fields: if state.fields.is_empty() {
-            std::ptr::null()
+            core::ptr::null()
         } else {
             state.fields[base..].as_ptr()
         },
@@ -309,9 +310,9 @@ pub(crate) fn make_ndarray(parsed: Ndarray, shape: Vec<u64>) -> *mut asdf_ndarra
             Source::External(_) => AsdfArrayStorage::External,
             _ => AsdfArrayStorage::Internal,
         },
-        file: std::ptr::null_mut(),
+        file: core::ptr::null_mut(),
         block_index: None,
-        block: std::ptr::null_mut(),
+        block: core::ptr::null_mut(),
     });
 
     // The compound-field storage must be sized before any pointer into it is
@@ -326,8 +327,8 @@ pub(crate) fn make_ndarray(parsed: Ndarray, shape: Vec<u64>) -> *mut asdf_ndarra
         _ => 0,
     };
 
-    let shape_ptr = if state.shape.is_empty() { std::ptr::null() } else { state.shape.as_ptr() };
-    let strides_ptr = state.strides.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let shape_ptr = if state.shape.is_empty() { core::ptr::null() } else { state.shape.as_ptr() };
+    let strides_ptr = state.strides.as_ref().map_or(core::ptr::null(), |s| s.as_ptr());
 
     let array = Box::new(asdf_ndarray_t {
         source,
@@ -371,10 +372,10 @@ fn ensure_state<'a>(array: *mut asdf_ndarray_t) -> Option<&'a mut NdarrayState> 
     let shape: Vec<u64> = if view.shape.is_null() || view.ndim == 0 {
         Vec::new()
     } else {
-        unsafe { std::slice::from_raw_parts(view.shape, view.ndim as usize) }.to_vec()
+        unsafe { core::slice::from_raw_parts(view.shape, view.ndim as usize) }.to_vec()
     };
     let strides: Option<Vec<i64>> = (!view.strides.is_null() && view.ndim > 0)
-        .then(|| unsafe { std::slice::from_raw_parts(view.strides, view.ndim as usize) }.to_vec());
+        .then(|| unsafe { core::slice::from_raw_parts(view.strides, view.ndim as usize) }.to_vec());
 
     // Rebuild the engine's view from what the caller filled in.
     let scalar = scalar_from_abi(view.datatype.type_);
@@ -407,9 +408,9 @@ fn ensure_state<'a>(array: *mut asdf_ndarray_t) -> Option<&'a mut NdarrayState> 
         allocated: None,
         compression: Compression::None,
         storage: AsdfArrayStorage::Internal,
-        file: std::ptr::null_mut(),
+        file: core::ptr::null_mut(),
         block_index: None,
-        block: std::ptr::null_mut(),
+        block: core::ptr::null_mut(),
     });
     unsafe { (*array)._reserved = Box::into_raw(state).cast::<c_void>() };
     state_of(array)
@@ -437,7 +438,7 @@ pub(crate) fn ndarray_size(ndarray: *const asdf_ndarray_t) -> u64 {
     if array.shape.is_null() || array.ndim == 0 {
         return 0;
     }
-    let shape = unsafe { std::slice::from_raw_parts(array.shape, array.ndim as usize) };
+    let shape = unsafe { core::slice::from_raw_parts(array.shape, array.ndim as usize) };
     shape.iter().product()
 }
 
@@ -550,7 +551,7 @@ pub extern "C" fn asdf_scalar_datatype_to_string(datatype: ScalarTypeAbi) -> *co
 /// `ndarray` must be null or a valid `asdf_ndarray_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_ndarray_data_alloc(ndarray: *mut asdf_ndarray_t) -> *mut c_void {
-    guard("asdf_ndarray_data_alloc", std::ptr::null_mut(), || ndarray_data_alloc(ndarray))
+    guard("asdf_ndarray_data_alloc", core::ptr::null_mut(), || ndarray_data_alloc(ndarray))
 }
 
 /// Safe internal form of [`asdf_ndarray_data_alloc`].
@@ -561,15 +562,15 @@ pub unsafe extern "C" fn asdf_ndarray_data_alloc(ndarray: *mut asdf_ndarray_t) -
 pub(crate) fn ndarray_data_alloc(ndarray: *mut asdf_ndarray_t) -> *mut c_void {
     let nbytes = ndarray_nbytes(ndarray);
     let Some(state) = ensure_state(ndarray) else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
     let Ok(len) = usize::try_from(nbytes) else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
     if state.allocated.is_none() {
         state.allocated = Some(AlignedBuf::zeroed(len));
     }
-    state.allocated.as_mut().map_or(std::ptr::null_mut(), |b| b.as_mut_ptr().cast::<c_void>())
+    state.allocated.as_mut().map_or(core::ptr::null_mut(), |b| b.as_mut_ptr().cast::<c_void>())
 }
 
 /// Free a buffer from [`asdf_ndarray_data_alloc`].
@@ -609,7 +610,7 @@ pub unsafe extern "C" fn asdf_ndarray_data_copy(
             return NdarrayErr::Oom;
         }
         unsafe {
-            std::ptr::copy_nonoverlapping(src.cast::<u8>(), destination.cast::<u8>(), len);
+            core::ptr::copy_nonoverlapping(src.cast::<u8>(), destination.cast::<u8>(), len);
         }
         NdarrayErr::Ok
     })
@@ -625,7 +626,7 @@ pub unsafe extern "C" fn asdf_ndarray_data(
     ndarray: *mut asdf_ndarray_t,
     size: *mut usize,
 ) -> *const c_void {
-    guard("asdf_ndarray_data", std::ptr::null(), || ndarray_data(ndarray, size))
+    guard("asdf_ndarray_data", core::ptr::null(), || ndarray_data(ndarray, size))
 }
 
 /// Safe internal form of [`asdf_ndarray_data`].
@@ -638,7 +639,7 @@ pub(crate) fn ndarray_data(ndarray: *mut asdf_ndarray_t, size: *mut usize) -> *c
         if !size.is_null() {
             unsafe { write_out(size, 0) };
         }
-        return std::ptr::null();
+        return core::ptr::null();
     };
     // A buffer the caller built takes precedence: it is the array's data.
     let bytes = match (&state.allocated, &state.data) {
@@ -648,7 +649,7 @@ pub(crate) fn ndarray_data(ndarray: *mut asdf_ndarray_t, size: *mut usize) -> *c
             if !size.is_null() {
                 unsafe { write_out(size, 0) };
             }
-            return std::ptr::null();
+            return core::ptr::null();
         }
     };
     if !size.is_null() {
@@ -951,7 +952,7 @@ macro_rules! read_at {
                     set(NdarrayErr::Inval);
                     return <$ty>::default();
                 }
-                let idx = unsafe { std::slice::from_raw_parts(indices, state.shape.len()) };
+                let idx = unsafe { core::slice::from_raw_parts(indices, state.shape.len()) };
                 let Some(flat) = flat_index(&state.shape, idx) else {
                     set(NdarrayErr::OutOfBounds);
                     return <$ty>::default();
@@ -1082,10 +1083,10 @@ fn ndarray_from_value(value: *mut crate::file_ffi::AsdfValue) -> *mut asdf_ndarr
     use crate::file_ffi::{file_reader, value_document, value_file, value_node};
 
     let (Some(doc), Some(node)) = (value_document(value), value_node(value)) else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
     let Ok(parsed) = Ndarray::parse(doc, node) else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
 
     // Read the block up front, as libasdf does, so the array's data pointer
@@ -1115,7 +1116,7 @@ fn ndarray_from_value(value: *mut crate::file_ffi::AsdfValue) -> *mut asdf_ndarr
     }
 
     let Ok(shape) = parsed.resolved_shape(block_len) else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
 
     // An inline array's elements are already in the tree. `asdf_ndarray_data`
@@ -1132,7 +1133,7 @@ fn ndarray_from_value(value: *mut crate::file_ffi::AsdfValue) -> *mut asdf_ndarr
     // Remember where the data came from so `asdf_ndarray_block` can hand
     // back a view of the underlying block.
     if let Some(state) = state_of(array) {
-        state.file = value_file(value).unwrap_or(std::ptr::null_mut());
+        state.file = value_file(value).unwrap_or(core::ptr::null_mut());
         state.block_index = block_index;
     }
     array
@@ -1297,12 +1298,12 @@ pub(crate) fn ndarray_deinit(ndarray: *mut asdf_ndarray_t) {
             unsafe { crate::block_ffi::asdf_block_close(state.block) };
         }
         drop(state);
-        array._reserved = std::ptr::null_mut();
+        array._reserved = core::ptr::null_mut();
     }
     // The public pointers all borrowed from the state that just went.
-    array.shape = std::ptr::null();
-    array.strides = std::ptr::null();
-    array.datatype.fields = std::ptr::null();
+    array.shape = core::ptr::null();
+    array.strides = core::ptr::null();
+    array.datatype.fields = core::ptr::null();
     array.datatype.nfields = 0;
     array.ndim = 0;
 }
@@ -1356,7 +1357,7 @@ pub(crate) fn ndarray_copy_into(
 
     // Move the rebuilt value into the caller's storage.
     let boxed = unsafe { Box::from_raw(rebuilt) };
-    unsafe { std::ptr::write(dst, *boxed) };
+    unsafe { core::ptr::write(dst, *boxed) };
     true
 }
 
@@ -1370,7 +1371,7 @@ pub unsafe extern "C" fn asdf_ndarray_copy(
     file: *mut crate::file_ffi::AsdfFile,
     src: *const asdf_ndarray_t,
 ) -> *mut asdf_ndarray_t {
-    guard("asdf_ndarray_copy", std::ptr::null_mut(), || ndarray_copy(file, src))
+    guard("asdf_ndarray_copy", core::ptr::null_mut(), || ndarray_copy(file, src))
 }
 
 /// Safe internal form of [`asdf_ndarray_copy`].
@@ -1383,32 +1384,32 @@ pub(crate) fn ndarray_copy(
     src: *const asdf_ndarray_t,
 ) -> *mut asdf_ndarray_t {
     if src.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let raw = Box::into_raw(Box::new(asdf_ndarray_t {
         source: 0,
         ndim: 0,
-        shape: std::ptr::null(),
+        shape: core::ptr::null(),
         datatype: asdf_datatype_t {
             type_: 0,
             size: 0,
-            name: std::ptr::null(),
+            name: core::ptr::null(),
             byteorder: 0,
             ndim: 0,
-            shape: std::ptr::null(),
+            shape: core::ptr::null(),
             nfields: 0,
-            fields: std::ptr::null(),
+            fields: core::ptr::null(),
         },
         byteorder: 0,
         offset: 0,
-        strides: std::ptr::null(),
-        _reserved: std::ptr::null_mut(),
+        strides: core::ptr::null(),
+        _reserved: core::ptr::null_mut(),
     }));
     if ndarray_copy_into(file, src, raw) {
         raw
     } else {
         drop(unsafe { Box::from_raw(raw) });
-        std::ptr::null_mut()
+        core::ptr::null_mut()
     }
 }
 
@@ -1421,9 +1422,9 @@ pub unsafe extern "C" fn asdf_ndarray_array_copy(
     file: *mut crate::file_ffi::AsdfFile,
     src: *mut *const asdf_ndarray_t,
 ) -> *mut *mut asdf_ndarray_t {
-    guard("asdf_ndarray_array_copy", std::ptr::null_mut(), || {
+    guard("asdf_ndarray_array_copy", core::ptr::null_mut(), || {
         if src.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let mut count = 0isize;
         while !unsafe { *src.offset(count) }.is_null() {
@@ -1440,11 +1441,11 @@ pub unsafe extern "C" fn asdf_ndarray_array_copy(
                 for made in copies {
                     ndarray_destroy(made);
                 }
-                return std::ptr::null_mut();
+                return core::ptr::null_mut();
             }
             copies.push(copy);
         }
-        copies.push(std::ptr::null_mut());
+        copies.push(core::ptr::null_mut());
         Box::into_raw(copies.into_boxed_slice()).cast::<*mut asdf_ndarray_t>()
     })
 }
@@ -1464,9 +1465,9 @@ pub unsafe extern "C" fn asdf_value_of_ndarray(
 ) -> *mut crate::file_ffi::AsdfValue {
     use asdf_core::yaml::{CollectionStyle, NodeData, Tag};
 
-    guard("asdf_value_of_ndarray", std::ptr::null_mut(), || {
+    guard("asdf_value_of_ndarray", core::ptr::null_mut(), || {
         if file.is_null() || obj.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let array = unsafe { &*obj };
 
@@ -1476,12 +1477,12 @@ pub unsafe extern "C" fn asdf_value_of_ndarray(
         let shape: Vec<u64> = if array.shape.is_null() || array.ndim == 0 {
             Vec::new()
         } else {
-            unsafe { std::slice::from_raw_parts(array.shape, array.ndim as usize) }.to_vec()
+            unsafe { core::slice::from_raw_parts(array.shape, array.ndim as usize) }.to_vec()
         };
         let scalar = scalar_from_abi(array.datatype.type_);
         let item_size = if array.datatype.size != 0 { array.datatype.size } else { scalar.size() };
         if item_size == 0 {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
 
         // The data is whatever the caller allocated or we read.
@@ -1519,13 +1520,13 @@ pub unsafe extern "C" fn asdf_value_of_ndarray(
 
         // Append the block, then reference it by index.
         let Some(blocks) = crate::file_ffi::file_blocks_mut(file) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         blocks.push(asdf_core::PendingBlock::compressed(payload, compression));
         let index = blocks.len() - 1;
 
         let Some(doc) = file_document_mut(file) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
 
         let source = doc.add_scalar(index.to_string());
@@ -1564,7 +1565,8 @@ pub unsafe extern "C" fn asdf_value_of_ndarray(
             pairs.push((key, value));
         }
         if !array.strides.is_null() && array.ndim > 0 {
-            let strides = unsafe { std::slice::from_raw_parts(array.strides, array.ndim as usize) };
+            let strides =
+                unsafe { core::slice::from_raw_parts(array.strides, array.ndim as usize) };
             let items: Vec<_> = strides.iter().map(|s| doc.add_scalar(s.to_string())).collect();
             let node = doc.add_sequence(items);
             if let NodeData::Sequence { style, .. } = &mut doc.node_mut(node).data {
@@ -1642,12 +1644,12 @@ fn inline_value_of_ndarray(
     } else {
         match asdf_core::core::decode_all(&parsed, shape, payload) {
             Ok(elements) => elements,
-            Err(_) => return std::ptr::null_mut(),
+            Err(_) => return core::ptr::null_mut(),
         }
     };
 
     let Some(doc) = file_document_mut(file) else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
 
     let data = if elements.is_empty() {
@@ -1715,15 +1717,15 @@ pub unsafe extern "C" fn asdf_set_ndarray(
 pub unsafe extern "C" fn asdf_ndarray_block(
     ndarray: *mut asdf_ndarray_t,
 ) -> *mut crate::block_ffi::AsdfBlock {
-    guard("asdf_ndarray_block", std::ptr::null_mut(), || {
+    guard("asdf_ndarray_block", core::ptr::null_mut(), || {
         let Some(state) = state_of(ndarray) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         if !state.block.is_null() {
             return state.block;
         }
         let (Some(index), false) = (state.block_index, state.file.is_null()) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         state.block = unsafe { crate::block_ffi::asdf_block_open(state.file, index) };
         state.block
@@ -1775,7 +1777,7 @@ fn deliver(buffer: &[u8], dst: *mut *mut c_void) -> NdarrayErr {
         unsafe { write_out(dst, allocation.into_raw()) };
     } else {
         unsafe {
-            std::ptr::copy_nonoverlapping(buffer.as_ptr(), existing.cast::<u8>(), buffer.len());
+            core::ptr::copy_nonoverlapping(buffer.as_ptr(), existing.cast::<u8>(), buffer.len());
         }
     }
     NdarrayErr::Ok
@@ -1801,7 +1803,7 @@ pub unsafe extern "C" fn asdf_ndarray_read_at(
         if indices.is_null() || dst.is_null() {
             return NdarrayErr::Inval;
         }
-        let idx = unsafe { std::slice::from_raw_parts(indices, state.shape.len()) };
+        let idx = unsafe { core::slice::from_raw_parts(indices, state.shape.len()) };
         let Some(flat) = flat_index(&state.shape, idx) else {
             return NdarrayErr::OutOfBounds;
         };
@@ -1829,7 +1831,7 @@ pub unsafe extern "C" fn asdf_ndarray_read_at(
         if err != NdarrayErr::Ok {
             return err;
         }
-        unsafe { std::ptr::copy_nonoverlapping(scratch.as_ptr(), dst.cast::<u8>(), width) };
+        unsafe { core::ptr::copy_nonoverlapping(scratch.as_ptr(), dst.cast::<u8>(), width) };
         NdarrayErr::Ok
     })
 }
@@ -1876,8 +1878,8 @@ pub(crate) fn ndarray_read_tile_ndim(
     if ndim == 0 {
         return NdarrayErr::Inval;
     }
-    let origin = unsafe { std::slice::from_raw_parts(origin, ndim) }.to_vec();
-    let tile = unsafe { std::slice::from_raw_parts(shape, ndim) }.to_vec();
+    let origin = unsafe { core::slice::from_raw_parts(origin, ndim) }.to_vec();
+    let tile = unsafe { core::slice::from_raw_parts(shape, ndim) }.to_vec();
 
     // Every corner of the tile has to land inside the array.
     for axis in 0..ndim {
@@ -1992,7 +1994,7 @@ pub unsafe extern "C" fn asdf_ndarray_read_tile_2d(
         let mut origin = vec![0u64; ndim];
         let mut tile = vec![1u64; ndim];
         if planes > 0 && !plane_origin.is_null() {
-            let outer = unsafe { std::slice::from_raw_parts(plane_origin, planes) };
+            let outer = unsafe { core::slice::from_raw_parts(plane_origin, planes) };
             origin[..planes].copy_from_slice(outer);
         }
         origin[ndim - 2] = y;
@@ -2021,7 +2023,7 @@ unsafe extern "C" fn ndarray_ext_deserialize(
     _userdata: *const c_void,
     out: *mut *mut c_void,
 ) -> crate::types::AsdfValueErr {
-    let mut typed: *mut asdf_ndarray_t = std::ptr::null_mut();
+    let mut typed: *mut asdf_ndarray_t = core::ptr::null_mut();
     let err = unsafe { asdf_value_as_ndarray(value, &mut typed) };
     if err == crate::types::AsdfValueErr::Ok && !out.is_null() {
         unsafe { write_out(out, typed.cast::<c_void>()) };
@@ -2076,7 +2078,7 @@ pub(crate) fn build_ndarray_extension() -> *mut crate::extension_ffi::asdf_exten
     let tags: Vec<*const c_char> = vec![
         c"tag:stsci.edu:asdf/core/ndarray-1.1.0".as_ptr(),
         c"tag:stsci.edu:asdf/core/ndarray-1.0.0".as_ptr(),
-        std::ptr::null(),
+        core::ptr::null(),
     ];
     let tags = Box::leak(tags.into_boxed_slice());
 
@@ -2091,9 +2093,9 @@ pub(crate) fn build_ndarray_extension() -> *mut crate::extension_ffi::asdf_exten
     Box::leak(Box::new(asdf_extension_t {
         tags: tags.as_ptr(),
         software: (&raw const libasdf_software).cast::<asdf_software_t>().cast_mut(),
-        vtab: std::ptr::from_ref(vtab),
-        size: std::mem::size_of::<asdf_ndarray_t>(),
-        userdata: std::ptr::null_mut(),
+        vtab: core::ptr::from_ref(vtab),
+        size: core::mem::size_of::<asdf_ndarray_t>(),
+        userdata: core::ptr::null_mut(),
     }))
 }
 
@@ -2237,14 +2239,14 @@ mod tests {
     #[test]
     fn an_overflow_does_not_abandon_the_read() {
         let array = int32_array(&[1, -1, 300]);
-        let mut dst: *mut c_void = std::ptr::null_mut();
+        let mut dst: *mut c_void = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_ndarray_read_all(array, ScalarType::Uint8 as ScalarTypeAbi, &mut dst) },
             NdarrayErr::Overflow
         );
         assert!(!dst.is_null(), "the converted buffer is still delivered");
 
-        let got = unsafe { std::slice::from_raw_parts(dst.cast::<u8>(), 3) };
+        let got = unsafe { core::slice::from_raw_parts(dst.cast::<u8>(), 3) };
         assert_eq!(got, [1, 0, 255], "each element saturates on its own");
 
         unsafe { libc::free(dst) };
@@ -2262,7 +2264,7 @@ mod tests {
                     array,
                     indices.as_ptr(),
                     ScalarType::Int32 as ScalarTypeAbi,
-                    std::ptr::from_mut(&mut out).cast(),
+                    core::ptr::from_mut(&mut out).cast(),
                 )
             },
             NdarrayErr::Ok
@@ -2277,7 +2279,7 @@ mod tests {
                     array,
                     indices.as_ptr(),
                     ScalarType::Float64 as ScalarTypeAbi,
-                    std::ptr::from_mut(&mut wide).cast(),
+                    core::ptr::from_mut(&mut wide).cast(),
                 )
             },
             NdarrayErr::Ok
@@ -2291,7 +2293,7 @@ mod tests {
                     array,
                     past_end.as_ptr(),
                     ScalarType::Int32 as ScalarTypeAbi,
-                    std::ptr::from_mut(&mut out).cast(),
+                    core::ptr::from_mut(&mut out).cast(),
                 )
             },
             NdarrayErr::OutOfBounds
@@ -2313,7 +2315,7 @@ mod tests {
                     1,
                     2,
                     2,
-                    std::ptr::null(),
+                    core::ptr::null(),
                     ScalarType::Int32 as ScalarTypeAbi,
                     &mut dst,
                 )
@@ -2337,7 +2339,7 @@ mod tests {
                     1,
                     2,
                     2,
-                    std::ptr::null(),
+                    core::ptr::null(),
                     ScalarType::Int32 as ScalarTypeAbi,
                     &mut dst,
                 )
@@ -2353,7 +2355,7 @@ mod tests {
         let origin: [u64; 2] = [0, 2];
         let shape: [u64; 2] = [3, 2];
         // A null destination asks the library to allocate.
-        let mut dst: *mut c_void = std::ptr::null_mut();
+        let mut dst: *mut c_void = core::ptr::null_mut();
         assert_eq!(
             unsafe {
                 asdf_ndarray_read_tile_ndim(
@@ -2367,7 +2369,7 @@ mod tests {
             NdarrayErr::Ok
         );
         assert!(!dst.is_null());
-        let got = unsafe { std::slice::from_raw_parts(dst.cast::<i32>(), 6) };
+        let got = unsafe { core::slice::from_raw_parts(dst.cast::<i32>(), 6) };
         assert_eq!(got, [2, 3, 6, 7, 10, 11]);
         unsafe { libc::free(dst) };
         unsafe { asdf_ndarray_destroy(array) };
@@ -2403,12 +2405,12 @@ mod tests {
         let mut dt = asdf_datatype_t {
             type_: scalar_abi(ScalarType::Float64),
             size: 0,
-            name: std::ptr::null(),
+            name: core::ptr::null(),
             byteorder: 0,
             ndim: 0,
-            shape: std::ptr::null(),
+            shape: core::ptr::null(),
             nfields: 0,
-            fields: std::ptr::null(),
+            fields: core::ptr::null(),
         };
         assert_eq!(unsafe { asdf_datatype_size(&mut dt) }, 8);
         // ...and written back, as the header documents.
@@ -2432,11 +2434,11 @@ mod tests {
     #[test]
     fn reads_the_whole_array_in_its_own_type() {
         let array = int32_array(&[10, -20, 30]);
-        let mut dst: *mut c_void = std::ptr::null_mut();
+        let mut dst: *mut c_void = core::ptr::null_mut();
         // ASDF_DATATYPE_SOURCE is UNKNOWN, meaning "keep the source type".
         assert_eq!(unsafe { asdf_ndarray_read_all(array, 0, &mut dst) }, NdarrayErr::Ok);
         assert!(!dst.is_null());
-        let values = unsafe { std::slice::from_raw_parts(dst.cast::<i32>(), 3) };
+        let values = unsafe { core::slice::from_raw_parts(dst.cast::<i32>(), 3) };
         assert_eq!(values, [10, -20, 30]);
 
         unsafe { libc::free(dst) };
@@ -2446,12 +2448,12 @@ mod tests {
     #[test]
     fn reads_the_whole_array_converted() {
         let array = int32_array(&[1, 2, 3]);
-        let mut dst: *mut c_void = std::ptr::null_mut();
+        let mut dst: *mut c_void = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_ndarray_read_all(array, scalar_abi(ScalarType::Float64), &mut dst) },
             NdarrayErr::Ok
         );
-        let values = unsafe { std::slice::from_raw_parts(dst.cast::<f64>(), 3) };
+        let values = unsafe { core::slice::from_raw_parts(dst.cast::<f64>(), 3) };
         assert_eq!(values, [1.0, 2.0, 3.0]);
         unsafe { libc::free(dst) };
         unsafe { asdf_ndarray_destroy(array) };
@@ -2470,7 +2472,7 @@ mod tests {
     #[test]
     fn converting_a_value_that_does_not_fit_overflows() {
         let array = int32_array(&[1000]);
-        let mut dst: *mut c_void = std::ptr::null_mut();
+        let mut dst: *mut c_void = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_ndarray_read_all(array, scalar_abi(ScalarType::Int8), &mut dst) },
             NdarrayErr::Overflow
@@ -2566,7 +2568,7 @@ mod tests {
         let mut size = 0usize;
         let data = unsafe { asdf_ndarray_data(array, &mut size) };
         assert_eq!(size, 12);
-        let values = unsafe { std::slice::from_raw_parts(data.cast::<i32>(), 3) };
+        let values = unsafe { core::slice::from_raw_parts(data.cast::<i32>(), 3) };
         assert_eq!(values, [11, 22, 33]);
 
         unsafe { asdf_ndarray_data_dealloc(array) };
@@ -2616,7 +2618,7 @@ mod tests {
             set_data(array, &bytes);
             let read = unsafe { asdf_ndarray_data(array, &mut size) };
             assert_eq!(read as usize % 16, 0, "file data was handed out unaligned");
-            assert_eq!(unsafe { std::slice::from_raw_parts(read.cast::<u8>(), size) }, &bytes[..]);
+            assert_eq!(unsafe { core::slice::from_raw_parts(read.cast::<u8>(), size) }, &bytes[..]);
 
             unsafe { asdf_ndarray_destroy(array) };
         }
@@ -2659,7 +2661,7 @@ mod tests {
         assert_eq!(view.datatype.nfields, 2);
         assert!(!view.datatype.fields.is_null());
 
-        let fields = unsafe { std::slice::from_raw_parts(view.datatype.fields, 2) };
+        let fields = unsafe { core::slice::from_raw_parts(view.datatype.fields, 2) };
         assert_eq!(fields[0].type_, scalar_abi(ScalarType::Float64));
         assert_eq!(fields[0].size, 8);
         assert_eq!(unsafe { CStr::from_ptr(fields[0].name) }.to_str().unwrap(), "x");
@@ -2708,13 +2710,13 @@ mod tests {
 
     #[test]
     fn null_handles_are_tolerated() {
-        let null: *mut asdf_ndarray_t = std::ptr::null_mut();
+        let null: *mut asdf_ndarray_t = core::ptr::null_mut();
         assert_eq!(unsafe { asdf_ndarray_size(null) }, 0);
         assert_eq!(unsafe { asdf_ndarray_nbytes(null) }, 0);
         assert!(unsafe { asdf_ndarray_data_alloc(null) }.is_null());
         unsafe { asdf_ndarray_data_dealloc(null) };
-        assert_eq!(unsafe { asdf_ndarray_data_copy(null, std::ptr::null()) }, NdarrayErr::Inval);
-        assert_eq!(unsafe { asdf_datatype_size(std::ptr::null_mut()) }, 0);
+        assert_eq!(unsafe { asdf_ndarray_data_copy(null, core::ptr::null()) }, NdarrayErr::Inval);
+        assert_eq!(unsafe { asdf_datatype_size(core::ptr::null_mut()) }, 0);
         unsafe { asdf_ndarray_destroy(null) };
 
         let mut size = 99usize;

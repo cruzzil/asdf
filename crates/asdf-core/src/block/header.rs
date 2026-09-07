@@ -216,7 +216,7 @@ impl BlockHeader {
     /// An empty name means the block is uncompressed.
     pub fn compression_name(&self) -> &str {
         let end = self.compression.iter().position(|b| *b == 0).unwrap_or(COMPRESSION_FIELD_SIZE);
-        std::str::from_utf8(&self.compression[..end]).unwrap_or("")
+        core::str::from_utf8(&self.compression[..end]).unwrap_or("")
     }
 
     /// Set the compression name, which must fit in four bytes.

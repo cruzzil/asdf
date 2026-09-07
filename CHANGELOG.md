@@ -14,12 +14,22 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-07
+
+`asdf-cli` is unchanged and stays at 0.1.2.
+
 ### Changed
 
 - The five crates now carry **independent versions** rather than a shared one,
-  so a release bumps only what changed. No published version moves as a result
-  of this; all five stay at 0.1.2 until something in them changes. The release
-  procedure is in [`docs/DEVELOPING.md`](docs/DEVELOPING.md#releasing).
+  so a release bumps only what changed. The release procedure is in
+  [`docs/DEVELOPING.md`](docs/DEVELOPING.md#releasing).
+- `clippy::std_instead_of_core` and `clippy::std_instead_of_alloc` are denied
+  workspace-wide, and every path now names the narrowest crate that defines
+  the item -- `core::fmt`, `core::ffi::CStr`, `alloc::ffi::CString` and so on.
+  Nothing here is `no_std` and no API changed: `core::fmt::Display` *is*
+  `std::fmt::Display`. It keeps a future `no_std` build a small step away.
+- CI's clippy step now runs with `-D warnings`, so a warning fails the build
+  rather than scrolling past.
 
 ## [0.1.2] - 2026-09-05
 
@@ -129,7 +139,8 @@ is listed here so the first release notes are not written from scratch.
 - `asdf-core` reads a file whole rather than mapping it under `cfg(miri)`, so
   dependants can run Miri.
 
-[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/cruzzil/asdf/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/cruzzil/asdf/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/cruzzil/asdf/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cruzzil/asdf/releases/tag/v0.1.0

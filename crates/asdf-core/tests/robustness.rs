@@ -239,8 +239,8 @@ fn adversarial_inputs_never_panic() {
         ("tree never terminated", b"#ASDF 1.0.0\n%YAML 1.1\n--- !core/asdf-1.1.0\na: 1\n".to_vec()),
         ("deeply nested tree", {
             let mut v = b"#ASDF 1.0.0\n%YAML 1.1\n--- ".to_vec();
-            v.extend(std::iter::repeat_n(b'[', 5000));
-            v.extend(std::iter::repeat_n(b']', 5000));
+            v.extend(core::iter::repeat_n(b'[', 5000));
+            v.extend(core::iter::repeat_n(b']', 5000));
             v.extend_from_slice(b"\n...\n");
             v
         }),

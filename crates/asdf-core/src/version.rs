@@ -1,7 +1,7 @@
 //! Version strings, as they appear on the `#ASDF` header line, in tags, and
 //! in `core/software` metadata.
 
-use std::fmt;
+use core::fmt;
 
 /// A parsed version string.
 ///

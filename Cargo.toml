@@ -41,5 +41,12 @@ memmap2 = "0.9"
 unsafe_op_in_unsafe_fn = "deny"
 missing_debug_implementations = "warn"
 
+[workspace.lints.clippy]
+# Reach for the narrowest crate that has the item: `core` before `alloc`,
+# `alloc` before `std`. Nothing here is `no_std` today, but keeping the
+# paths honest costs nothing and keeps that option open.
+std_instead_of_core = "deny"
+std_instead_of_alloc = "deny"
+
 [profile.release]
 lto = "thin"

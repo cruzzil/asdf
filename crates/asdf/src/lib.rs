@@ -70,7 +70,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::borrow::Cow;
+// Named so `alloc::` paths can be written directly. The crate links `std`,
+// but spelling each item at the narrowest layer that defines it keeps a
+// future `no_std` build a small step away.
+extern crate alloc;
+
+use alloc::borrow::Cow;
 use std::path::Path;
 
 use asdf_core::core::elements::decode_all;
@@ -96,7 +101,7 @@ pub use asdf_core::info::InfoOptions;
 pub use asdf_core::version::Version;
 
 /// The result type used throughout this crate.
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 
 /// A scalar type an array can be written from and read back as.
 ///
@@ -1204,7 +1209,7 @@ data: !core/ndarray-1.1.0\n  source: ../../../etc/passwd\n  datatype: int64\n  s
                 // The block holds exactly the elements, at the type's width.
                 assert_eq!(
                     file.block_data(0).unwrap().len(),
-                    values.len() * std::mem::size_of::<$ty>(),
+                    values.len() * core::mem::size_of::<$ty>(),
                     "{}",
                     <$ty as ArrayElement>::SCALAR.name()
                 );

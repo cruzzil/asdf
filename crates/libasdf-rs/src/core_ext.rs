@@ -15,7 +15,8 @@
 //! the split libasdf's headers call out, because an object may be embedded,
 //! an array element, or static.
 
-use std::ffi::{CStr, CString, c_char, c_int};
+use alloc::ffi::CString;
+use core::ffi::{CStr, c_char, c_int};
 
 use asdf_core::yaml::{Document, NodeId, Tag};
 
@@ -27,7 +28,7 @@ use crate::version_ffi::{asdf_version_parse, asdf_version_t};
 
 /// Allocate a C string, or null when the text contains an interior NUL.
 fn to_c_string(text: &str) -> *const c_char {
-    CString::new(text).map_or(std::ptr::null(), |c| c.into_raw().cast_const())
+    CString::new(text).map_or(core::ptr::null(), |c| c.into_raw().cast_const())
 }
 
 /// Free a string produced by [`to_c_string`].
@@ -40,16 +41,16 @@ unsafe fn free_c_string(ptr: *const c_char) {
 /// Copy a C string, or null.
 unsafe fn clone_c_string(ptr: *const c_char) -> *const c_char {
     let Some(text) = (unsafe { crate::ffi::c_str(ptr) }) else {
-        return std::ptr::null();
+        return core::ptr::null();
     };
-    CString::new(text.to_bytes()).map_or(std::ptr::null(), |c| c.into_raw().cast_const())
+    CString::new(text.to_bytes()).map_or(core::ptr::null(), |c| c.into_raw().cast_const())
 }
 
 /// Read a mapping's string entry.
 fn string_field(doc: &Document, node: NodeId, key: &str) -> *const c_char {
     doc.mapping_get(node, key)
         .and_then(|id| doc.resolved(id).as_str().map(to_c_string))
-        .unwrap_or(std::ptr::null())
+        .unwrap_or(core::ptr::null())
 }
 
 /// Read a mapping's entry as a parsed version.
@@ -57,10 +58,10 @@ fn version_field(doc: &Document, node: NodeId, key: &str) -> *const asdf_version
     let Some(text) =
         doc.mapping_get(node, key).and_then(|id| doc.resolved(id).as_str().map(str::to_string))
     else {
-        return std::ptr::null();
+        return core::ptr::null();
     };
     let Ok(c) = CString::new(text) else {
-        return std::ptr::null();
+        return core::ptr::null();
     };
     unsafe { asdf_version_parse(c.as_ptr()) }.cast_const()
 }
@@ -161,7 +162,7 @@ macro_rules! declare_extension {
                 // The file goes through too: an extension whose object holds
                 // a value -- `extension_metadata`'s spare properties, say --
                 // needs one to build a handle against.
-                let file = value_file(value).unwrap_or(std::ptr::null_mut());
+                let file = value_file(value).unwrap_or(core::ptr::null_mut());
                 let boxed: Box<$ty> = Box::new(<$ty>::zeroed());
                 let raw = Box::into_raw(boxed);
                 match $deserialize(doc, node, file, raw) {
@@ -208,15 +209,15 @@ macro_rules! declare_extension {
             file: *mut AsdfFile,
             obj: *const $ty,
         ) -> *mut AsdfValue {
-            guard(stringify!($value_of_fn), std::ptr::null_mut(), || {
+            guard(stringify!($value_of_fn), core::ptr::null_mut(), || {
                 if file.is_null() || obj.is_null() {
-                    return std::ptr::null_mut();
+                    return core::ptr::null_mut();
                 }
                 let Some(doc) = $crate::file_ffi::file_document_mut(file) else {
-                    return std::ptr::null_mut();
+                    return core::ptr::null_mut();
                 };
                 let Some(node) = $serialize(doc, unsafe { &*obj }) else {
-                    return std::ptr::null_mut();
+                    return core::ptr::null_mut();
                 };
                 doc.node_mut(node).tag = Some(Tag::parse($tag));
                 Box::into_raw(Box::new(AsdfValue::new(file, node)))
@@ -295,7 +296,7 @@ macro_rules! declare_extension {
                 if src.is_null() || dst.is_null() {
                     return false;
                 }
-                unsafe { std::ptr::write(dst, <$ty>::zeroed()) };
+                unsafe { core::ptr::write(dst, <$ty>::zeroed()) };
                 if unsafe { $copy(&*src, dst) } {
                     true
                 } else {
@@ -312,16 +313,16 @@ macro_rules! declare_extension {
         /// released with the matching `destroy`.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $copy_fn(file: *mut AsdfFile, src: *const $ty) -> *mut $ty {
-            guard(stringify!($copy_fn), std::ptr::null_mut(), || {
+            guard(stringify!($copy_fn), core::ptr::null_mut(), || {
                 if src.is_null() {
-                    return std::ptr::null_mut();
+                    return core::ptr::null_mut();
                 }
                 let raw = Box::into_raw(Box::new(<$ty>::zeroed()));
                 if unsafe { $copy_into_fn(file, src, raw) } {
                     raw
                 } else {
                     drop(unsafe { Box::from_raw(raw) });
-                    std::ptr::null_mut()
+                    core::ptr::null_mut()
                 }
             })
         }
@@ -335,9 +336,9 @@ macro_rules! declare_extension {
             file: *mut AsdfFile,
             src: *mut *const $ty,
         ) -> *mut *mut $ty {
-            guard(stringify!($array_copy_fn), std::ptr::null_mut(), || {
+            guard(stringify!($array_copy_fn), core::ptr::null_mut(), || {
                 if src.is_null() {
-                    return std::ptr::null_mut();
+                    return core::ptr::null_mut();
                 }
                 let mut count = 0isize;
                 while !unsafe { *src.offset(count) }.is_null() {
@@ -353,11 +354,11 @@ macro_rules! declare_extension {
                         for made in copies {
                             unsafe { $destroy_fn(made) };
                         }
-                        return std::ptr::null_mut();
+                        return core::ptr::null_mut();
                     }
                     copies.push(copy);
                 }
-                copies.push(std::ptr::null_mut());
+                copies.push(core::ptr::null_mut());
                 copies.shrink_to_fit();
                 let boxed = copies.into_boxed_slice();
                 Box::into_raw(boxed).cast::<*mut $ty>()
@@ -387,8 +388,8 @@ macro_rules! declare_extension {
         /// `value` must be a valid value handle and `out` writable.
         unsafe extern "C" fn $ext_deserialize_fn(
             value: *mut AsdfValue,
-            _userdata: *const std::ffi::c_void,
-            out: *mut *mut std::ffi::c_void,
+            _userdata: *const core::ffi::c_void,
+            out: *mut *mut core::ffi::c_void,
         ) -> AsdfValueErr {
             guard(stringify!($ext_deserialize_fn), AsdfValueErr::Unknown, || {
                 if out.is_null() {
@@ -397,11 +398,11 @@ macro_rules! declare_extension {
                 let (Some(doc), Some(node)) = (value_document(value), value_node(value)) else {
                     return AsdfValueErr::Unknown;
                 };
-                let file = value_file(value).unwrap_or(std::ptr::null_mut());
+                let file = value_file(value).unwrap_or(core::ptr::null_mut());
                 let raw = Box::into_raw(Box::new(<$ty>::zeroed()));
                 match $deserialize(doc, node, file, raw) {
                     AsdfValueErr::Ok => {
-                        unsafe { write_out(out, raw.cast::<std::ffi::c_void>()) };
+                        unsafe { write_out(out, raw.cast::<core::ffi::c_void>()) };
                         AsdfValueErr::Ok
                     }
                     err => {
@@ -418,8 +419,8 @@ macro_rules! declare_extension {
         /// `obj` must be a valid object of this extension's type.
         unsafe extern "C" fn $ext_serialize_fn(
             file: *mut AsdfFile,
-            obj: *const std::ffi::c_void,
-            _userdata: *const std::ffi::c_void,
+            obj: *const core::ffi::c_void,
+            _userdata: *const core::ffi::c_void,
         ) -> *mut AsdfValue {
             unsafe { $value_of_fn(file, obj.cast::<$ty>()) }
         }
@@ -430,8 +431,8 @@ macro_rules! declare_extension {
         /// `src` and `dst` must be valid objects of this extension's type.
         unsafe extern "C" fn $ext_copy_fn(
             file: *mut AsdfFile,
-            src: *const std::ffi::c_void,
-            dst: *mut std::ffi::c_void,
+            src: *const core::ffi::c_void,
+            dst: *mut core::ffi::c_void,
         ) -> bool {
             unsafe { $copy_into_fn(file, src.cast::<$ty>(), dst.cast::<$ty>()) }
         }
@@ -440,7 +441,7 @@ macro_rules! declare_extension {
         ///
         /// # Safety
         /// `obj` must be a valid object of this extension's type.
-        unsafe extern "C" fn $ext_deinit_fn(obj: *mut std::ffi::c_void) {
+        unsafe extern "C" fn $ext_deinit_fn(obj: *mut core::ffi::c_void) {
             unsafe { $deinit_fn(obj.cast::<$ty>()) };
         }
 
@@ -454,7 +455,7 @@ macro_rules! declare_extension {
             use crate::extension_ffi::{asdf_extension_t, asdf_extension_vtab_t, libasdf_software};
 
             let mut tags: Vec<*const c_char> = $tags.iter().map(|t: &&CStr| t.as_ptr()).collect();
-            tags.push(std::ptr::null());
+            tags.push(core::ptr::null());
             let tags = Box::leak(tags.into_boxed_slice());
 
             let vtab = Box::leak(Box::new(asdf_extension_vtab_t {
@@ -470,9 +471,9 @@ macro_rules! declare_extension {
                 software: (&raw const libasdf_software)
                     .cast::<crate::extension_ffi::asdf_software_t>()
                     .cast_mut(),
-                vtab: std::ptr::from_ref(vtab),
-                size: std::mem::size_of::<$ty>(),
-                userdata: std::ptr::null_mut(),
+                vtab: core::ptr::from_ref(vtab),
+                size: core::mem::size_of::<$ty>(),
+                userdata: core::ptr::null_mut(),
             }))
         }
     };
@@ -487,10 +488,10 @@ impl asdf_software_t {
     /// A zeroed instance, matching what the generated wrappers assume.
     fn zeroed() -> Self {
         Self {
-            name: std::ptr::null(),
-            version: std::ptr::null(),
-            author: std::ptr::null(),
-            homepage: std::ptr::null(),
+            name: core::ptr::null(),
+            version: core::ptr::null(),
+            author: core::ptr::null(),
+            homepage: core::ptr::null(),
         }
     }
 }
@@ -562,7 +563,7 @@ unsafe fn software_copy(src: &asdf_software_t, dst: *mut asdf_software_t) -> boo
     out.author = unsafe { clone_c_string(src.author) };
     out.homepage = unsafe { clone_c_string(src.homepage) };
     out.version = if src.version.is_null() {
-        std::ptr::null()
+        core::ptr::null()
     } else {
         unsafe { crate::version_ffi::asdf_version_copy(src.version) }.cast_const()
     };
@@ -618,9 +619,9 @@ pub struct asdf_extension_metadata_t {
 impl asdf_extension_metadata_t {
     fn zeroed() -> Self {
         Self {
-            extension_class: std::ptr::null(),
-            package: std::ptr::null(),
-            metadata: std::ptr::null_mut(),
+            extension_class: core::ptr::null(),
+            package: core::ptr::null(),
+            metadata: core::ptr::null_mut(),
         }
     }
 }
@@ -648,15 +649,15 @@ fn extension_metadata_deserialize(
                 raw.cast_const()
             } else {
                 drop(unsafe { Box::from_raw(raw) });
-                std::ptr::null()
+                core::ptr::null()
             }
         })
-        .unwrap_or(std::ptr::null());
+        .unwrap_or(core::ptr::null());
 
     // `metadata` is the whole mapping, so a caller can reach the properties
     // the struct has no field for -- `extension_uri`, `manifest_software`.
     let metadata = if file.is_null() {
-        std::ptr::null_mut()
+        core::ptr::null_mut()
     } else {
         crate::value_ffi::make_value(file, node)
     };
@@ -728,11 +729,11 @@ unsafe fn extension_metadata_copy(
     let out = unsafe { &mut *dst };
     out.extension_class = unsafe { clone_c_string(src.extension_class) };
     out.package = if src.package.is_null() {
-        std::ptr::null()
+        core::ptr::null()
     } else {
-        unsafe { asdf_software_copy(std::ptr::null_mut(), src.package) }.cast_const()
+        unsafe { asdf_software_copy(core::ptr::null_mut(), src.package) }.cast_const()
     };
-    out.metadata = std::ptr::null_mut();
+    out.metadata = core::ptr::null_mut();
     true
 }
 
@@ -840,7 +841,7 @@ mod tests {
               software: !core/software-1.0.0 {name: asdf, version: 4.1.0}\n",
         );
         buf.extend_from_slice(b"...\n");
-        let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), core::ptr::null_mut()) };
         assert!(!f.is_null());
         Handle(f)
     }
@@ -851,7 +852,7 @@ mod tests {
         let path = c"asdf_library";
         assert!(unsafe { asdf_is_software(h.0, path.as_ptr()) });
 
-        let mut software: *mut asdf_software_t = std::ptr::null_mut();
+        let mut software: *mut asdf_software_t = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_get_software(h.0, path.as_ptr(), &mut software) },
             AsdfValueErr::Ok
@@ -874,7 +875,7 @@ mod tests {
         let path = c"history";
         assert!(!unsafe { asdf_is_software(h.0, path.as_ptr()) });
 
-        let mut software: *mut asdf_software_t = std::ptr::null_mut();
+        let mut software: *mut asdf_software_t = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_get_software(h.0, path.as_ptr(), &mut software) },
             AsdfValueErr::TypeMismatch
@@ -886,7 +887,7 @@ mod tests {
     fn a_missing_path_is_not_found() {
         let h = sample();
         let path = c"nope";
-        let mut software: *mut asdf_software_t = std::ptr::null_mut();
+        let mut software: *mut asdf_software_t = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_get_software(h.0, path.as_ptr(), &mut software) },
             AsdfValueErr::NotFound
@@ -895,7 +896,7 @@ mod tests {
 
     #[test]
     fn software_round_trips_through_a_written_file() {
-        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         let h = Handle(f);
 
         let version = unsafe { asdf_version_parse(c"2.3.4".as_ptr()) };
@@ -909,14 +910,14 @@ mod tests {
         let path = c"asdf_library";
         assert_eq!(unsafe { asdf_set_software(h.0, path.as_ptr(), &software) }, AsdfValueErr::Ok);
 
-        let mut buf: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut buf: *mut core::ffi::c_void = core::ptr::null_mut();
         let mut size = 0usize;
         assert_eq!(unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) }, 0);
 
-        let reopened = unsafe { asdf_open_mem_ex(buf, size, std::ptr::null_mut()) };
+        let reopened = unsafe { asdf_open_mem_ex(buf, size, core::ptr::null_mut()) };
         let r = Handle(reopened);
 
-        let mut read_back: *mut asdf_software_t = std::ptr::null_mut();
+        let mut read_back: *mut asdf_software_t = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_get_software(r.0, path.as_ptr(), &mut read_back) },
             AsdfValueErr::Ok
@@ -934,7 +935,7 @@ mod tests {
     fn copies_are_independent() {
         let h = sample();
         let path = c"asdf_library";
-        let mut software: *mut asdf_software_t = std::ptr::null_mut();
+        let mut software: *mut asdf_software_t = core::ptr::null_mut();
         unsafe { asdf_get_software(h.0, path.as_ptr(), &mut software) };
 
         let copy = unsafe { asdf_software_copy(h.0, software) };
@@ -958,14 +959,14 @@ mod tests {
         let mut zeroed = asdf_software_t::zeroed();
         unsafe { asdf_software_deinit(&mut zeroed) };
         unsafe { asdf_software_deinit(&mut zeroed) };
-        unsafe { asdf_software_deinit(std::ptr::null_mut()) };
+        unsafe { asdf_software_deinit(core::ptr::null_mut()) };
     }
 
     #[test]
     fn copy_into_zeroes_the_destination_first() {
         let h = sample();
         let path = c"asdf_library";
-        let mut software: *mut asdf_software_t = std::ptr::null_mut();
+        let mut software: *mut asdf_software_t = core::ptr::null_mut();
         unsafe { asdf_get_software(h.0, path.as_ptr(), &mut software) };
 
         let mut destination = asdf_software_t::zeroed();
@@ -980,10 +981,10 @@ mod tests {
     fn arrays_of_objects_copy() {
         let h = sample();
         let path = c"asdf_library";
-        let mut software: *mut asdf_software_t = std::ptr::null_mut();
+        let mut software: *mut asdf_software_t = core::ptr::null_mut();
         unsafe { asdf_get_software(h.0, path.as_ptr(), &mut software) };
 
-        let mut array: [*const asdf_software_t; 2] = [software, std::ptr::null()];
+        let mut array: [*const asdf_software_t; 2] = [software, core::ptr::null()];
         let copies = unsafe { asdf_software_array_copy(h.0, array.as_mut_ptr()) };
         assert!(!copies.is_null());
 
@@ -994,7 +995,7 @@ mod tests {
         assert!(unsafe { *copies.offset(1) }.is_null());
 
         unsafe { asdf_software_destroy(first) };
-        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(copies, 2)) });
+        drop(unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(copies, 2)) });
         unsafe { asdf_software_destroy(software) };
     }
 
@@ -1004,7 +1005,7 @@ mod tests {
         let path = c"history/extensions/0";
         assert!(unsafe { asdf_is_extension_metadata(h.0, path.as_ptr()) });
 
-        let mut metadata: *mut asdf_extension_metadata_t = std::ptr::null_mut();
+        let mut metadata: *mut asdf_extension_metadata_t = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_get_extension_metadata(h.0, path.as_ptr(), &mut metadata) },
             AsdfValueErr::Ok
@@ -1029,7 +1030,7 @@ mod tests {
         let uri = c"extension_uri";
         let entry = unsafe { crate::value_ffi::asdf_mapping_get(view.metadata, uri.as_ptr()) };
         assert!(!entry.is_null());
-        let mut text = std::ptr::null();
+        let mut text = core::ptr::null();
         assert_eq!(
             unsafe { crate::value_ffi::asdf_value_as_string0(entry, &mut text) },
             AsdfValueErr::Ok
@@ -1048,7 +1049,7 @@ mod tests {
     fn extension_metadata_without_a_package_reports_none() {
         let h = sample();
         let path = c"history/extensions/1";
-        let mut metadata: *mut asdf_extension_metadata_t = std::ptr::null_mut();
+        let mut metadata: *mut asdf_extension_metadata_t = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_get_extension_metadata(h.0, path.as_ptr(), &mut metadata) },
             AsdfValueErr::Ok
@@ -1061,21 +1062,21 @@ mod tests {
 
     #[test]
     fn null_handles_are_tolerated() {
-        let mut out: *mut asdf_software_t = std::ptr::null_mut();
+        let mut out: *mut asdf_software_t = core::ptr::null_mut();
         assert_eq!(
-            unsafe { asdf_value_as_software(std::ptr::null_mut(), &mut out) },
+            unsafe { asdf_value_as_software(core::ptr::null_mut(), &mut out) },
             AsdfValueErr::TypeMismatch
         );
         assert!(
-            unsafe { asdf_value_of_software(std::ptr::null_mut(), std::ptr::null()) }.is_null()
+            unsafe { asdf_value_of_software(core::ptr::null_mut(), core::ptr::null()) }.is_null()
         );
-        assert!(unsafe { asdf_software_copy(std::ptr::null_mut(), std::ptr::null()) }.is_null());
+        assert!(unsafe { asdf_software_copy(core::ptr::null_mut(), core::ptr::null()) }.is_null());
         assert!(!unsafe {
-            asdf_software_copy_into(std::ptr::null_mut(), std::ptr::null(), std::ptr::null_mut())
+            asdf_software_copy_into(core::ptr::null_mut(), core::ptr::null(), core::ptr::null_mut())
         });
-        unsafe { asdf_software_destroy(std::ptr::null_mut()) };
-        unsafe { asdf_library_set(std::ptr::null_mut(), std::ptr::null()) };
-        unsafe { asdf_library_set_version(std::ptr::null_mut(), std::ptr::null()) };
+        unsafe { asdf_software_destroy(core::ptr::null_mut()) };
+        unsafe { asdf_library_set(core::ptr::null_mut(), core::ptr::null()) };
+        unsafe { asdf_library_set_version(core::ptr::null_mut(), core::ptr::null()) };
     }
 }
 
@@ -1139,9 +1140,9 @@ pub struct asdf_history_entry_t {
 impl asdf_history_entry_t {
     fn zeroed() -> Self {
         Self {
-            description: std::ptr::null(),
-            time: std::ptr::null(),
-            software: std::ptr::null_mut(),
+            description: core::ptr::null(),
+            time: core::ptr::null(),
+            software: core::ptr::null_mut(),
         }
     }
 }
@@ -1155,7 +1156,7 @@ fn read_software_list(
     file: *mut AsdfFile,
 ) -> *mut *const asdf_software_t {
     let Some(entry) = doc.mapping_get(node, "software") else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
 
     let nodes: Vec<NodeId> = match doc.sequence_items(entry) {
@@ -1174,9 +1175,9 @@ fn read_software_list(
         }
     }
     if list.is_empty() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
-    list.push(std::ptr::null());
+    list.push(core::ptr::null());
     list.shrink_to_fit();
     Box::into_raw(list.into_boxed_slice()).cast::<*const asdf_software_t>()
 }
@@ -1192,7 +1193,7 @@ unsafe fn free_software_list(list: *mut *const asdf_software_t) {
         count += 1;
     }
     // The array itself was a boxed slice, including its null terminator.
-    let slice = std::ptr::slice_from_raw_parts_mut(list, count as usize + 1);
+    let slice = core::ptr::slice_from_raw_parts_mut(list, count as usize + 1);
     drop(unsafe { Box::from_raw(slice) });
 }
 
@@ -1212,10 +1213,10 @@ fn history_entry_deserialize(
                 raw.cast_const()
             } else {
                 drop(unsafe { Box::from_raw(raw) });
-                std::ptr::null()
+                core::ptr::null()
             }
         })
-        .unwrap_or(std::ptr::null());
+        .unwrap_or(core::ptr::null());
 
     unsafe {
         (*out).description = description;
@@ -1276,14 +1277,14 @@ unsafe fn history_entry_copy(src: &asdf_history_entry_t, dst: *mut asdf_history_
     let out = unsafe { &mut *dst };
     out.description = unsafe { clone_c_string(src.description) };
     out.time = if src.time.is_null() {
-        std::ptr::null()
+        core::ptr::null()
     } else {
-        unsafe { asdf_time_copy(std::ptr::null_mut(), src.time) }.cast_const()
+        unsafe { asdf_time_copy(core::ptr::null_mut(), src.time) }.cast_const()
     };
     out.software = if src.software.is_null() {
-        std::ptr::null_mut()
+        core::ptr::null_mut()
     } else {
-        unsafe { asdf_software_array_copy(std::ptr::null_mut(), src.software) }
+        unsafe { asdf_software_array_copy(core::ptr::null_mut(), src.software) }
             .cast::<*const asdf_software_t>()
     };
     true
@@ -1333,8 +1334,8 @@ pub unsafe extern "C" fn asdf_history_entry_add(
         }
         let entry = asdf_history_entry_t {
             description,
-            time: std::ptr::null(),
-            software: std::ptr::null_mut(),
+            time: core::ptr::null(),
+            software: core::ptr::null_mut(),
         };
         let value = unsafe { asdf_value_of_history_entry(file, &entry) };
         if value.is_null() {
@@ -1393,7 +1394,7 @@ mod history_tests {
         buf.extend_from_slice(b"%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
         buf.extend_from_slice(tree.as_bytes());
         buf.extend_from_slice(b"...\n");
-        let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), core::ptr::null_mut()) };
         assert!(!f.is_null());
         Handle(f)
     }
@@ -1410,7 +1411,7 @@ mod history_tests {
         let path = c"entry";
         assert!(unsafe { asdf_is_history_entry(h.0, path.as_ptr()) });
 
-        let mut entry: *mut asdf_history_entry_t = std::ptr::null_mut();
+        let mut entry: *mut asdf_history_entry_t = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_get_history_entry(h.0, path.as_ptr(), &mut entry) },
             AsdfValueErr::Ok
@@ -1444,7 +1445,7 @@ mod history_tests {
             "entry: !core/history_entry-1.0.0\n  description: 'x'\n  \
              software: !core/software-1.0.0 {name: solo, version: 0.1.0}\n",
         );
-        let mut entry: *mut asdf_history_entry_t = std::ptr::null_mut();
+        let mut entry: *mut asdf_history_entry_t = core::ptr::null_mut();
         unsafe { asdf_get_history_entry(h.0, c"entry".as_ptr(), &mut entry) };
         let view = unsafe { &*entry };
         assert!(!view.software.is_null());
@@ -1455,23 +1456,23 @@ mod history_tests {
 
     #[test]
     fn history_entries_can_be_added_and_read_back() {
-        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         let h = Handle(f);
 
         assert_eq!(unsafe { asdf_history_entry_add(h.0, c"first change".as_ptr()) }, 0);
         assert_eq!(unsafe { asdf_history_entry_add(h.0, c"second change".as_ptr()) }, 0);
 
-        let mut buf: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut buf: *mut core::ffi::c_void = core::ptr::null_mut();
         let mut size = 0usize;
         assert_eq!(unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) }, 0);
 
-        let reopened = unsafe { asdf_open_mem_ex(buf, size, std::ptr::null_mut()) };
+        let reopened = unsafe { asdf_open_mem_ex(buf, size, core::ptr::null_mut()) };
         let r = Handle(reopened);
 
         // Both entries must be there, in order.
         for (index, expected) in [(0, "first change"), (1, "second change")] {
             let path = CString::new(format!("history/entries/{index}")).unwrap();
-            let mut entry: *mut asdf_history_entry_t = std::ptr::null_mut();
+            let mut entry: *mut asdf_history_entry_t = core::ptr::null_mut();
             assert_eq!(
                 unsafe { asdf_get_history_entry(r.0, path.as_ptr(), &mut entry) },
                 AsdfValueErr::Ok,
@@ -1486,7 +1487,7 @@ mod history_tests {
 
     #[test]
     fn a_history_entry_round_trips_through_a_written_file() {
-        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         let h = Handle(f);
 
         let value = CString::new("2026-09-04T12:00:00").unwrap();
@@ -1494,7 +1495,7 @@ mod history_tests {
         let entry = asdf_history_entry_t {
             description: c"a described change".as_ptr(),
             time: &time,
-            software: std::ptr::null_mut(),
+            software: core::ptr::null_mut(),
         };
 
         assert_eq!(
@@ -1502,13 +1503,13 @@ mod history_tests {
             AsdfValueErr::Ok
         );
 
-        let mut buf: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut buf: *mut core::ffi::c_void = core::ptr::null_mut();
         let mut size = 0usize;
         unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) };
-        let reopened = unsafe { asdf_open_mem_ex(buf, size, std::ptr::null_mut()) };
+        let reopened = unsafe { asdf_open_mem_ex(buf, size, core::ptr::null_mut()) };
         let r = Handle(reopened);
 
-        let mut read_back: *mut asdf_history_entry_t = std::ptr::null_mut();
+        let mut read_back: *mut asdf_history_entry_t = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_get_history_entry(r.0, c"note".as_ptr(), &mut read_back) },
             AsdfValueErr::Ok
@@ -1529,7 +1530,7 @@ mod history_tests {
         let h = open("t: !time/time-1.4.0 '2026-09-04T12:34:56'\n");
         assert!(unsafe { asdf_is_time(h.0, c"t".as_ptr()) });
 
-        let mut time: *mut asdf_time_t = std::ptr::null_mut();
+        let mut time: *mut asdf_time_t = core::ptr::null_mut();
         assert_eq!(unsafe { asdf_get_time(h.0, c"t".as_ptr(), &mut time) }, AsdfValueErr::Ok);
         let view = unsafe { &*time };
         assert_eq!(unsafe { CStr::from_ptr(view.value) }.to_str().unwrap(), "2026-09-04T12:34:56");
@@ -1554,7 +1555,7 @@ mod history_tests {
 
         let mut time = asdf_time_t::zeroed();
         unsafe { asdf_time_deinit(&mut time) };
-        unsafe { asdf_time_deinit(std::ptr::null_mut()) };
+        unsafe { asdf_time_deinit(core::ptr::null_mut()) };
     }
 }
 
@@ -1572,12 +1573,12 @@ impl asdf_datatype_t {
         Self {
             type_: 0,
             size: 0,
-            name: std::ptr::null(),
+            name: core::ptr::null(),
             byteorder: 0,
             ndim: 0,
-            shape: std::ptr::null(),
+            shape: core::ptr::null(),
             nfields: 0,
-            fields: std::ptr::null(),
+            fields: core::ptr::null(),
         }
     }
 }
@@ -1608,10 +1609,10 @@ fn datatype_deserialize(
     // life.
     let mut fields: Vec<asdf_datatype_t> = Vec::with_capacity(parsed.fields.len());
     for field in &parsed.fields {
-        let name = field.name.as_deref().map(to_c_string).unwrap_or(std::ptr::null());
+        let name = field.name.as_deref().map(to_c_string).unwrap_or(core::ptr::null());
         let shape: Vec<u64> = field.datatype.shape.clone();
         let (shape_ptr, ndim) = if shape.is_empty() {
-            (std::ptr::null(), 0)
+            (core::ptr::null(), 0)
         } else {
             let boxed = shape.into_boxed_slice();
             let len = boxed.len() as u32;
@@ -1625,12 +1626,12 @@ fn datatype_deserialize(
             ndim,
             shape: shape_ptr,
             nfields: 0,
-            fields: std::ptr::null(),
+            fields: core::ptr::null(),
         });
     }
 
     let (fields_ptr, nfields) = if fields.is_empty() {
-        (std::ptr::null(), 0)
+        (core::ptr::null(), 0)
     } else {
         let len = fields.len() as u32;
         (Box::into_raw(fields.into_boxed_slice()).cast::<asdf_datatype_t>().cast_const(), len)
@@ -1639,10 +1640,10 @@ fn datatype_deserialize(
     unsafe {
         (*out).type_ = parsed.scalar as i32;
         (*out).size = parsed.item_size();
-        (*out).name = std::ptr::null();
+        (*out).name = core::ptr::null();
         (*out).byteorder = order_of(parsed.byteorder) as i32;
         (*out).ndim = 0;
-        (*out).shape = std::ptr::null();
+        (*out).shape = core::ptr::null();
         (*out).nfields = nfields;
         (*out).fields = fields_ptr;
     }
@@ -1716,7 +1717,7 @@ fn datatype_serialize_field(doc: &mut Document, field: &asdf_datatype_t) -> Opti
     }
 
     if field.ndim > 0 && !field.shape.is_null() {
-        let dims = unsafe { std::slice::from_raw_parts(field.shape, field.ndim as usize) };
+        let dims = unsafe { core::slice::from_raw_parts(field.shape, field.ndim as usize) };
         let items: Vec<NodeId> = dims.iter().map(|d| doc.add_scalar(d.to_string())).collect();
         let seq = doc.add_sequence(items);
         if let asdf_core::yaml::NodeData::Sequence { style, .. } = &mut doc.node_mut(seq).data {
@@ -1776,7 +1777,7 @@ fn datatype_serialize_impl(
     }
     if scalar == ScalarType::Structured {
         let fields = if obj.nfields > 0 && !obj.fields.is_null() {
-            unsafe { std::slice::from_raw_parts(obj.fields, obj.nfields as usize) }
+            unsafe { core::slice::from_raw_parts(obj.fields, obj.nfields as usize) }
         } else {
             &[]
         };
@@ -1810,24 +1811,24 @@ unsafe fn datatype_deinit(obj: *mut asdf_datatype_t) {
 unsafe fn datatype_free_storage(datatype: &mut asdf_datatype_t) {
     if !datatype.fields.is_null() && datatype.nfields > 0 {
         let count = datatype.nfields as usize;
-        let slice = std::ptr::slice_from_raw_parts_mut(datatype.fields.cast_mut(), count);
+        let slice = core::ptr::slice_from_raw_parts_mut(datatype.fields.cast_mut(), count);
         for index in 0..count {
             let field = unsafe { &mut *datatype.fields.cast_mut().add(index) };
             unsafe { datatype_free_storage(field) };
         }
         drop(unsafe { Box::from_raw(slice) });
-        datatype.fields = std::ptr::null();
+        datatype.fields = core::ptr::null();
         datatype.nfields = 0;
     }
     if !datatype.shape.is_null() && datatype.ndim > 0 {
         let shape =
-            std::ptr::slice_from_raw_parts_mut(datatype.shape.cast_mut(), datatype.ndim as usize);
+            core::ptr::slice_from_raw_parts_mut(datatype.shape.cast_mut(), datatype.ndim as usize);
         drop(unsafe { Box::from_raw(shape) });
-        datatype.shape = std::ptr::null();
+        datatype.shape = core::ptr::null();
         datatype.ndim = 0;
     }
     unsafe { free_c_string(datatype.name) };
-    datatype.name = std::ptr::null();
+    datatype.name = core::ptr::null();
 }
 
 unsafe fn datatype_copy(src: &asdf_datatype_t, dst: *mut asdf_datatype_t) -> bool {
@@ -1840,21 +1841,21 @@ unsafe fn datatype_copy(src: &asdf_datatype_t, dst: *mut asdf_datatype_t) -> boo
     // A field's sub-array shape is its own storage, so the copy gets one
     // too: a shallow copy would leave two owners of the same allocation.
     if src.ndim > 0 && !src.shape.is_null() {
-        let dims = unsafe { std::slice::from_raw_parts(src.shape, src.ndim as usize) };
+        let dims = unsafe { core::slice::from_raw_parts(src.shape, src.ndim as usize) };
         out.ndim = src.ndim;
         out.shape = Box::into_raw(dims.to_vec().into_boxed_slice()).cast::<u64>().cast_const();
     } else {
         out.ndim = 0;
-        out.shape = std::ptr::null();
+        out.shape = core::ptr::null();
     }
 
     if src.nfields == 0 || src.fields.is_null() {
         out.nfields = 0;
-        out.fields = std::ptr::null();
+        out.fields = core::ptr::null();
         return true;
     }
 
-    let source = unsafe { std::slice::from_raw_parts(src.fields, src.nfields as usize) };
+    let source = unsafe { core::slice::from_raw_parts(src.fields, src.nfields as usize) };
     let mut copies: Vec<asdf_datatype_t> = Vec::with_capacity(source.len());
     for field in source {
         let mut copy = asdf_datatype_t::zeroed();
@@ -1926,10 +1927,10 @@ pub struct asdf_meta_t {
 impl asdf_meta_t {
     fn zeroed() -> Self {
         Self {
-            asdf_library: std::ptr::null_mut(),
+            asdf_library: core::ptr::null_mut(),
             history: asdf_meta_history_t {
-                extensions: std::ptr::null_mut(),
-                entries: std::ptr::null_mut(),
+                extensions: core::ptr::null_mut(),
+                entries: core::ptr::null_mut(),
             },
         }
     }
@@ -1944,7 +1945,7 @@ fn read_list<T>(
     deserialize: fn(&Document, NodeId, *mut AsdfFile, *mut T) -> AsdfValueErr,
 ) -> *mut *const T {
     let Some(node) = node else {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
     let items: Vec<NodeId> = match doc.sequence_items(node) {
         Some(items) => items.to_vec(),
@@ -1961,9 +1962,9 @@ fn read_list<T>(
         }
     }
     if list.is_empty() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
-    list.push(std::ptr::null());
+    list.push(core::ptr::null());
     Box::into_raw(list.into_boxed_slice()).cast::<*const T>()
 }
 
@@ -1980,7 +1981,7 @@ unsafe fn free_list<T>(list: *mut *const T, destroy: unsafe extern "C" fn(*mut T
         unsafe { destroy((*list.offset(count)).cast_mut()) };
         count += 1;
     }
-    let slice = std::ptr::slice_from_raw_parts_mut(list, count as usize + 1);
+    let slice = core::ptr::slice_from_raw_parts_mut(list, count as usize + 1);
     drop(unsafe { Box::from_raw(slice) });
 }
 
@@ -1998,10 +1999,10 @@ fn meta_deserialize(
                 raw
             } else {
                 drop(unsafe { Box::from_raw(raw) });
-                std::ptr::null_mut()
+                core::ptr::null_mut()
             }
         })
-        .unwrap_or(std::ptr::null_mut());
+        .unwrap_or(core::ptr::null_mut());
 
     // `history` is a mapping of extensions and entries in the 1.1.0 form,
     // and a bare sequence of entries in the older one. Both are accepted.
@@ -2102,20 +2103,20 @@ unsafe fn meta_deinit(obj: *mut asdf_meta_t) {
 unsafe fn meta_copy(src: &asdf_meta_t, dst: *mut asdf_meta_t) -> bool {
     let out = unsafe { &mut *dst };
     out.asdf_library = if src.asdf_library.is_null() {
-        std::ptr::null_mut()
+        core::ptr::null_mut()
     } else {
-        unsafe { asdf_software_copy(std::ptr::null_mut(), src.asdf_library) }
+        unsafe { asdf_software_copy(core::ptr::null_mut(), src.asdf_library) }
     };
     out.history.extensions = if src.history.extensions.is_null() {
-        std::ptr::null_mut()
+        core::ptr::null_mut()
     } else {
-        unsafe { asdf_extension_metadata_array_copy(std::ptr::null_mut(), src.history.extensions) }
+        unsafe { asdf_extension_metadata_array_copy(core::ptr::null_mut(), src.history.extensions) }
             .cast::<*const asdf_extension_metadata_t>()
     };
     out.history.entries = if src.history.entries.is_null() {
-        std::ptr::null_mut()
+        core::ptr::null_mut()
     } else {
-        unsafe { asdf_history_entry_array_copy(std::ptr::null_mut(), src.history.entries) }
+        unsafe { asdf_history_entry_array_copy(core::ptr::null_mut(), src.history.entries) }
             .cast::<*const asdf_history_entry_t>()
     };
     true
@@ -2181,7 +2182,7 @@ mod meta_tests {
               - name: y\n    datatype: int32\n",
         );
         buf.extend_from_slice(b"...\n");
-        let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), core::ptr::null_mut()) };
         assert!(!f.is_null());
         Handle(f)
     }
@@ -2192,7 +2193,7 @@ mod meta_tests {
         // The root itself carries the core/asdf tag.
         assert!(unsafe { asdf_is_meta(h.0, c"".as_ptr()) });
 
-        let mut meta: *mut asdf_meta_t = std::ptr::null_mut();
+        let mut meta: *mut asdf_meta_t = core::ptr::null_mut();
         assert_eq!(unsafe { asdf_get_meta(h.0, c"".as_ptr(), &mut meta) }, AsdfValueErr::Ok);
         let view = unsafe { &*meta };
 
@@ -2226,10 +2227,10 @@ mod meta_tests {
             b"history:\n- !core/history_entry-1.0.0 {description: 'old style'}\n",
         );
         buf.extend_from_slice(b"...\n");
-        let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), core::ptr::null_mut()) };
         let h = Handle(f);
 
-        let mut meta: *mut asdf_meta_t = std::ptr::null_mut();
+        let mut meta: *mut asdf_meta_t = core::ptr::null_mut();
         assert_eq!(unsafe { asdf_get_meta(h.0, c"".as_ptr(), &mut meta) }, AsdfValueErr::Ok);
         let view = unsafe { &*meta };
         assert!(view.history.extensions.is_null(), "no extensions in the old form");
@@ -2244,7 +2245,7 @@ mod meta_tests {
     #[test]
     fn metadata_copies_are_independent() {
         let h = open_full();
-        let mut meta: *mut asdf_meta_t = std::ptr::null_mut();
+        let mut meta: *mut asdf_meta_t = core::ptr::null_mut();
         unsafe { asdf_get_meta(h.0, c"".as_ptr(), &mut meta) };
 
         let copy = unsafe { asdf_meta_copy(h.0, meta) };
@@ -2268,7 +2269,7 @@ mod meta_tests {
         let h = open_full();
         assert!(unsafe { asdf_is_datatype(h.0, c"dt".as_ptr()) });
 
-        let mut datatype: *mut asdf_datatype_t = std::ptr::null_mut();
+        let mut datatype: *mut asdf_datatype_t = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_get_datatype(h.0, c"dt".as_ptr(), &mut datatype) },
             AsdfValueErr::Ok
@@ -2284,7 +2285,7 @@ mod meta_tests {
     #[test]
     fn reads_a_compound_datatype_with_named_fields() {
         let h = open_full();
-        let mut datatype: *mut asdf_datatype_t = std::ptr::null_mut();
+        let mut datatype: *mut asdf_datatype_t = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_get_datatype(h.0, c"compound".as_ptr(), &mut datatype) },
             AsdfValueErr::Ok
@@ -2295,7 +2296,7 @@ mod meta_tests {
         // A record of float64 plus int32 is twelve bytes.
         assert_eq!(view.size, 12);
 
-        let fields = unsafe { std::slice::from_raw_parts(view.fields, 2) };
+        let fields = unsafe { core::slice::from_raw_parts(view.fields, 2) };
         assert_eq!(unsafe { CStr::from_ptr(fields[0].name) }.to_str().unwrap(), "x");
         assert_eq!(fields[0].size, 8);
         assert_eq!(unsafe { CStr::from_ptr(fields[1].name) }.to_str().unwrap(), "y");
@@ -2318,7 +2319,7 @@ mod meta_tests {
 
         let mut datatype = asdf_datatype_t::zeroed();
         unsafe { asdf_datatype_deinit(&mut datatype) };
-        unsafe { asdf_datatype_deinit(std::ptr::null_mut()) };
+        unsafe { asdf_datatype_deinit(core::ptr::null_mut()) };
     }
 }
 
@@ -2335,7 +2336,7 @@ mod meta_tests {
 ///
 /// Idempotent: calling it twice registers nothing new.
 pub fn register_core_extensions() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     if REGISTERED.swap(true, Ordering::SeqCst) {

@@ -302,7 +302,7 @@ impl EventCollector {
 
 impl<'i> SpannedEventReceiver<'i> for EventCollector {
     fn on_event(&mut self, ev: Event<'i>, _span: SapSpan) {
-        let tag_of = |tag: Option<std::borrow::Cow<'_, saphyr_parser::Tag>>| {
+        let tag_of = |tag: Option<alloc::borrow::Cow<'_, saphyr_parser::Tag>>| {
             tag.map(|t| Tag::new(t.handle.clone(), t.suffix.clone()).full())
         };
         match ev {

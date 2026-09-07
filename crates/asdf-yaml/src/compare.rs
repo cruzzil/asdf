@@ -12,8 +12,8 @@
 //! about meaning: tags, resolved scalar values, sequence order and the set of
 //! mapping keys.
 
+use core::fmt;
 use std::collections::HashSet;
-use std::fmt;
 
 use crate::document::Document;
 use crate::node::{NodeData, NodeId};

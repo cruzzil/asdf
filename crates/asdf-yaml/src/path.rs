@@ -606,7 +606,7 @@ impl Document {
         if idx < 0 || idx > len {
             return None;
         }
-        Some(std::mem::replace(&mut items[idx as usize], value))
+        Some(core::mem::replace(&mut items[idx as usize], value))
     }
 
     /// Remove whatever is at `path`, returning it.

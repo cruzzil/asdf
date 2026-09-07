@@ -15,7 +15,7 @@
 //!   valid until the file is written. `asdf_block_data_alloc` allocates a
 //!   buffer the block owns instead.
 
-use std::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int, c_void};
 
 use asdf_core::block::header::CHECKSUM_SIZE;
 use asdf_core::compression::Compression;
@@ -41,7 +41,7 @@ impl BlockData {
             BlockData::Empty => &[],
             // SAFETY: the C contract requires the caller to keep this buffer
             // valid until the file is written.
-            BlockData::Borrowed { ptr, len } => unsafe { std::slice::from_raw_parts(*ptr, *len) },
+            BlockData::Borrowed { ptr, len } => unsafe { core::slice::from_raw_parts(*ptr, *len) },
             BlockData::Owned(v) => v,
         }
     }
@@ -82,8 +82,8 @@ pub struct AsdfBlock {
     decompressed: Option<Vec<u8>>,
 }
 
-impl std::fmt::Debug for AsdfBlock {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for AsdfBlock {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AsdfBlock")
             .field("index", &self.index)
             .field("detached", &self.detached)
@@ -96,7 +96,7 @@ impl std::fmt::Debug for AsdfBlock {
 impl AsdfBlock {
     fn detached(data: BlockData) -> Self {
         Self {
-            file: std::ptr::null_mut(),
+            file: core::ptr::null_mut(),
             index: None,
             detached: true,
             data,
@@ -134,12 +134,12 @@ fn block_ref<'a>(block: *mut AsdfBlock) -> Option<&'a mut AsdfBlock> {
 /// with [`asdf_block_close`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_block_open(file: *mut AsdfFile, index: usize) -> *mut AsdfBlock {
-    guard("asdf_block_open", std::ptr::null_mut(), || {
+    guard("asdf_block_open", core::ptr::null_mut(), || {
         let Some(reader) = file_reader(file) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         let Ok(location) = reader.block(index) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         let header = location.header.clone();
         let compression =
@@ -197,7 +197,7 @@ pub unsafe extern "C" fn asdf_block_close(block: *mut AsdfBlock) {
 /// [`asdf_block_append`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_block_create(data: *const c_void, size: usize) -> *mut AsdfBlock {
-    guard("asdf_block_create", std::ptr::null_mut(), || {
+    guard("asdf_block_create", core::ptr::null_mut(), || {
         let payload = if !data.is_null() {
             BlockData::Borrowed { ptr: data.cast::<u8>(), len: size }
         } else if size > 0 {
@@ -233,9 +233,9 @@ pub unsafe extern "C" fn asdf_block_destroy(block: *mut AsdfBlock) {
 /// until the block is destroyed or its data replaced.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_block_data_alloc(block: *mut AsdfBlock, size: usize) -> *mut c_void {
-    guard("asdf_block_data_alloc", std::ptr::null_mut(), || {
+    guard("asdf_block_data_alloc", core::ptr::null_mut(), || {
         let Some(block) = block_ref(block) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         match &mut block.data {
             BlockData::Owned(existing) if existing.len() == size => {
@@ -360,15 +360,15 @@ pub unsafe extern "C" fn asdf_block_append(
     file: *mut AsdfFile,
     block: *mut AsdfBlock,
 ) -> *mut AsdfBlock {
-    guard("asdf_block_append", std::ptr::null_mut(), || {
+    guard("asdf_block_append", core::ptr::null_mut(), || {
         let Some(handle) = block_ref(block) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         if !handle.detached {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let Some(blocks) = file_blocks_mut(file) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         blocks.push(handle.to_pending());
 
@@ -400,9 +400,9 @@ pub unsafe extern "C" fn asdf_block_data_size(block: *mut AsdfBlock) -> usize {
 /// `block` must be null or a valid handle. The pointer is owned by the block.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_block_compression(block: *mut AsdfBlock) -> *const c_char {
-    guard("asdf_block_compression", std::ptr::null(), || {
+    guard("asdf_block_compression", core::ptr::null(), || {
         let Some(block) = block_ref(block) else {
-            return std::ptr::null();
+            return core::ptr::null();
         };
         // Five bytes wide, so even a four-character name is NUL-terminated.
         block.compression_name.as_ptr().cast::<c_char>()
@@ -445,16 +445,16 @@ pub unsafe extern "C" fn asdf_block_compression_set(
 /// `block` must be null or a valid handle. The pointer is owned by the file.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_block_checksum(block: *mut AsdfBlock) -> *const u8 {
-    guard("asdf_block_checksum", std::ptr::null(), || {
+    guard("asdf_block_checksum", core::ptr::null(), || {
         let Some(handle) = block_ref(block) else {
-            return std::ptr::null();
+            return core::ptr::null();
         };
         let (Some(reader), Some(index)) = (file_reader(handle.file), handle.index) else {
-            return std::ptr::null();
+            return core::ptr::null();
         };
         match reader.block(index) {
             Ok(location) => location.header.checksum.as_ptr(),
-            Err(_) => std::ptr::null(),
+            Err(_) => core::ptr::null(),
         }
     })
 }
@@ -482,7 +482,7 @@ pub unsafe extern "C" fn asdf_block_checksum_verify(
         };
         if !expected.is_null() {
             unsafe {
-                std::ptr::copy_nonoverlapping(computed.as_ptr(), expected, CHECKSUM_SIZE);
+                core::ptr::copy_nonoverlapping(computed.as_ptr(), expected, CHECKSUM_SIZE);
             }
         }
         matches!(status, ChecksumStatus::Valid | ChecksumStatus::Absent)
@@ -496,12 +496,12 @@ pub unsafe extern "C" fn asdf_block_checksum_verify(
 /// returned pointer is owned by the block.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_block_data(block: *mut AsdfBlock, size: *mut usize) -> *const c_void {
-    guard("asdf_block_data", std::ptr::null(), || {
+    guard("asdf_block_data", core::ptr::null(), || {
         let Some(handle) = block_ref(block) else {
             if !size.is_null() {
                 unsafe { write_out(size, 0) };
             }
-            return std::ptr::null();
+            return core::ptr::null();
         };
 
         if handle.compression == Compression::None {
@@ -510,7 +510,7 @@ pub unsafe extern "C" fn asdf_block_data(block: *mut AsdfBlock, size: *mut usize
                 unsafe { write_out(size, slice.len()) };
             }
             return if slice.is_empty() {
-                std::ptr::null()
+                core::ptr::null()
             } else {
                 slice.as_ptr().cast::<c_void>()
             };
@@ -525,7 +525,7 @@ pub unsafe extern "C" fn asdf_block_data(block: *mut AsdfBlock, size: *mut usize
                     if !size.is_null() {
                         unsafe { write_out(size, 0) };
                     }
-                    return std::ptr::null();
+                    return core::ptr::null();
                 }
             }
         }
@@ -546,18 +546,18 @@ pub unsafe extern "C" fn asdf_block_data_raw(
     block: *mut AsdfBlock,
     size: *mut usize,
 ) -> *const c_void {
-    guard("asdf_block_data_raw", std::ptr::null(), || {
+    guard("asdf_block_data_raw", core::ptr::null(), || {
         let Some(handle) = block_ref(block) else {
             if !size.is_null() {
                 unsafe { write_out(size, 0) };
             }
-            return std::ptr::null();
+            return core::ptr::null();
         };
         let slice = handle.data.as_slice();
         if !size.is_null() {
             unsafe { write_out(size, slice.len()) };
         }
-        if slice.is_empty() { std::ptr::null() } else { slice.as_ptr().cast::<c_void>() }
+        if slice.is_empty() { core::ptr::null() } else { slice.as_ptr().cast::<c_void>() }
     })
 }
 
@@ -565,8 +565,8 @@ pub unsafe extern "C" fn asdf_block_data_raw(
 mod tests {
     use super::*;
     use crate::file_ffi::{asdf_block_count, asdf_close, asdf_open_mem_ex, asdf_write_to_mem};
+    use alloc::ffi::CString;
     use asdf_core::{Writer, writer::PendingBlock as CorePending};
-    use std::ffi::CString;
 
     struct Handle(*mut AsdfFile);
     impl Drop for Handle {
@@ -590,7 +590,7 @@ mod tests {
     fn open_sample() -> (Handle, Vec<u8>) {
         let bytes = sample_file();
         let f =
-            unsafe { asdf_open_mem_ex(bytes.as_ptr().cast(), bytes.len(), std::ptr::null_mut()) };
+            unsafe { asdf_open_mem_ex(bytes.as_ptr().cast(), bytes.len(), core::ptr::null_mut()) };
         assert!(!f.is_null());
         (Handle(f), bytes)
     }
@@ -607,7 +607,7 @@ mod tests {
         let data = unsafe { asdf_block_data(block, &mut size) };
         assert!(!data.is_null());
         assert_eq!(size, 256);
-        let slice = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) };
+        let slice = unsafe { core::slice::from_raw_parts(data.cast::<u8>(), size) };
         assert_eq!(slice[0], 0);
         assert_eq!(slice[255], 255);
 
@@ -632,7 +632,7 @@ mod tests {
         let mut size = 0usize;
         let data = unsafe { asdf_block_data(block, &mut size) };
         assert_eq!(size, 2048);
-        let slice = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) };
+        let slice = unsafe { core::slice::from_raw_parts(data.cast::<u8>(), size) };
         assert!(slice.iter().all(|b| *b == 7));
 
         // A second call must return the cached buffer, not inflate again.
@@ -664,7 +664,7 @@ mod tests {
     fn out_of_range_indices_return_null() {
         let (h, _bytes) = open_sample();
         assert!(unsafe { asdf_block_open(h.0, 99) }.is_null());
-        assert!(unsafe { asdf_block_open(std::ptr::null_mut(), 0) }.is_null());
+        assert!(unsafe { asdf_block_open(core::ptr::null_mut(), 0) }.is_null());
     }
 
     #[test]
@@ -685,7 +685,7 @@ mod tests {
 
     #[test]
     fn creating_with_a_null_buffer_allocates_one() {
-        let block = unsafe { asdf_block_create(std::ptr::null(), 128) };
+        let block = unsafe { asdf_block_create(core::ptr::null(), 128) };
         assert_eq!(unsafe { asdf_block_data_size(block) }, 128);
 
         // The documented shortcut: data_alloc of the same size returns the
@@ -696,10 +696,10 @@ mod tests {
         assert_eq!(first, second, "an existing buffer of the same size is reused");
 
         // Filling it through the returned pointer must be visible.
-        unsafe { std::ptr::write_bytes(first.cast::<u8>(), 0xAB, 128) };
+        unsafe { core::ptr::write_bytes(first.cast::<u8>(), 0xAB, 128) };
         let mut size = 0usize;
         let data = unsafe { asdf_block_data_raw(block, &mut size) };
-        let slice = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) };
+        let slice = unsafe { core::slice::from_raw_parts(data.cast::<u8>(), size) };
         assert!(slice.iter().all(|b| *b == 0xAB));
 
         unsafe { asdf_block_destroy(block) };
@@ -707,7 +707,7 @@ mod tests {
 
     #[test]
     fn a_different_size_reallocates() {
-        let block = unsafe { asdf_block_create(std::ptr::null(), 16) };
+        let block = unsafe { asdf_block_create(core::ptr::null(), 16) };
         let _ = unsafe { asdf_block_data_alloc(block, 32) };
         assert_eq!(unsafe { asdf_block_data_size(block) }, 32);
         unsafe { asdf_block_destroy(block) };
@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn appending_transfers_the_block_to_the_file() {
-        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         let h = Handle(f);
 
         let payload = b"appended data".to_vec();
@@ -730,10 +730,10 @@ mod tests {
         unsafe { asdf_block_close(appended) };
 
         // The data must survive into the written file.
-        let mut buf: *mut c_void = std::ptr::null_mut();
+        let mut buf: *mut c_void = core::ptr::null_mut();
         let mut size = 0usize;
         assert_eq!(unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) }, 0);
-        let written = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
+        let written = unsafe { core::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
         unsafe { libc::free(buf) };
 
         let reader = asdf_core::Reader::from_bytes(written).unwrap();
@@ -743,7 +743,7 @@ mod tests {
 
     #[test]
     fn compression_can_be_set_and_unknown_names_refused() {
-        let block = unsafe { asdf_block_create(std::ptr::null(), 8) };
+        let block = unsafe { asdf_block_create(core::ptr::null(), 8) };
 
         let zlib = CString::new("zlib").unwrap();
         assert_eq!(unsafe { asdf_block_compression_set(block, zlib.as_ptr()) }, 0);
@@ -762,7 +762,7 @@ mod tests {
         );
 
         // The empty string clears it.
-        assert_eq!(unsafe { asdf_block_compression_set(block, std::ptr::null()) }, 0);
+        assert_eq!(unsafe { asdf_block_compression_set(block, core::ptr::null()) }, 0);
         assert_eq!(unsafe { CStr::from_ptr(asdf_block_compression(block)) }.to_str().unwrap(), "");
 
         unsafe { asdf_block_destroy(block) };
@@ -770,7 +770,7 @@ mod tests {
 
     #[test]
     fn an_appended_block_is_compressed_on_write() {
-        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         let h = Handle(f);
 
         let payload = vec![3u8; 4096];
@@ -780,10 +780,10 @@ mod tests {
         unsafe { asdf_block_append(h.0, block) };
         unsafe { asdf_block_close(block) };
 
-        let mut buf: *mut c_void = std::ptr::null_mut();
+        let mut buf: *mut c_void = core::ptr::null_mut();
         let mut size = 0usize;
         unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) };
-        let written = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
+        let written = unsafe { core::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
         unsafe { libc::free(buf) };
 
         let reader = asdf_core::Reader::from_bytes(written).unwrap();
@@ -794,7 +794,7 @@ mod tests {
 
     #[test]
     fn allocated_size_is_honoured_on_write() {
-        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         let h = Handle(f);
 
         let payload = [1u8; 32];
@@ -803,10 +803,10 @@ mod tests {
         unsafe { asdf_block_append(h.0, block) };
         unsafe { asdf_block_close(block) };
 
-        let mut buf: *mut c_void = std::ptr::null_mut();
+        let mut buf: *mut c_void = core::ptr::null_mut();
         let mut size = 0usize;
         unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) };
-        let written = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
+        let written = unsafe { core::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
         unsafe { libc::free(buf) };
 
         let reader = asdf_core::Reader::from_bytes(written).unwrap();
@@ -816,7 +816,7 @@ mod tests {
 
     #[test]
     fn data_set_replaces_the_buffer() {
-        let block = unsafe { asdf_block_create(std::ptr::null(), 0) };
+        let block = unsafe { asdf_block_create(core::ptr::null(), 0) };
         let payload = b"replacement".to_vec();
         assert_eq!(
             unsafe { asdf_block_data_set(block, payload.as_ptr().cast(), payload.len()) },
@@ -830,7 +830,7 @@ mod tests {
     fn precompressed_data_records_its_uncompressed_size() {
         let raw = vec![9u8; 1000];
         let stored = Compression::Zlib.compress(&raw).unwrap();
-        let block = unsafe { asdf_block_create(std::ptr::null(), 0) };
+        let block = unsafe { asdf_block_create(core::ptr::null(), 0) };
         let zlib = CString::new("zlib").unwrap();
         assert_eq!(
             unsafe {
@@ -851,7 +851,7 @@ mod tests {
         let mut size = 0usize;
         let data = unsafe { asdf_block_data(block, &mut size) };
         assert_eq!(size, 1000);
-        let slice = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) };
+        let slice = unsafe { core::slice::from_raw_parts(data.cast::<u8>(), size) };
         assert!(slice.iter().all(|b| *b == 9));
 
         unsafe { asdf_block_destroy(block) };
@@ -859,12 +859,12 @@ mod tests {
 
     #[test]
     fn null_handles_are_tolerated() {
-        let null = std::ptr::null_mut();
+        let null = core::ptr::null_mut();
         assert_eq!(unsafe { asdf_block_data_size(null) }, 0);
         assert!(unsafe { asdf_block_compression(null) }.is_null());
-        assert_eq!(unsafe { asdf_block_compression_set(null, std::ptr::null()) }, -1);
+        assert_eq!(unsafe { asdf_block_compression_set(null, core::ptr::null()) }, -1);
         assert!(unsafe { asdf_block_checksum(null) }.is_null());
-        assert!(!unsafe { asdf_block_checksum_verify(null, std::ptr::null_mut()) });
+        assert!(!unsafe { asdf_block_checksum_verify(null, core::ptr::null_mut()) });
         assert_eq!(unsafe { asdf_block_allocated_size_set(null, 0) }, -1);
         assert!(unsafe { asdf_block_data_alloc(null, 8) }.is_null());
 

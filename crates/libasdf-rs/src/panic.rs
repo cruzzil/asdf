@@ -9,8 +9,9 @@
 //! engine. It is reported to stderr on first occurrence so the bug is visible
 //! rather than silently swallowed.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use core::panic::AssertUnwindSafe;
+use core::sync::atomic::{AtomicBool, Ordering};
+use std::panic::catch_unwind;
 
 static REPORTED: AtomicBool = AtomicBool::new(false);
 
@@ -30,7 +31,7 @@ pub fn guard<T>(what: &'static str, fallback: T, body: impl FnOnce() -> T) -> T 
     }
 }
 
-fn report(what: &'static str, payload: &Box<dyn std::any::Any + Send>) {
+fn report(what: &'static str, payload: &Box<dyn core::any::Any + Send>) {
     // Only the first panic is reported, so a caller looping over a broken
     // file does not flood stderr.
     if REPORTED.swap(true, Ordering::Relaxed) {
@@ -72,7 +73,7 @@ mod tests {
     fn null_pointers_are_a_valid_fallback() {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let got: *mut u8 = guard("test", std::ptr::null_mut(), || panic!("boom"));
+        let got: *mut u8 = guard("test", core::ptr::null_mut(), || panic!("boom"));
         std::panic::set_hook(prev);
         assert!(got.is_null());
     }

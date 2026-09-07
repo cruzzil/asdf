@@ -14,7 +14,9 @@
 //! When phase 4 lands the gap predicates below go away and this becomes a
 //! plain equality check.
 
-use std::collections::BTreeMap;
+extern crate alloc;
+
+use alloc::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use asdf_core::layout::scan;

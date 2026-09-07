@@ -21,7 +21,8 @@
 //! An event's strings belong to the event and stay valid until it is freed.
 
 use crate::ffi::write_out;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use alloc::ffi::CString;
+use core::ffi::{CStr, c_char, c_int, c_void};
 
 use asdf_core::events::{Event as CoreEvent, EventOptions, events, render_event};
 use asdf_core::yaml::{YamlEvent, YamlEventKind};
@@ -94,7 +95,7 @@ pub struct AsdfParser {
     /// The name reported in messages, when the input came from a path.
     filename: Option<CString>,
     /// The remaining events to produce, from the engine's stream.
-    steps: std::collections::VecDeque<CoreEvent>,
+    steps: alloc::collections::VecDeque<CoreEvent>,
     /// Events handed out and not yet freed.
     live: Vec<*mut AsdfEvent>,
     /// The event `asdf_event_iterate` produced last, which it frees on the
@@ -111,9 +112,9 @@ impl AsdfParser {
             error: ErrorState::default(),
             buffer: Vec::new(),
             filename: None,
-            steps: std::collections::VecDeque::new(),
+            steps: alloc::collections::VecDeque::new(),
             live: Vec::new(),
-            iterated: std::ptr::null_mut(),
+            iterated: core::ptr::null_mut(),
             finished: false,
         }
     }
@@ -153,7 +154,7 @@ impl AsdfParser {
     fn next_event(&mut self) -> *mut AsdfEvent {
         let Some(step) = self.steps.pop_front() else {
             self.finished = true;
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
 
         let built = match step.clone() {
@@ -164,7 +165,7 @@ impl AsdfParser {
                 .map(|owned| (AsdfEventType::Comment, Payload::Comment(owned))),
             CoreEvent::BlockIndex(_) => Some((AsdfEventType::BlockIndex, Payload::None)),
             CoreEvent::TreeStart { start } => {
-                let info = Box::new(asdf_tree_info_t { start, end: 0, buf: std::ptr::null() });
+                let info = Box::new(asdf_tree_info_t { start, end: 0, buf: core::ptr::null() });
                 Some((AsdfEventType::TreeStart, Payload::Tree { info, text: None }))
             }
             CoreEvent::TreeEnd { start, end, text } => {
@@ -174,7 +175,7 @@ impl AsdfParser {
                 // `buf` is filled in below, once the event is in its final
                 // home. Deriving it here would leave C holding a pointer that
                 // Rust considers invalid.
-                let info = Box::new(asdf_tree_info_t { start, end, buf: std::ptr::null() });
+                let info = Box::new(asdf_tree_info_t { start, end, buf: core::ptr::null() });
                 Some((AsdfEventType::TreeEnd, Payload::Tree { info, text }))
             }
             CoreEvent::Yaml(event) => Some((AsdfEventType::Yaml, Payload::Yaml(yaml_sub(&event)))),
@@ -201,7 +202,7 @@ impl AsdfParser {
         .map(|(event_type, payload)| AsdfEvent { event_type, payload, source: step });
 
         let Some(event) = built else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         let mut boxed = Box::new(event);
 
@@ -229,7 +230,7 @@ impl AsdfParser {
         };
         self.live.remove(position);
         if self.iterated == event {
-            self.iterated = std::ptr::null_mut();
+            self.iterated = core::ptr::null_mut();
         }
         drop(unsafe { Box::from_raw(event) });
     }
@@ -237,7 +238,7 @@ impl AsdfParser {
 
 impl Drop for AsdfParser {
     fn drop(&mut self) {
-        for event in std::mem::take(&mut self.live) {
+        for event in core::mem::take(&mut self.live) {
             drop(unsafe { Box::from_raw(event) });
         }
     }
@@ -288,7 +289,7 @@ fn event_ref<'a>(event: *const AsdfEvent) -> Option<&'a AsdfEvent> {
 /// must be released with [`asdf_parser_destroy`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_parser_create(config: *const asdf_parser_cfg_t) -> *mut AsdfParser {
-    guard("asdf_parser_create", std::ptr::null_mut(), || {
+    guard("asdf_parser_create", core::ptr::null_mut(), || {
         let flags = if config.is_null() { 0 } else { unsafe { &*config }.flags };
         Box::into_raw(Box::new(AsdfParser::new(flags)))
     })
@@ -396,7 +397,7 @@ pub unsafe extern "C" fn asdf_parser_set_input_mem(
             state.error.set(ErrorCode::InvalidArgument as i32, "no buffer given");
             return -1;
         }
-        let bytes = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
+        let bytes = unsafe { core::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
         state.ingest(bytes)
     })
 }
@@ -429,9 +430,9 @@ fn read_stream(fp: *mut c_void) -> Option<Vec<u8>> {
 /// `parser` must be null or a valid handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_parser_parse(parser: *mut AsdfParser) -> *mut AsdfEvent {
-    guard("asdf_parser_parse", std::ptr::null_mut(), || match parser_mut(parser) {
+    guard("asdf_parser_parse", core::ptr::null_mut(), || match parser_mut(parser) {
         Some(state) => state.next_event(),
-        None => std::ptr::null_mut(),
+        None => core::ptr::null_mut(),
     })
 }
 
@@ -455,9 +456,9 @@ pub unsafe extern "C" fn asdf_parser_has_error(parser: *const AsdfParser) -> boo
 /// and is invalidated by the next error it records.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_parser_get_error(parser: *const AsdfParser) -> *const c_char {
-    guard("asdf_parser_get_error", std::ptr::null(), || match parser_ref(parser) {
+    guard("asdf_parser_get_error", core::ptr::null(), || match parser_ref(parser) {
         Some(p) => p.error.message_ptr(),
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     })
 }
 
@@ -514,9 +515,9 @@ pub extern "C" fn asdf_event_type_name(event_type: c_int) -> *const c_char {
 /// event.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_event_comment(event: *const AsdfEvent) -> *const c_char {
-    guard("asdf_event_comment", std::ptr::null(), || match event_ref(event).map(|e| &e.payload) {
+    guard("asdf_event_comment", core::ptr::null(), || match event_ref(event).map(|e| &e.payload) {
         Some(Payload::Comment(text)) => text.as_ptr(),
-        _ => std::ptr::null(),
+        _ => core::ptr::null(),
     })
 }
 
@@ -527,9 +528,11 @@ pub unsafe extern "C" fn asdf_event_comment(event: *const AsdfEvent) -> *const c
 /// event.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_event_tree_info(event: *const AsdfEvent) -> *const asdf_tree_info_t {
-    guard("asdf_event_tree_info", std::ptr::null(), || match event_ref(event).map(|e| &e.payload) {
-        Some(Payload::Tree { info, .. }) => std::ptr::from_ref::<asdf_tree_info_t>(info),
-        _ => std::ptr::null(),
+    guard("asdf_event_tree_info", core::ptr::null(), || {
+        match event_ref(event).map(|e| &e.payload) {
+            Some(Payload::Tree { info, .. }) => core::ptr::from_ref::<asdf_tree_info_t>(info),
+            _ => core::ptr::null(),
+        }
     })
 }
 
@@ -542,10 +545,10 @@ pub unsafe extern "C" fn asdf_event_tree_info(event: *const AsdfEvent) -> *const
 pub unsafe extern "C" fn asdf_event_block_info(
     event: *const AsdfEvent,
 ) -> *const asdf_block_info_t {
-    guard("asdf_event_block_info", std::ptr::null(), || {
+    guard("asdf_event_block_info", core::ptr::null(), || {
         match event_ref(event).map(|e| &e.payload) {
-            Some(Payload::Block(info)) => std::ptr::from_ref::<asdf_block_info_t>(info),
-            _ => std::ptr::null(),
+            Some(Payload::Block(info)) => core::ptr::from_ref::<asdf_block_info_t>(info),
+            _ => core::ptr::null(),
         }
     })
 }
@@ -558,9 +561,9 @@ pub unsafe extern "C" fn asdf_event_block_info(
 /// `parser` must be null or a valid handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_event_iterate(parser: *mut AsdfParser) -> *mut AsdfEvent {
-    guard("asdf_event_iterate", std::ptr::null_mut(), || {
+    guard("asdf_event_iterate", core::ptr::null_mut(), || {
         let Some(state) = parser_mut(parser) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         if !state.iterated.is_null() {
             let previous = state.iterated;
@@ -665,7 +668,7 @@ pub unsafe extern "C" fn asdf_yaml_event_scalar_value(
     event: *const AsdfEvent,
     lenp: *mut usize,
 ) -> *const c_char {
-    guard("asdf_yaml_event_scalar_value", std::ptr::null(), || {
+    guard("asdf_yaml_event_scalar_value", core::ptr::null(), || {
         let text = match event_ref(event).map(|e| &e.payload) {
             Some(Payload::Yaml(sub)) => sub.value.as_ref(),
             _ => None,
@@ -681,7 +684,7 @@ pub unsafe extern "C" fn asdf_yaml_event_scalar_value(
                 if !lenp.is_null() {
                     unsafe { write_out(lenp, 0) };
                 }
-                std::ptr::null()
+                core::ptr::null()
             }
         }
     })
@@ -696,7 +699,7 @@ pub unsafe extern "C" fn asdf_yaml_event_tag(
     event: *const AsdfEvent,
     lenp: *mut usize,
 ) -> *const c_char {
-    guard("asdf_yaml_event_tag", std::ptr::null(), || {
+    guard("asdf_yaml_event_tag", core::ptr::null(), || {
         let tag = match event_ref(event).map(|e| &e.payload) {
             Some(Payload::Yaml(sub)) => sub.tag.as_ref(),
             _ => None,
@@ -712,7 +715,7 @@ pub unsafe extern "C" fn asdf_yaml_event_tag(
                 if !lenp.is_null() {
                     unsafe { write_out(lenp, 0) };
                 }
-                std::ptr::null()
+                core::ptr::null()
             }
         }
     })
@@ -741,7 +744,7 @@ mod tests {
     }
 
     fn parse(bytes: &[u8], flags: AsdfParserOptFlags) -> Parser {
-        let cfg = asdf_parser_cfg_t { flags, log: std::ptr::null_mut() };
+        let cfg = asdf_parser_cfg_t { flags, log: core::ptr::null_mut() };
         let parser = unsafe { asdf_parser_create(&cfg) };
         assert!(!parser.is_null());
         assert_eq!(
@@ -898,7 +901,7 @@ mod tests {
 
     #[test]
     fn a_bad_buffer_is_reported_not_fatal() {
-        let cfg = asdf_parser_cfg_t { flags: 0, log: std::ptr::null_mut() };
+        let cfg = asdf_parser_cfg_t { flags: 0, log: core::ptr::null_mut() };
         let parser = Parser(unsafe { asdf_parser_create(&cfg) });
         let junk = b"not an asdf file at all\n";
         assert_eq!(
@@ -912,21 +915,21 @@ mod tests {
 
     #[test]
     fn null_handles_are_tolerated() {
-        assert!(unsafe { asdf_parser_parse(std::ptr::null_mut()) }.is_null());
-        assert!(unsafe { asdf_event_iterate(std::ptr::null_mut()) }.is_null());
-        assert!(!unsafe { asdf_parser_has_error(std::ptr::null()) });
-        assert_eq!(unsafe { asdf_event_type(std::ptr::null_mut()) }, AsdfEventType::None);
-        assert!(unsafe { asdf_event_comment(std::ptr::null()) }.is_null());
-        unsafe { asdf_parser_destroy(std::ptr::null_mut()) };
-        unsafe { asdf_event_free(std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert!(unsafe { asdf_parser_parse(core::ptr::null_mut()) }.is_null());
+        assert!(unsafe { asdf_event_iterate(core::ptr::null_mut()) }.is_null());
+        assert!(!unsafe { asdf_parser_has_error(core::ptr::null()) });
+        assert_eq!(unsafe { asdf_event_type(core::ptr::null_mut()) }, AsdfEventType::None);
+        assert!(unsafe { asdf_event_comment(core::ptr::null()) }.is_null());
+        unsafe { asdf_parser_destroy(core::ptr::null_mut()) };
+        unsafe { asdf_event_free(core::ptr::null_mut(), core::ptr::null_mut()) };
         let mut len = 7usize;
-        assert!(unsafe { asdf_yaml_event_tag(std::ptr::null(), &mut len) }.is_null());
+        assert!(unsafe { asdf_yaml_event_tag(core::ptr::null(), &mut len) }.is_null());
         assert_eq!(len, 0, "the length must be cleared even when there is no tag");
     }
 
     #[test]
     fn missing_input_files_are_reported() {
-        let cfg = asdf_parser_cfg_t { flags: 0, log: std::ptr::null_mut() };
+        let cfg = asdf_parser_cfg_t { flags: 0, log: core::ptr::null_mut() };
         let parser = Parser(unsafe { asdf_parser_create(&cfg) });
         let path = CString::new("/nonexistent/definitely-not-here.asdf").unwrap();
         assert_eq!(unsafe { asdf_parser_set_input_file(parser.0, path.as_ptr()) }, -1);

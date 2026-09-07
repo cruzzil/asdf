@@ -11,7 +11,8 @@
 //! file is closed. That matches libasdf, where such pointers are owned by the
 //! file and invalidated by `asdf_close`.
 
-use std::ffi::{CStr, CString, c_char, c_double, c_int, c_void};
+use alloc::ffi::CString;
+use core::ffi::{CStr, c_char, c_double, c_int, c_void};
 use std::sync::Mutex;
 
 use asdf_core::yaml::{
@@ -252,11 +253,11 @@ impl AsdfFile {
     /// Intern a string and return a pointer valid until the file is closed.
     pub(crate) fn intern(&self, s: &str) -> *const c_char {
         let Ok(c) = CString::new(s) else {
-            return std::ptr::null();
+            return core::ptr::null();
         };
         let mut arena = self.interned.lock().unwrap_or_else(|e| e.into_inner());
         arena.push(c);
-        arena.last().map_or(std::ptr::null(), |c| c.as_ptr())
+        arena.last().map_or(core::ptr::null(), |c| c.as_ptr())
     }
 
     /// The file's parsed tree, if it has one.
@@ -317,14 +318,14 @@ pub unsafe extern "C" fn asdf_open_file_ex(
     mode: *const c_char,
     config: *mut asdf_config_t,
 ) -> *mut AsdfFile {
-    guard("asdf_open_file_ex", std::ptr::null_mut(), || {
+    guard("asdf_open_file_ex", core::ptr::null_mut(), || {
         let settings = unsafe { read_config(config) };
         if mode.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let text = unsafe { CStr::from_ptr(mode) }.to_string_lossy().into_owned();
         let Some(mode) = FileMode::parse(&text) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         // A write-only open reads nothing, so it does not touch `filename` at
         // all -- upstream ignores it too, and the destination is named later
@@ -335,12 +336,12 @@ pub unsafe extern "C" fn asdf_open_file_ex(
             return Box::into_raw(Box::new(file));
         }
         if filename.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let path = unsafe { CStr::from_ptr(filename) }.to_string_lossy().into_owned();
         match Reader::open(&path) {
             Ok(reader) => with_config(open_reader(reader, mode), settings),
-            Err(_) => std::ptr::null_mut(),
+            Err(_) => core::ptr::null_mut(),
         }
     })
 }
@@ -356,7 +357,7 @@ pub unsafe extern "C" fn asdf_open_mem_ex(
     size: usize,
     config: *mut asdf_config_t,
 ) -> *mut AsdfFile {
-    guard("asdf_open_mem_ex", std::ptr::null_mut(), || {
+    guard("asdf_open_mem_ex", core::ptr::null_mut(), || {
         let settings = unsafe { read_config(config) };
         // `asdf_open(NULL)` expands to `asdf_open_mem(NULL, 0)`, which is how
         // the C API asks for a new, empty file to write into.
@@ -367,10 +368,10 @@ pub unsafe extern "C" fn asdf_open_mem_ex(
         }
         // A buffer-backed file is read-*write* upstream: its tree may be
         // edited and written out elsewhere.
-        let bytes = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
+        let bytes = unsafe { core::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
         match Reader::from_bytes(bytes) {
             Ok(reader) => with_config(open_reader(reader, FileMode::ReadWrite), settings),
-            Err(_) => std::ptr::null_mut(),
+            Err(_) => core::ptr::null_mut(),
         }
     })
 }
@@ -389,11 +390,11 @@ pub unsafe extern "C" fn asdf_open_fp_ex(
     filename: *const c_char,
     config: *mut asdf_config_t,
 ) -> *mut AsdfFile {
-    guard("asdf_open_fp_ex", std::ptr::null_mut(), || {
+    guard("asdf_open_fp_ex", core::ptr::null_mut(), || {
         let _ = filename;
         let settings = unsafe { read_config(config) };
         if fp.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
 
         // Read the stream in whole chunks through libc, since the caller owns
@@ -415,11 +416,11 @@ pub unsafe extern "C" fn asdf_open_fp_ex(
             bytes.extend_from_slice(&chunk[..read]);
         }
         if bytes.is_empty() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         match Reader::from_bytes(bytes) {
             Ok(reader) => with_config(open_reader(reader, FileMode::ReadOnly), settings),
-            Err(_) => std::ptr::null_mut(),
+            Err(_) => core::ptr::null_mut(),
         }
     })
 }
@@ -447,9 +448,9 @@ pub unsafe extern "C" fn asdf_close(file: *mut AsdfFile) {
 /// by the file and is invalidated by the next error or by `asdf_close`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_error(file: *mut AsdfFile) -> *const c_char {
-    guard("asdf_error", std::ptr::null(), || {
+    guard("asdf_error", core::ptr::null(), || {
         if file.is_null() {
-            return std::ptr::null();
+            return core::ptr::null();
         }
         unsafe { &*file }.error.message_ptr()
     })
@@ -510,9 +511,9 @@ pub unsafe extern "C" fn asdf_get_value(
     file: *mut AsdfFile,
     path: *const c_char,
 ) -> *mut AsdfValue {
-    guard("asdf_get_value", std::ptr::null_mut(), || match lookup(file, path) {
+    guard("asdf_get_value", core::ptr::null_mut(), || match lookup(file, path) {
         Some((_, node)) => Box::into_raw(Box::new(AsdfValue { file, node })),
-        None => std::ptr::null_mut(),
+        None => core::ptr::null_mut(),
     })
 }
 
@@ -589,13 +590,13 @@ fn node_type(doc: &Document, node: NodeId) -> asdf_yaml::ValueType {
 /// owned by the file.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_tag(value: *mut AsdfValue) -> *const c_char {
-    guard("asdf_value_tag", std::ptr::null(), || {
+    guard("asdf_value_tag", core::ptr::null(), || {
         let Some((file, doc, node)) = value_parts(value) else {
-            return std::ptr::null();
+            return core::ptr::null();
         };
         match doc.tag_of(node) {
             Some(tag) => file.intern(&tag.full()),
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         }
     })
 }
@@ -1290,7 +1291,7 @@ pub unsafe extern "C" fn asdf_get_scalar0(
     path: *const c_char,
     out: *mut *const c_char,
 ) -> AsdfValueErr {
-    unsafe { asdf_get_scalar(file, path, out, std::ptr::null_mut()) }
+    unsafe { asdf_get_scalar(file, path, out, core::ptr::null_mut()) }
 }
 
 /// Intern `text` in the file and hand back pointer and length.
@@ -1367,7 +1368,7 @@ pub unsafe extern "C" fn asdf_set_string(
         if str_.is_null() {
             return AsdfValueErr::Unknown;
         }
-        let bytes = unsafe { std::slice::from_raw_parts(str_.cast::<u8>(), len) };
+        let bytes = unsafe { core::slice::from_raw_parts(str_.cast::<u8>(), len) };
         let text = String::from_utf8_lossy(bytes).into_owned();
         set_node(file, path, |doc| {
             let style = match asdf_yaml::resolve(&text, ScalarStyle::Plain, Schema::Libasdf) {
@@ -1450,7 +1451,7 @@ mod tests {
     fn open() -> Handle {
         let bytes = sample();
         let f =
-            unsafe { asdf_open_mem_ex(bytes.as_ptr().cast(), bytes.len(), std::ptr::null_mut()) };
+            unsafe { asdf_open_mem_ex(bytes.as_ptr().cast(), bytes.len(), core::ptr::null_mut()) };
         assert!(!f.is_null());
         Handle(f)
     }
@@ -1466,7 +1467,7 @@ mod tests {
         buf.extend_from_slice(b"%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
         buf.extend_from_slice(body.as_bytes());
         buf.extend_from_slice(b"...\n");
-        let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), core::ptr::null_mut()) };
         assert!(!f.is_null());
         Handle(f)
     }
@@ -1519,7 +1520,7 @@ mod tests {
 
         // `get_scalar` hands back the raw text whatever the resolved type is;
         // `get_string` insists on an actual string.
-        let mut out = std::ptr::null();
+        let mut out = core::ptr::null();
         let mut len = 0usize;
         assert_eq!(
             unsafe { asdf_get_scalar(h.0, pi.as_ptr(), &mut out, &mut len) },
@@ -1538,7 +1539,7 @@ mod tests {
         );
         assert_eq!(len, 2);
 
-        let mut zero_terminated = std::ptr::null();
+        let mut zero_terminated = core::ptr::null();
         assert_eq!(
             unsafe { asdf_get_scalar0(h.0, n.as_ptr(), &mut zero_terminated) },
             AsdfValueErr::Ok
@@ -1553,12 +1554,12 @@ mod tests {
         let seq = cpath("seq");
         let scalar = cpath("scalar");
 
-        let mut mapping = std::ptr::null_mut();
+        let mut mapping = core::ptr::null_mut();
         assert_eq!(unsafe { asdf_get_mapping(h.0, m.as_ptr(), &mut mapping) }, AsdfValueErr::Ok);
         assert!(!mapping.is_null());
         unsafe { asdf_value_destroy(mapping) };
 
-        let mut sequence = std::ptr::null_mut();
+        let mut sequence = core::ptr::null_mut();
         assert_eq!(
             unsafe { asdf_get_sequence(h.0, seq.as_ptr(), &mut sequence) },
             AsdfValueErr::Ok
@@ -1584,7 +1585,7 @@ mod tests {
 
     #[test]
     fn counted_string_setter_round_trips() {
-        let file = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let file = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         let h = Handle(file);
         let path = cpath("label");
         let value = b"embedded";
@@ -1594,7 +1595,7 @@ mod tests {
             },
             AsdfValueErr::Ok
         );
-        let mut out = std::ptr::null();
+        let mut out = core::ptr::null();
         let mut len = 0usize;
         assert_eq!(
             unsafe { asdf_get_string(h.0, path.as_ptr(), &mut out, &mut len) },
@@ -1606,7 +1607,7 @@ mod tests {
 
     #[test]
     fn set_mapping_attaches_a_built_container() {
-        let file = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let file = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         let h = Handle(file);
 
         let mapping = unsafe { crate::value_ffi::asdf_mapping_create(h.0) };
@@ -1637,12 +1638,14 @@ mod tests {
     #[test]
     fn rejects_bad_arguments_without_crashing() {
         assert!(
-            unsafe { asdf_open_file_ex(std::ptr::null(), std::ptr::null(), std::ptr::null_mut()) }
-                .is_null()
+            unsafe {
+                asdf_open_file_ex(core::ptr::null(), core::ptr::null(), core::ptr::null_mut())
+            }
+            .is_null()
         );
         // Closing null must be a no-op, as it is upstream.
-        unsafe { asdf_close(std::ptr::null_mut()) };
-        assert_eq!(unsafe { asdf_error_code(std::ptr::null_mut()) }, 0);
+        unsafe { asdf_close(core::ptr::null_mut()) };
+        assert_eq!(unsafe { asdf_error_code(core::ptr::null_mut()) }, 0);
     }
 
     /// `asdf_open(NULL)` expands to `asdf_open_mem(NULL, 0)`, which the C API
@@ -1650,7 +1653,7 @@ mod tests {
     /// error. libasdf's own write example opens a file that way.
     #[test]
     fn opening_a_null_buffer_creates_a_writable_file() {
-        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         assert!(!f.is_null());
         let h = Handle(f);
 
@@ -1671,7 +1674,7 @@ mod tests {
     fn writing_to_a_read_only_file_is_refused() {
         let path = sample_on_disk("read-only.asdf");
         let name = CString::new(path.to_str().unwrap()).unwrap();
-        let f = unsafe { asdf_open_file_ex(name.as_ptr(), c"r".as_ptr(), std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_file_ex(name.as_ptr(), c"r".as_ptr(), core::ptr::null_mut()) };
         assert!(!f.is_null());
         let h = Handle(f);
 
@@ -1691,7 +1694,7 @@ mod tests {
         // The file it was opened over is still there, with the edit applied
         // on top rather than replacing it.
         let name = cpath("name");
-        let mut out = std::ptr::null();
+        let mut out = core::ptr::null();
         assert_eq!(unsafe { asdf_get_string0(h.0, name.as_ptr(), &mut out) }, AsdfValueErr::Ok);
         let mut got: i64 = 0;
         assert_eq!(unsafe { asdf_get_int64(h.0, key.as_ptr(), &mut got) }, AsdfValueErr::Ok);
@@ -1704,7 +1707,7 @@ mod tests {
         let name = CString::new(path.to_str().unwrap()).unwrap();
 
         // `rw` reads the file and permits edits.
-        let f = unsafe { asdf_open_file_ex(name.as_ptr(), c"rw".as_ptr(), std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_file_ex(name.as_ptr(), c"rw".as_ptr(), core::ptr::null_mut()) };
         assert!(!f.is_null());
         let h = Handle(f);
         let key = cpath("foo");
@@ -1712,7 +1715,7 @@ mod tests {
 
         // `w` reads nothing at all -- not even the filename, which is why
         // upstream accepts a null one here.
-        let w = unsafe { asdf_open_file_ex(name.as_ptr(), c"W".as_ptr(), std::ptr::null_mut()) };
+        let w = unsafe { asdf_open_file_ex(name.as_ptr(), c"W".as_ptr(), core::ptr::null_mut()) };
         assert!(!w.is_null());
         let wh = Handle(w);
         assert_eq!(unsafe { asdf_block_count(wh.0) }, 0);
@@ -1721,14 +1724,14 @@ mod tests {
         // Anything else is an invalid argument.
         for bad in [c"rb", c"a", c"r+", c""] {
             let bad_open =
-                unsafe { asdf_open_file_ex(name.as_ptr(), bad.as_ptr(), std::ptr::null_mut()) };
+                unsafe { asdf_open_file_ex(name.as_ptr(), bad.as_ptr(), core::ptr::null_mut()) };
             assert!(bad_open.is_null(), "{bad:?} should not be a valid mode");
         }
     }
 
     #[test]
     fn a_written_file_reads_back() {
-        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         let h = Handle(f);
 
         let name = cpath("name");
@@ -1743,17 +1746,17 @@ mod tests {
         let nested = cpath("powers/squares");
         assert_eq!(unsafe { asdf_set_uint64(h.0, nested.as_ptr(), 1764) }, AsdfValueErr::Ok);
 
-        let mut buf: *mut c_void = std::ptr::null_mut();
+        let mut buf: *mut c_void = core::ptr::null_mut();
         let mut size: usize = 0;
         assert_eq!(unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) }, 0);
         assert!(!buf.is_null() && size > 0);
 
         // Read the bytes back through the same API.
-        let reopened = unsafe { asdf_open_mem_ex(buf, size, std::ptr::null_mut()) };
+        let reopened = unsafe { asdf_open_mem_ex(buf, size, core::ptr::null_mut()) };
         assert!(!reopened.is_null());
         let r = Handle(reopened);
 
-        let mut out: *const c_char = std::ptr::null();
+        let mut out: *const c_char = core::ptr::null();
         assert_eq!(unsafe { asdf_get_string0(r.0, name.as_ptr(), &mut out) }, AsdfValueErr::Ok);
         assert_eq!(unsafe { CStr::from_ptr(out) }.to_str().unwrap(), "Dennis Richie");
 
@@ -1771,20 +1774,20 @@ mod tests {
     /// A string of digits must survive as a string, not become an integer.
     #[test]
     fn string_setters_preserve_stringness() {
-        let f = unsafe { asdf_open_mem_ex(std::ptr::null(), 0, std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
         let h = Handle(f);
 
         let key = cpath("version");
         let value = CString::new("42").unwrap();
         unsafe { asdf_set_string0(h.0, key.as_ptr(), value.as_ptr()) };
 
-        let mut buf: *mut c_void = std::ptr::null_mut();
+        let mut buf: *mut c_void = core::ptr::null_mut();
         let mut size: usize = 0;
         unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) };
-        let reopened = unsafe { asdf_open_mem_ex(buf, size, std::ptr::null_mut()) };
+        let reopened = unsafe { asdf_open_mem_ex(buf, size, core::ptr::null_mut()) };
         let r = Handle(reopened);
 
-        let mut out: *const c_char = std::ptr::null();
+        let mut out: *const c_char = core::ptr::null();
         assert_eq!(
             unsafe { asdf_get_string0(r.0, key.as_ptr(), &mut out) },
             AsdfValueErr::Ok,
@@ -1798,14 +1801,14 @@ mod tests {
     fn a_missing_file_returns_null() {
         let name = cpath("/definitely/not/here.asdf");
         let mode = cpath("r");
-        let f = unsafe { asdf_open_file_ex(name.as_ptr(), mode.as_ptr(), std::ptr::null_mut()) };
+        let f = unsafe { asdf_open_file_ex(name.as_ptr(), mode.as_ptr(), core::ptr::null_mut()) };
         assert!(f.is_null());
     }
 
     #[test]
     fn reads_a_string() {
         let h = open();
-        let mut out: *const c_char = std::ptr::null();
+        let mut out: *const c_char = core::ptr::null();
         let path = cpath("name");
         assert_eq!(unsafe { asdf_get_string0(h.0, path.as_ptr(), &mut out) }, AsdfValueErr::Ok);
         assert_eq!(unsafe { CStr::from_ptr(out) }.to_str().unwrap(), "Dennis Richie");
@@ -1885,7 +1888,7 @@ mod tests {
             AsdfValueErr::TypeMismatch
         );
 
-        let mut s: *const c_char = std::ptr::null();
+        let mut s: *const c_char = core::ptr::null();
         assert_eq!(unsafe { asdf_get_string0(h.0, path.as_ptr(), &mut s) }, AsdfValueErr::Ok);
         assert_eq!(unsafe { CStr::from_ptr(s) }.to_str().unwrap(), "1");
     }
@@ -1901,7 +1904,7 @@ mod tests {
     #[test]
     fn nested_and_indexed_paths_resolve() {
         let h = open();
-        let mut out: *const c_char = std::ptr::null();
+        let mut out: *const c_char = core::ptr::null();
         let path = cpath("nested/inner");
         assert_eq!(unsafe { asdf_get_string0(h.0, path.as_ptr(), &mut out) }, AsdfValueErr::Ok);
         assert_eq!(unsafe { CStr::from_ptr(out) }.to_str().unwrap(), "deep");
@@ -1943,7 +1946,7 @@ mod tests {
             "tag:stsci.edu:asdf/core/asdf-1.1.0"
         );
         unsafe { asdf_value_destroy(v) };
-        unsafe { asdf_value_destroy(std::ptr::null_mut()) };
+        unsafe { asdf_value_destroy(core::ptr::null_mut()) };
     }
 
     #[test]
@@ -1958,14 +1961,14 @@ mod tests {
     #[test]
     fn interned_strings_stay_valid_while_the_file_is_open() {
         let h = open();
-        let mut first: *const c_char = std::ptr::null();
+        let mut first: *const c_char = core::ptr::null();
         let path = cpath("name");
         unsafe { asdf_get_string0(h.0, path.as_ptr(), &mut first) };
 
         // Reading many more strings must not invalidate the first, which the
         // C contract guarantees until asdf_close.
         for _ in 0..100 {
-            let mut other: *const c_char = std::ptr::null();
+            let mut other: *const c_char = core::ptr::null();
             unsafe { asdf_get_string0(h.0, path.as_ptr(), &mut other) };
         }
         assert_eq!(unsafe { CStr::from_ptr(first) }.to_str().unwrap(), "Dennis Richie");
@@ -1977,7 +1980,7 @@ mod tests {
         let path = cpath("foo");
         // A caller may pass NULL to test for existence without reading.
         assert_eq!(
-            unsafe { asdf_get_int64(h.0, path.as_ptr(), std::ptr::null_mut()) },
+            unsafe { asdf_get_int64(h.0, path.as_ptr(), core::ptr::null_mut()) },
             AsdfValueErr::Ok
         );
     }
@@ -1986,6 +1989,6 @@ mod tests {
     fn block_count_is_reported() {
         let h = open();
         assert_eq!(unsafe { asdf_block_count(h.0) }, 0);
-        assert_eq!(unsafe { asdf_block_count(std::ptr::null_mut()) }, 0);
+        assert_eq!(unsafe { asdf_block_count(core::ptr::null_mut()) }, 0);
     }
 }

@@ -11,7 +11,8 @@
 //! handle they were recorded against, so the handle keeps the `CString`
 //! alive until the next error replaces it.
 
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use alloc::ffi::CString;
+use core::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::Mutex;
 
 use asdf_core::ErrorCode;
@@ -198,7 +199,7 @@ impl ErrorState {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match &inner.message {
             Some(s) => s.as_ptr(),
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         }
     }
 }
@@ -247,11 +248,11 @@ fn strerror(errnum: i32) -> String {
 pub extern "C" fn asdf_shim_error_format(code: c_int) -> *const c_char {
     let idx = match usize::try_from(code) {
         Ok(i) => i,
-        Err(_) => return std::ptr::null(),
+        Err(_) => return core::ptr::null(),
     };
     match ERROR_FORMATS.get(idx) {
         Some(Some(s)) => s.as_ptr(),
-        _ => std::ptr::null(),
+        _ => core::ptr::null(),
     }
 }
 

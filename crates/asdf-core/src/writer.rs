@@ -235,9 +235,9 @@ impl Writer {
         // decompress/recompress round trip would waste the work and could
         // not be relied on to reproduce them.
         let stored = if block.already_compressed {
-            std::borrow::Cow::Borrowed(block.data.as_slice())
+            alloc::borrow::Cow::Borrowed(block.data.as_slice())
         } else {
-            std::borrow::Cow::Owned(block.compression.compress(&block.data)?)
+            alloc::borrow::Cow::Owned(block.compression.compress(&block.data)?)
         };
 
         let used_size = stored.len() as u64;

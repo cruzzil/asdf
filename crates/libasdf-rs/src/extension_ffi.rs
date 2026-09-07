@@ -15,7 +15,7 @@
 //! runs its own setup first, would reintroduce exactly the ordering problem
 //! this avoids.
 
-use std::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::Mutex;
 
 use crate::panic::guard;
@@ -166,7 +166,7 @@ pub unsafe extern "C" fn asdf_extension_register(ext: *mut asdf_extension_t) {
         let mut registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
         // Registering the same extension twice is harmless and can happen
         // when a library is loaded more than once; keep one entry.
-        if registry.iter().any(|r| std::ptr::eq(r.extension, ext)) {
+        if registry.iter().any(|r| core::ptr::eq(r.extension, ext)) {
             return;
         }
         registry.push(Registration { extension: ext });
@@ -189,7 +189,7 @@ pub unsafe extern "C" fn asdf_extension_get(
     file: *mut crate::file_ffi::AsdfFile,
     tag: *const c_char,
 ) -> *const asdf_extension_t {
-    guard("asdf_extension_get", std::ptr::null(), || extension_get(file, tag))
+    guard("asdf_extension_get", core::ptr::null(), || extension_get(file, tag))
 }
 
 /// Safe internal form of [`asdf_extension_get`].
@@ -203,7 +203,7 @@ pub(crate) fn extension_get(
 ) -> *const asdf_extension_t {
     let _ = file;
     if tag.is_null() {
-        return std::ptr::null();
+        return core::ptr::null();
     }
     let wanted = unsafe { crate::ffi::c_string_lossy(tag) }.unwrap_or_default();
     let registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
@@ -227,7 +227,7 @@ pub(crate) fn extension_get(
             index += 1;
         }
     }
-    std::ptr::null()
+    core::ptr::null()
 }
 
 /// How many times a particular extension is registered.
@@ -241,7 +241,7 @@ pub(crate) fn registrations_of(ext: *const asdf_extension_t) -> usize {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .filter(|r| std::ptr::eq(r.extension, ext))
+        .filter(|r| core::ptr::eq(r.extension, ext))
         .count()
 }
 
@@ -256,30 +256,30 @@ pub(crate) fn registrations_of(ext: *const asdf_extension_t) -> usize {
 /// freed with [`asdf_tag_destroy`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_tag_parse(tag: *const c_char) -> *mut asdf_tag_t {
-    use std::ffi::CString;
+    use alloc::ffi::CString;
 
-    guard("asdf_tag_parse", std::ptr::null_mut(), || {
+    guard("asdf_tag_parse", core::ptr::null_mut(), || {
         if tag.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let text = unsafe { crate::ffi::c_string_lossy(tag) }.unwrap_or_default();
         let (name, version) = asdf_core::yaml::tag::split_tag_version(&text);
 
         let Ok(name) = CString::new(name) else {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         };
         let version_ptr = match version {
             Some(v) => {
                 let Ok(v) = CString::new(v) else {
-                    return std::ptr::null_mut();
+                    return core::ptr::null_mut();
                 };
                 let parsed = unsafe { crate::version_ffi::asdf_version_parse(v.as_ptr()) };
                 if parsed.is_null() {
-                    return std::ptr::null_mut();
+                    return core::ptr::null_mut();
                 }
                 parsed.cast_const()
             }
-            None => std::ptr::null(),
+            None => core::ptr::null(),
         };
 
         Box::into_raw(Box::new(asdf_tag_t {
@@ -296,7 +296,7 @@ pub unsafe extern "C" fn asdf_tag_parse(tag: *const c_char) -> *mut asdf_tag_t {
 /// used afterwards.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_tag_destroy(tag: *mut asdf_tag_t) {
-    use std::ffi::CString;
+    use alloc::ffi::CString;
 
     guard("asdf_tag_destroy", (), || {
         if tag.is_null() {
@@ -486,7 +486,7 @@ pub static libasdf_version: Identity<asdf_version_t> = Identity(asdf_version_t {
     major: 0,
     minor: 1,
     patch: 0,
-    extra: std::ptr::null(),
+    extra: core::ptr::null(),
 });
 
 /// The library's own `core/software` metadata, exported as
@@ -514,7 +514,7 @@ pub unsafe extern "C" fn asdf_value_of_extension_type(
     obj: *const c_void,
     ext: *const asdf_extension_t,
 ) -> *mut crate::file_ffi::AsdfValue {
-    guard("asdf_value_of_extension_type", std::ptr::null_mut(), || {
+    guard("asdf_value_of_extension_type", core::ptr::null_mut(), || {
         value_of_extension_type(file, obj, ext)
     })
 }
@@ -530,27 +530,27 @@ pub(crate) fn value_of_extension_type(
     ext: *const asdf_extension_t,
 ) -> *mut crate::file_ffi::AsdfValue {
     if ext.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let extension = unsafe { &*ext };
     if extension.vtab.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let Some(serialize) = (unsafe { &*extension.vtab }).serialize else {
         // The header allows a null serializer, meaning the type cannot
         // be written.
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     };
 
     // The first tag an extension registers is the one written for a
     // newly serialized object; without it the value goes into the tree
     // untagged and nothing can read it back as this type.
     if extension.tags.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let first = unsafe { *extension.tags };
     if first.is_null() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let tag = unsafe { CStr::from_ptr(first) }.to_string_lossy().into_owned();
 
@@ -670,7 +670,7 @@ unsafe fn get_property(
 
     // An extension type is matched by tag rather than by shape.
     if wanted == AsdfValueType::Extension && !tag.is_null() {
-        let file = crate::file_ffi::value_file(mapping).unwrap_or(std::ptr::null_mut());
+        let file = crate::file_ffi::value_file(mapping).unwrap_or(core::ptr::null_mut());
         let ext = extension_get(file, tag);
         if ext.is_null() || !value_is_extension_type(prop, ext) {
             release(prop);
@@ -735,7 +735,7 @@ pub unsafe extern "C" fn asdf_get_optional_property(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::CString;
+    use alloc::ffi::CString;
 
     #[test]
     fn parses_a_versioned_tag() {
@@ -767,8 +767,8 @@ mod tests {
 
     #[test]
     fn tag_parsing_tolerates_null() {
-        assert!(unsafe { asdf_tag_parse(std::ptr::null()) }.is_null());
-        unsafe { asdf_tag_destroy(std::ptr::null_mut()) };
+        assert!(unsafe { asdf_tag_parse(core::ptr::null()) }.is_null());
+        unsafe { asdf_tag_destroy(core::ptr::null_mut()) };
     }
 
     /// Build a registration the way `ASDF_REGISTER_EXTENSION` does.
@@ -783,7 +783,7 @@ mod tests {
     fn make_extension(tags: &[&str]) -> &'static mut asdf_extension_t {
         let names: Vec<CString> = tags.iter().map(|t| CString::new(*t).unwrap()).collect();
         let mut array: Vec<*const c_char> = names.iter().map(|n| n.as_ptr()).collect();
-        array.push(std::ptr::null());
+        array.push(core::ptr::null());
 
         // Leak the names first so their pointers stay valid.
         let names: &'static [CString] = Vec::leak(names);
@@ -792,10 +792,10 @@ mod tests {
 
         Box::leak(Box::new(asdf_extension_t {
             tags: array.as_ptr(),
-            software: std::ptr::null_mut(),
-            vtab: std::ptr::null(),
+            software: core::ptr::null_mut(),
+            vtab: core::ptr::null(),
             size: 0,
-            userdata: std::ptr::null_mut(),
+            userdata: core::ptr::null_mut(),
         }))
     }
 
@@ -807,11 +807,11 @@ mod tests {
         assert_eq!(registrations_of(ext), 1);
 
         let wanted = CString::new("tag:example.com:thing-1.0.0").unwrap();
-        let found = unsafe { asdf_extension_get(std::ptr::null_mut(), wanted.as_ptr()) };
-        assert!(std::ptr::eq(found, ext));
+        let found = unsafe { asdf_extension_get(core::ptr::null_mut(), wanted.as_ptr()) };
+        assert!(core::ptr::eq(found, ext));
 
         let missing = CString::new("tag:example.com:other-1.0.0").unwrap();
-        assert!(unsafe { asdf_extension_get(std::ptr::null_mut(), missing.as_ptr()) }.is_null());
+        assert!(unsafe { asdf_extension_get(core::ptr::null_mut(), missing.as_ptr()) }.is_null());
     }
 
     #[test]
@@ -823,8 +823,8 @@ mod tests {
 
         for tag in ["tag:example.com:multi-1.1.0", "tag:example.com:multi-1.0.0"] {
             let c = CString::new(tag).unwrap();
-            let found = unsafe { asdf_extension_get(std::ptr::null_mut(), c.as_ptr()) };
-            assert!(std::ptr::eq(found, ext), "{tag}");
+            let found = unsafe { asdf_extension_get(core::ptr::null_mut(), c.as_ptr()) };
+            assert!(core::ptr::eq(found, ext), "{tag}");
         }
     }
 
@@ -838,9 +838,9 @@ mod tests {
 
     #[test]
     fn registration_tolerates_null() {
-        unsafe { asdf_extension_register(std::ptr::null_mut()) };
-        assert_eq!(registrations_of(std::ptr::null()), 0);
-        assert!(unsafe { asdf_extension_get(std::ptr::null_mut(), std::ptr::null()) }.is_null());
+        unsafe { asdf_extension_register(core::ptr::null_mut()) };
+        assert_eq!(registrations_of(core::ptr::null()), 0);
+        assert!(unsafe { asdf_extension_get(core::ptr::null_mut(), core::ptr::null()) }.is_null());
     }
 
     #[test]
@@ -853,7 +853,7 @@ mod tests {
         buf.extend_from_slice(b"d: !core/ndarray-1.1.0\n  source: 0\n...\n");
 
         let file =
-            unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), std::ptr::null_mut()) };
+            unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), core::ptr::null_mut()) };
         assert!(!file.is_null());
 
         let path = CString::new("d").unwrap();
@@ -868,7 +868,7 @@ mod tests {
         let other = make_extension(&["tag:stsci.edu:asdf/core/ndarray-1.0.0"]);
         assert!(!unsafe { asdf_value_is_extension_type(value, other) });
 
-        assert!(!unsafe { asdf_value_is_extension_type(value, std::ptr::null()) });
+        assert!(!unsafe { asdf_value_is_extension_type(value, core::ptr::null()) });
 
         unsafe { asdf_value_destroy(value) };
         unsafe { asdf_close(file) };
@@ -879,10 +879,10 @@ mod tests {
         use crate::types::AsdfValueErr;
 
         let ext = make_extension(&["tag:example.com:novtab-1.0.0"]);
-        let mut out: *mut c_void = std::ptr::null_mut();
+        let mut out: *mut c_void = core::ptr::null_mut();
         // A null value handle first.
         assert_eq!(
-            unsafe { asdf_value_as_extension_type(std::ptr::null_mut(), ext, &mut out) },
+            unsafe { asdf_value_as_extension_type(core::ptr::null_mut(), ext, &mut out) },
             AsdfValueErr::TypeMismatch
         );
     }
@@ -891,7 +891,7 @@ mod tests {
     fn the_vtable_keeps_its_reserved_width() {
         // The reserved slots are what let upstream add methods without an
         // ABI break, so the total width is part of the contract.
-        use std::mem::size_of;
+        use core::mem::size_of;
         assert_eq!(
             size_of::<asdf_extension_vtab_t>(),
             ASDF_EXTENSION_VTAB_MAX_METHODS * size_of::<AsdfExtensionMethod>()
@@ -907,7 +907,7 @@ mod tests {
         );
         // The software's version must point at the exported version symbol,
         // not a copy of it.
-        assert!(std::ptr::eq(
+        assert!(core::ptr::eq(
             libasdf_software.0.version,
             (&raw const libasdf_version).cast::<asdf_version_t>()
         ));

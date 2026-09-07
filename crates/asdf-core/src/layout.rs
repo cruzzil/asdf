@@ -6,7 +6,7 @@
 //! can be edited by hand; readers find its end by searching for the document
 //! end marker.
 
-use std::ops::Range;
+use core::ops::Range;
 
 use crate::block::header::{BLOCK_MAGIC, BlockHeader, is_block_magic};
 use crate::error::{Result, err};
@@ -121,7 +121,7 @@ impl Layout {
     /// The tree text, given the buffer it was scanned from.
     pub fn tree_str<'a>(&self, buf: &'a [u8]) -> Option<&'a str> {
         let range = self.tree.clone()?;
-        std::str::from_utf8(&buf[range]).ok()
+        core::str::from_utf8(&buf[range]).ok()
     }
 
     /// Whether a block index was present and accepted.
@@ -162,7 +162,7 @@ fn scan_text_section(buf: &[u8], out: &mut Layout) -> Result<usize> {
             String::from_utf8_lossy(ASDF_HEADER_PREFIX)
         ));
     }
-    let version = std::str::from_utf8(&line[ASDF_HEADER_PREFIX.len()..])
+    let version = core::str::from_utf8(&line[ASDF_HEADER_PREFIX.len()..])
         .map_err(|_| err!(InvalidAsdfHeader, "ASDF version is not valid UTF-8"))?;
     out.format_version = Version::parse(version.trim());
 
@@ -172,7 +172,7 @@ fn scan_text_section(buf: &[u8], out: &mut Layout) -> Result<usize> {
             break;
         }
         if let Some(rest) = line.strip_prefix(ASDF_STANDARD_PREFIX) {
-            if let Ok(s) = std::str::from_utf8(rest) {
+            if let Ok(s) = core::str::from_utf8(rest) {
                 out.standard_version = Some(Version::parse(s.trim()));
             }
         } else {

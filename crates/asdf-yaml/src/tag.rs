@@ -1,6 +1,6 @@
 //! YAML tags, and the ASDF conventions layered on top of them.
 
-use std::fmt;
+use core::fmt;
 
 /// The tag prefix all ASDF Standard tags share.
 pub const ASDF_STANDARD_TAG_PREFIX: &str = "tag:stsci.edu:asdf/";

@@ -5,7 +5,7 @@
 //! compared directly and upstream's committed expected-output fixtures serve
 //! as tests.
 
-use std::fmt::Write as _;
+use core::fmt::Write as _;
 
 use asdf_yaml::{Document, NodeData, NodeId};
 
@@ -349,7 +349,7 @@ mod tests {
             while idx < bytes.len() && bytes[idx] & 0xc0 == 0x80 {
                 idx += 1;
             }
-            out.push_str(std::str::from_utf8(&bytes[start..idx]).unwrap_or("?"));
+            out.push_str(core::str::from_utf8(&bytes[start..idx]).unwrap_or("?"));
         }
         out
     }

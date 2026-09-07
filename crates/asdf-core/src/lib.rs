@@ -10,6 +10,11 @@
 // `#[allow(unsafe_code)]` in this crate must carry a justification.
 #![deny(unsafe_code)]
 
+// Named so `alloc::` paths can be written directly. The crate links `std`,
+// but spelling each item at the narrowest layer that defines it keeps a
+// future `no_std` build a small step away.
+extern crate alloc;
+
 pub mod block;
 pub mod compression;
 pub mod core;

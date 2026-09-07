@@ -3,7 +3,8 @@
 //! `asdf_version_t` is a public, non-opaque struct, so its layout is part of
 //! the ABI: callers read `.major` and friends directly.
 
-use std::ffi::{CStr, CString, c_char, c_uint};
+use alloc::ffi::CString;
+use core::ffi::{CStr, c_char, c_uint};
 
 use asdf_core::Version;
 
@@ -32,7 +33,7 @@ pub struct asdf_version_t {
 fn into_c_string(s: &str) -> *const c_char {
     match CString::new(s) {
         Ok(c) => c.into_raw().cast_const(),
-        Err(_) => std::ptr::null(),
+        Err(_) => core::ptr::null(),
     }
 }
 
@@ -50,11 +51,11 @@ unsafe fn free_c_string(p: *const c_char) {
 fn to_ffi(v: &Version) -> *mut asdf_version_t {
     let version = into_c_string(&v.version);
     if version.is_null() && !v.version.is_empty() {
-        return std::ptr::null_mut();
+        return core::ptr::null_mut();
     }
     let extra = match &v.extra {
         Some(e) => into_c_string(e),
-        None => std::ptr::null(),
+        None => core::ptr::null(),
     };
 
     Box::into_raw(Box::new(asdf_version_t {
@@ -76,9 +77,9 @@ fn to_ffi(v: &Version) -> *mut asdf_version_t {
 /// be freed with [`asdf_version_destroy`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_version_parse(version: *const c_char) -> *mut asdf_version_t {
-    guard("asdf_version_parse", std::ptr::null_mut(), || {
+    guard("asdf_version_parse", core::ptr::null_mut(), || {
         if version.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let text = unsafe { CStr::from_ptr(version) }.to_string_lossy().into_owned();
         to_ffi(&Version::parse(&text))
@@ -92,30 +93,30 @@ pub unsafe extern "C" fn asdf_version_parse(version: *const c_char) -> *mut asdf
 /// must be freed with [`asdf_version_destroy`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_version_copy(version: *const asdf_version_t) -> *mut asdf_version_t {
-    guard("asdf_version_copy", std::ptr::null_mut(), || {
+    guard("asdf_version_copy", core::ptr::null_mut(), || {
         if version.is_null() {
-            return std::ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let src = unsafe { &*version };
 
         let version_str = if src.version.is_null() {
-            std::ptr::null()
+            core::ptr::null()
         } else {
             let s = unsafe { CStr::from_ptr(src.version) };
             match CString::new(s.to_bytes()) {
                 Ok(c) => c.into_raw().cast_const(),
-                Err(_) => return std::ptr::null_mut(),
+                Err(_) => return core::ptr::null_mut(),
             }
         };
         let extra_str = if src.extra.is_null() {
-            std::ptr::null()
+            core::ptr::null()
         } else {
             let s = unsafe { CStr::from_ptr(src.extra) };
             match CString::new(s.to_bytes()) {
                 Ok(c) => c.into_raw().cast_const(),
                 Err(_) => {
                     unsafe { free_c_string(version_str) };
-                    return std::ptr::null_mut();
+                    return core::ptr::null_mut();
                 }
             }
         };
@@ -230,15 +231,15 @@ mod tests {
 
     #[test]
     fn null_arguments_are_handled() {
-        assert!(unsafe { asdf_version_parse(std::ptr::null()) }.is_null());
-        assert!(unsafe { asdf_version_copy(std::ptr::null()) }.is_null());
+        assert!(unsafe { asdf_version_parse(core::ptr::null()) }.is_null());
+        assert!(unsafe { asdf_version_copy(core::ptr::null()) }.is_null());
         // Freeing null must be a no-op, as it is upstream.
-        unsafe { asdf_version_destroy(std::ptr::null_mut()) };
+        unsafe { asdf_version_destroy(core::ptr::null_mut()) };
     }
 
     #[test]
     fn struct_layout_matches_the_header() {
-        use std::mem::{align_of, offset_of, size_of};
+        use core::mem::{align_of, offset_of, size_of};
         // Two pointers, three unsigned ints, padded to pointer alignment.
         assert_eq!(offset_of!(asdf_version_t, version), 0);
         assert_eq!(offset_of!(asdf_version_t, major), size_of::<*const c_char>());

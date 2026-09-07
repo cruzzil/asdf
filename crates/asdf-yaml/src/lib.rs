@@ -16,6 +16,11 @@
 
 #![forbid(unsafe_code)]
 
+// Named so `alloc::` paths can be written directly. The crate links `std`,
+// but spelling collection and string types at the narrowest layer that
+// defines them keeps a future `no_std` build a small step away.
+extern crate alloc;
+
 pub mod compare;
 pub mod document;
 pub mod emit;

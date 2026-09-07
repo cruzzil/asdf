@@ -24,6 +24,11 @@
 
 #![allow(non_camel_case_types)]
 
+// Named so `alloc::` paths can be written directly. The crate links `std`,
+// but spelling each item at the narrowest layer that defines it keeps a
+// future `no_std` build a small step away.
+extern crate alloc;
+
 pub mod block_ffi;
 pub mod core_ext;
 pub mod error_ffi;

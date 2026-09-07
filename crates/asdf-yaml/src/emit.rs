@@ -11,8 +11,8 @@
 //! `KNOWN-DIVERGENCES.md`), so this aims at clean, conventional YAML rather
 //! than at reproducing libfyaml's exact line breaking.
 
+use core::fmt::Write as _;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write as _;
 
 use crate::document::Document;
 use crate::node::{CollectionStyle, NodeData, NodeId, ScalarStyle};

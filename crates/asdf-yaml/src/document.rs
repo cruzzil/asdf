@@ -196,7 +196,7 @@ impl Document {
                 let NodeData::Mapping { entries, .. } = &mut self.node_mut(target).data else {
                     return None;
                 };
-                Some(std::mem::replace(&mut entries[pos].value, value))
+                Some(core::mem::replace(&mut entries[pos].value, value))
             }
             None => {
                 let key_id = self.add_scalar(key);

@@ -9,6 +9,8 @@
 //! every later phase gets this feedback from its first commit rather than
 //! discovering layout problems at integration time.
 
+extern crate alloc;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -318,7 +320,7 @@ int main(void) {
     let mut checked = 0usize;
     macro_rules! check {
         ($ty:ty) => {{
-            use std::mem::{align_of, size_of};
+            use core::mem::{align_of, size_of};
             assert_eq!(got[concat!(stringify!($ty), ".sizeof")], size_of::<$ty>(), "{} size", stringify!($ty));
             assert_eq!(
                 got[concat!(stringify!($ty), ".alignof")],
@@ -1186,7 +1188,7 @@ fn vendored_headers() -> Vec<PathBuf> {
 /// visibility attribute, so each declaration is the identifier just before
 /// the first `(` -- or the first `;` for an `extern` variable -- that
 /// follows one.
-fn declared_exports() -> std::collections::BTreeSet<String> {
+fn declared_exports() -> alloc::collections::BTreeSet<String> {
     const MARKER: &str = r#"__attribute__((visibility("default")))"#;
 
     let out_dir = target_dir().join("abi-tests");
@@ -1218,7 +1220,7 @@ fn declared_exports() -> std::collections::BTreeSet<String> {
         text.push_str(&String::from_utf8_lossy(&out.stdout));
     }
 
-    let mut names = std::collections::BTreeSet::new();
+    let mut names = alloc::collections::BTreeSet::new();
     for chunk in text.split(MARKER).skip(1) {
         // The declarator runs up to the parameter list for a function, or to
         // the semicolon for an `extern` variable such as `libasdf_version`.
@@ -1245,12 +1247,12 @@ fn declared_exports() -> std::collections::BTreeSet<String> {
 }
 
 /// The dynamic symbols a shared library defines, version suffixes stripped.
-fn defined_symbols(lib: &Path) -> std::collections::BTreeSet<String> {
+fn defined_symbols(lib: &Path) -> alloc::collections::BTreeSet<String> {
     let Ok(out) = Command::new("nm").arg("-D").arg("--defined-only").arg(lib).output() else {
-        return std::collections::BTreeSet::new();
+        return alloc::collections::BTreeSet::new();
     };
     if !out.status.success() {
-        return std::collections::BTreeSet::new();
+        return alloc::collections::BTreeSet::new();
     }
     String::from_utf8_lossy(&out.stdout)
         .lines()

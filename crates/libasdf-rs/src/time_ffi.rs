@@ -5,7 +5,8 @@
 //! than being hand-rolled. Their layouts differ between targets, so the
 //! layout gate checks this one on every platform in the matrix.
 
-use std::ffi::{CStr, CString, c_char, c_int};
+use alloc::ffi::CString;
+use core::ffi::{CStr, c_char, c_int};
 
 use asdf_core::core::time::{Civil, Time, TimeFormat, TimeScale, infer_format};
 use asdf_core::yaml::{Document, NodeId};
@@ -44,8 +45,8 @@ pub struct asdf_time_info_t {
     pub tm: libc::tm,
 }
 
-impl std::fmt::Debug for asdf_time_info_t {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for asdf_time_info_t {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("asdf_time_info_t")
             .field("tv_sec", &self.ts.tv_sec)
             .field("tv_nsec", &self.ts.tv_nsec)
@@ -58,7 +59,7 @@ impl Default for asdf_time_info_t {
     fn default() -> Self {
         // SAFETY: both are plain C structs of integers and pointers, for
         // which an all-zero value is valid and is what C's `= {0}` gives.
-        unsafe { std::mem::zeroed() }
+        unsafe { core::mem::zeroed() }
     }
 }
 
@@ -82,7 +83,7 @@ impl asdf_time_t {
     /// A zeroed instance.
     pub(crate) fn zeroed() -> Self {
         Self {
-            value: std::ptr::null_mut(),
+            value: core::ptr::null_mut(),
             info: asdf_time_info_t::default(),
             format: TimeFormat::Iso as c_int,
             scale: TimeScale::Utc as c_int,
@@ -228,7 +229,7 @@ pub extern "C" fn asdf_time_format_string(format: TimeFormatAbi) -> *const c_cha
         22 => Some(c"datetime64"),
         _ => None,
     };
-    name.map_or(std::ptr::null(), CStr::as_ptr)
+    name.map_or(core::ptr::null(), CStr::as_ptr)
 }
 
 /// The tag for `core/time`.
@@ -370,7 +371,7 @@ pub(crate) unsafe fn time_deinit(obj: *mut asdf_time_t) {
 pub(crate) unsafe fn time_copy(src: &asdf_time_t, dst: *mut asdf_time_t) -> bool {
     let out = unsafe { &mut *dst };
     out.value = if src.value.is_null() {
-        std::ptr::null_mut()
+        core::ptr::null_mut()
     } else {
         let text = unsafe { CStr::from_ptr(src.value) };
         match CString::new(text.to_bytes()) {
@@ -395,7 +396,10 @@ mod tests {
         let root = doc.root().unwrap();
         let node = doc.mapping_get(root, "t").unwrap();
         let mut time = asdf_time_t::zeroed();
-        assert_eq!(time_deserialize(&doc, node, std::ptr::null_mut(), &mut time), AsdfValueErr::Ok);
+        assert_eq!(
+            time_deserialize(&doc, node, core::ptr::null_mut(), &mut time),
+            AsdfValueErr::Ok
+        );
         time
     }
 
@@ -604,7 +608,7 @@ mod tests {
         let mut time = asdf_time_t { value: bad.as_ptr().cast_mut(), ..asdf_time_t::zeroed() };
         assert_eq!(unsafe { asdf_time_parse(&mut time) }, -1);
 
-        assert_eq!(unsafe { asdf_time_parse(std::ptr::null_mut()) }, -1);
+        assert_eq!(unsafe { asdf_time_parse(core::ptr::null_mut()) }, -1);
     }
 
     #[test]

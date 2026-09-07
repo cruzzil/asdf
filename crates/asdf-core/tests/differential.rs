@@ -522,7 +522,7 @@ mod serde_free {
                     current.push(ch);
                 }
                 ',' if !in_string && depth == 0 => {
-                    parts.push(std::mem::take(&mut current));
+                    parts.push(core::mem::take(&mut current));
                 }
                 _ => current.push(ch),
             }
