@@ -14,6 +14,58 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09-09
+
+`libasdf-rs` only. The four other crates are unchanged.
+
+Prompted by a question that turned out to have a sharp answer: can a real
+third-party extension use this library? [libasdf-gwcs] now builds against it
+and passes all 35 of its tests -- reading, writing, and evaluating a Roman L2
+WCS against both AST and Python gwcs -- with no valgrind errors and nothing
+leaked, matching upstream libasdf exactly. Getting there took three fixes.
+
+### Fixed
+
+- **`asdf_get_required_property` and `asdf_get_optional_property` returned a
+  freed handle for a mapping or a sequence.** Both destroyed the value they
+  looked up before returning, which is right for a scalar -- the C type is
+  copied out -- but wrong for a container, where what lands in `*out` *is*
+  that value. Callers got `ASDF_VALUE_OK` and a dangling pointer. Ownership
+  now passes to the caller, as `value.h` says. This is the first thing
+  libasdf-gwcs does on every transform it reads, so it segfaulted immediately.
+- **The insertion entry points leaked the handle they were given.**
+  `asdf_mapping_set`, `asdf_sequence_append` and their four container variants
+  are documented to consume the value on success; they linked the node into
+  the document but never released the handle box that named it.
+- **`asdf_value_of_ndarray` stranded the array's internal state.**
+  `ndarray.h` has it transfer ownership of the data to the file, and callers
+  build the `asdf_ndarray_t` as a stack literal -- upstream's own write
+  example does -- so they have nowhere to call `asdf_ndarray_deinit` from.
+  About 1.2 KB went missing per array written.
+
+Together these were 23 KB leaked across a single run of libasdf-gwcs's suite,
+against upstream's zero.
+
+### Changed
+
+- **Synced to libasdf `cff7ab0` (0.1.0)**, up from `56d24aa` (0.1.0rc2). The
+  headers carry the two fixes for [libasdf#251]: `asdf_value_find_ex` takes an
+  `asdf_depth_t` (`int64_t`) where it took a POSIX-only `ssize_t`, and the
+  option-flag enums shift `1ULL` rather than `1UL`, which overflowed on LLP64.
+  No struct layout, enum discriminant or exported symbol moved; all 376
+  exports and 58 struct layouts still agree, and upstream's C suite still
+  passes 498 of 501.
+- **The C ABI crate is built and tested on Windows again**, x64 and arm64,
+  which [libasdf#251] had blocked. One gratuitous include remained --
+  `asdf/core/time.h` pulls in `<sys/time.h>` for a `struct timespec` that
+  `<time.h>` already provides -- and `build.rs` answers it with a generated
+  shim rather than editing a vendored header.
+- The README explains how to build a third-party extension against this
+  library, including the `pkg-config` prefix cargo does not produce.
+
+[libasdf-gwcs]: https://github.com/asdf-format/libasdf-gwcs
+[libasdf#251]: https://github.com/asdf-format/libasdf/issues/251
+
 ## [0.1.3] - 2026-09-07
 
 `asdf-cli` is unchanged and stays at 0.1.2.
@@ -139,7 +191,8 @@ is listed here so the first release notes are not written from scratch.
 - `asdf-core` reads a file whole rather than mapping it under `cfg(miri)`, so
   dependants can run Miri.
 
-[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/cruzzil/asdf/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/cruzzil/asdf/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/cruzzil/asdf/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/cruzzil/asdf/compare/v0.1.0...v0.1.1

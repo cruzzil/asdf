@@ -10,7 +10,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/types.h>
 
 #include <asdf/util.h>
 #include <asdf/yaml.h>
@@ -1177,6 +1176,20 @@ ASDF_EXPORT asdf_value_t *asdf_value_find(asdf_value_t *root, asdf_value_pred_t 
  */
 #define ASDF_BREADTH_FIRST false
 
+/**
+ * Argument type of ``max_depth`` in `asdf_value_find_ex` and related
+ * functions.
+ *
+ * .. note::
+ *
+ *   Formally defined as just ``int64_t``--this was changed for issue #251
+ *   which points out that its original type, ``ssize_t``, is a POSIX-only
+ *   extension (and arguably is not correct semantically for this use case).
+ *   Defining this as ``int64_t`` is nonetheless ABI-compatible with the
+ *   previous definition so is a safe and worthwhile change.
+ */
+typedef int64_t asdf_depth_t;
+
 
 /**
  * Extended version of `asdf_value_find` with additional traversal options
@@ -1199,7 +1212,7 @@ ASDF_EXPORT asdf_value_t *asdf_value_find_ex(
     asdf_value_pred_t pred,
     bool depth_first,
     asdf_value_pred_t descend_pred,
-    ssize_t max_depth);
+    asdf_depth_t max_depth);
 
 
 /**
@@ -1264,7 +1277,7 @@ ASDF_EXPORT asdf_find_iter_t *asdf_find_iter_init_ex(
     asdf_value_pred_t pred,
     bool depth_first,
     asdf_value_pred_t descend_pred,
-    ssize_t max_depth);
+    asdf_depth_t max_depth);
 
 
 /**

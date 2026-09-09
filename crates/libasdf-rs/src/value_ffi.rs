@@ -1328,7 +1328,28 @@ fn set_collection_style(value: *mut AsdfValue, style: crate::types::AsdfYamlNode
     }
 }
 
+/// Release an inserted handle, which the container now owns.
+///
+/// The insertion entry points that take an existing `asdf_value_t *` consume
+/// it: `value.h` says "ownership of ``value`` transfers to the mapping on
+/// success", and callers -- libasdf-gwcs among them -- destroy the handle
+/// themselves only on the failure path. The node itself lives in the
+/// document from here on; what is released is the handle box that named it.
+///
+/// This sits at the exported boundary rather than inside `mapping_set` /
+/// `sequence_append`, because the `asdf_mapping_set_<type>` variants build a
+/// value, insert it and then release it themselves -- for them the internal
+/// helpers must stay non-consuming.
+fn consume_inserted(err: AsdfValueErr, value: *mut AsdfValue) -> AsdfValueErr {
+    if err == AsdfValueErr::Ok {
+        unsafe { crate::file_ffi::asdf_value_destroy(value) };
+    }
+    err
+}
+
 /// Put a value into a mapping under `key`.
+///
+/// Consumes `value` on success: ownership of it transfers to the mapping.
 ///
 /// # Safety
 /// `mapping` and `value` must be valid handles from the same file; `key` a
@@ -1339,7 +1360,9 @@ pub unsafe extern "C" fn asdf_mapping_set(
     key: *const c_char,
     value: *mut AsdfValue,
 ) -> AsdfValueErr {
-    guard("asdf_mapping_set", AsdfValueErr::Unknown, || mapping_set(mapping, key, value))
+    guard("asdf_mapping_set", AsdfValueErr::Unknown, || {
+        consume_inserted(mapping_set(mapping, key, value), value)
+    })
 }
 
 /// Safe internal form of [`asdf_mapping_set`].
@@ -1411,7 +1434,9 @@ pub unsafe extern "C" fn asdf_sequence_append(
     sequence: *mut AsdfSequence,
     value: *mut AsdfValue,
 ) -> AsdfValueErr {
-    guard("asdf_sequence_append", AsdfValueErr::Unknown, || sequence_append(sequence, value))
+    guard("asdf_sequence_append", AsdfValueErr::Unknown, || {
+        consume_inserted(sequence_append(sequence, value), value)
+    })
 }
 
 /// Safe internal form of [`asdf_sequence_append`].
@@ -1714,7 +1739,7 @@ pub unsafe extern "C" fn asdf_mapping_set_mapping(
     key: *const c_char,
     value: *mut AsdfMapping,
 ) -> AsdfValueErr {
-    mapping_set(mapping, key, value)
+    consume_inserted(mapping_set(mapping, key, value), value)
 }
 
 /// Put a sequence into a mapping.
@@ -1727,7 +1752,7 @@ pub unsafe extern "C" fn asdf_mapping_set_sequence(
     key: *const c_char,
     value: *mut AsdfSequence,
 ) -> AsdfValueErr {
-    mapping_set(mapping, key, value)
+    consume_inserted(mapping_set(mapping, key, value), value)
 }
 
 /// Append a NUL-terminated string to a sequence.
@@ -1838,7 +1863,7 @@ pub unsafe extern "C" fn asdf_sequence_append_mapping(
     sequence: *mut AsdfSequence,
     value: *mut AsdfMapping,
 ) -> AsdfValueErr {
-    sequence_append(sequence, value)
+    consume_inserted(sequence_append(sequence, value), value)
 }
 
 /// Append a nested sequence to a sequence.
@@ -1850,7 +1875,7 @@ pub unsafe extern "C" fn asdf_sequence_append_sequence(
     sequence: *mut AsdfSequence,
     value: *mut AsdfSequence,
 ) -> AsdfValueErr {
-    sequence_append(sequence, value)
+    consume_inserted(sequence_append(sequence, value), value)
 }
 
 /// Build a sequence of nulls.
@@ -2216,18 +2241,18 @@ struct FindIter {
     public: crate::types::asdf_find_iter_t,
     file: *mut AsdfFile,
     /// Nodes still to visit, each with the depth at which it was reached.
-    queue: alloc::collections::VecDeque<(NodeId, isize)>,
+    queue: alloc::collections::VecDeque<(NodeId, i64)>,
     pred: AsdfValuePred,
     descend_pred: AsdfValuePred,
     depth_first: bool,
-    max_depth: isize,
+    max_depth: i64,
     /// Nodes already queued, so an aliased subtree is visited once.
     seen: Vec<NodeId>,
 }
 
 impl FindIter {
     /// Push a node's children in the order the traversal wants them.
-    fn enqueue_children(&mut self, doc: &asdf_core::yaml::Document, node: NodeId, depth: isize) {
+    fn enqueue_children(&mut self, doc: &asdf_core::yaml::Document, node: NodeId, depth: i64) {
         // `max_depth` counts containers entered *below* the root, so a
         // container at depth `d` may be opened while `d <= max_depth`: with
         // a limit of 1 the root's children are visited and one container
@@ -2333,13 +2358,13 @@ fn find_iter_new(
     pred: AsdfValuePred,
     depth_first: bool,
     descend_pred: AsdfValuePred,
-    max_depth: isize,
+    max_depth: i64,
 ) -> *mut FindIter {
     let (Some(file), Some(node)) = (value_file(root), value_node(root)) else {
         return core::ptr::null_mut();
     };
     let mut queue = alloc::collections::VecDeque::new();
-    queue.push_back((node, 0isize));
+    queue.push_back((node, 0i64));
     Box::into_raw(Box::new(FindIter {
         public: crate::types::asdf_find_iter_t { value: core::ptr::null_mut() },
         file,
@@ -2378,7 +2403,7 @@ pub unsafe extern "C" fn asdf_value_find_ex(
     pred: AsdfValuePred,
     depth_first: bool,
     descend_pred: AsdfValuePred,
-    max_depth: isize,
+    max_depth: i64,
 ) -> *mut AsdfValue {
     guard("asdf_value_find_ex", core::ptr::null_mut(), || {
         value_find_ex(root, pred, depth_first, descend_pred, max_depth)
@@ -2395,7 +2420,7 @@ pub(crate) fn value_find_ex(
     pred: AsdfValuePred,
     depth_first: bool,
     descend_pred: AsdfValuePred,
-    max_depth: isize,
+    max_depth: i64,
 ) -> *mut AsdfValue {
     let iter = find_iter_new(root, pred, depth_first, descend_pred, max_depth);
     if iter.is_null() {
@@ -2434,7 +2459,7 @@ pub unsafe extern "C" fn asdf_find_iter_init_ex(
     pred: AsdfValuePred,
     depth_first: bool,
     descend_pred: AsdfValuePred,
-    max_depth: isize,
+    max_depth: i64,
 ) -> *mut crate::types::asdf_find_iter_t {
     guard("asdf_find_iter_init_ex", core::ptr::null_mut(), || {
         find_iter_init_ex(root, pred, depth_first, descend_pred, max_depth)
@@ -2451,7 +2476,7 @@ pub(crate) fn find_iter_init_ex(
     pred: AsdfValuePred,
     depth_first: bool,
     descend_pred: AsdfValuePred,
-    max_depth: isize,
+    max_depth: i64,
 ) -> *mut crate::types::asdf_find_iter_t {
     find_iter_new(root, pred, depth_first, descend_pred, max_depth)
         .cast::<crate::types::asdf_find_iter_t>()
@@ -3123,7 +3148,8 @@ mod build_tests {
         assert_eq!(value, 42);
 
         unsafe { asdf_value_destroy(found) };
-        unsafe { asdf_value_destroy(n) };
+        // `n` is not destroyed here: the successful `asdf_mapping_set` above
+        // consumed it, as `value.h` says it does.
         unsafe { asdf_mapping_destroy(mapping) };
     }
 
@@ -3135,8 +3161,8 @@ mod build_tests {
 
         for value in [10i64, 20, 30] {
             let item = unsafe { asdf_value_of_int64(h.0, value) };
+            // A successful append consumes `item`.
             assert_eq!(unsafe { asdf_sequence_append(sequence, item) }, AsdfValueErr::Ok);
-            unsafe { asdf_value_destroy(item) };
         }
         assert_eq!(unsafe { asdf_sequence_size(sequence) }, 3);
 
@@ -3171,13 +3197,14 @@ mod build_tests {
         for value in [1i64, 2] {
             let item = unsafe { asdf_value_of_int64(h.0, value) };
             unsafe { asdf_sequence_append(sequence, item) };
-            unsafe { asdf_value_destroy(item) };
         }
         let first = unsafe { asdf_sequence_pop(sequence, 0) };
         assert!(!first.is_null());
         assert_eq!(unsafe { asdf_sequence_size(sequence) }, 1);
 
-        for v in [popped, first, n, mapping, sequence] {
+        // `n` is absent: the `asdf_mapping_set` above consumed it. Popping
+        // its entry hands back a fresh handle (`popped`), not that one.
+        for v in [popped, first, mapping, sequence] {
             unsafe { asdf_value_destroy(v) };
         }
     }
@@ -3197,7 +3224,6 @@ mod build_tests {
         for value in [1i64, 2, 3] {
             let item = unsafe { asdf_value_of_int64(h.0, value) };
             unsafe { asdf_sequence_append(frames, item) };
-            unsafe { asdf_value_destroy(item) };
         }
         let frames_key = cstr("frames");
         unsafe { asdf_mapping_set(meta, frames_key.as_ptr(), frames) };
@@ -3232,9 +3258,9 @@ mod build_tests {
         assert_eq!(value, 3);
 
         unsafe { libc::free(buf) };
-        for v in [meta, name, frames] {
-            unsafe { asdf_value_destroy(v) };
-        }
+        // `name` and `frames` were consumed by the sets that inserted them,
+        // and `meta` by `set_value_at`.
+        let _ = (meta, name, frames);
     }
 
     #[test]
@@ -3274,7 +3300,6 @@ mod build_tests {
         for (key, value) in [("a", 1i64), ("b", 2)] {
             let item = unsafe { asdf_value_of_int64(h.0, value) };
             unsafe { asdf_mapping_set(mapping, cstr(key).as_ptr(), item) };
-            unsafe { asdf_value_destroy(item) };
         }
 
         let mut iter = unsafe { asdf_container_iter_init(mapping) };
@@ -3294,7 +3319,6 @@ mod build_tests {
         for value in [10i64, 20] {
             let item = unsafe { asdf_value_of_int64(h.0, value) };
             unsafe { asdf_sequence_append(sequence, item) };
-            unsafe { asdf_value_destroy(item) };
         }
         let mut iter = unsafe { asdf_container_iter_init(sequence) };
         let mut indices = Vec::new();
@@ -3316,7 +3340,6 @@ mod build_tests {
         for value in [1i64, 2, 3] {
             let item = unsafe { asdf_value_of_int64(h.0, value) };
             unsafe { asdf_sequence_append(sequence, item) };
-            unsafe { asdf_value_destroy(item) };
         }
 
         let mut iter = unsafe { asdf_container_reverse_iter_init(sequence) };

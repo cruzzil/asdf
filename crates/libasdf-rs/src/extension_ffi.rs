@@ -690,7 +690,18 @@ unsafe fn get_property(
     }
 
     let err = unsafe { crate::value_ffi::asdf_value_as_type(prop, value_type, out) };
-    release(prop);
+
+    // `Mapping` and `Sequence` are views: what lands in `*out` *is* `prop`,
+    // not a copy of it. Releasing it here would hand the caller a dangling
+    // handle -- and libasdf-gwcs, which reads every optional `inputs` and
+    // `bounding_box` this way, dereferences it immediately. Ownership passes
+    // to the caller instead, who destroys it as the header says. Every other
+    // type copies out of the value, so `prop` stays ours to free.
+    let out_aliases_prop = matches!(wanted, AsdfValueType::Mapping | AsdfValueType::Sequence)
+        && err == AsdfValueErr::Ok;
+    if !out_aliases_prop {
+        release(prop);
+    }
     err
 }
 
@@ -911,5 +922,118 @@ mod tests {
             libasdf_software.0.version,
             (&raw const libasdf_version).cast::<asdf_version_t>()
         ));
+    }
+    /// A container property must outlive the call that produced it.
+    ///
+    /// `asdf_get_*_property` used to destroy the value it looked up before
+    /// returning, which is right for a scalar -- the C type is copied out --
+    /// but wrong for a mapping or a sequence, where what lands in `*out` *is*
+    /// that value. Callers got `ASDF_VALUE_OK` and a freed handle.
+    ///
+    /// libasdf-gwcs hits this on the first thing it does: every transform's
+    /// deserializer reads optional `inputs`, `outputs` and `bounding_box`
+    /// this way and dereferences the result immediately.
+    #[test]
+    fn a_container_property_is_usable_after_the_call() {
+        use crate::file_ffi::{AsdfFile, asdf_close, asdf_open_mem_ex};
+        use crate::types::{AsdfValueErr, AsdfValueType};
+
+        let doc = b"#ASDF 1.0.0\n#ASDF_STANDARD 1.5.0\n%YAML 1.1\n\
+--- !<tag:stsci.edu:asdf/core/asdf-1.1.0>\n\
+transform:\n  inputs: [x, y]\n  meta: {unit: deg}\n...\n";
+
+        let file: *mut AsdfFile =
+            unsafe { asdf_open_mem_ex(doc.as_ptr().cast(), doc.len(), core::ptr::null_mut()) };
+        assert!(!file.is_null());
+
+        let path = CString::new("transform").unwrap();
+        let transform = unsafe { crate::file_ffi::asdf_get_value(file, path.as_ptr()) };
+        assert!(!transform.is_null());
+
+        let mut map: *mut crate::value_ffi::AsdfMapping = core::ptr::null_mut();
+        assert_eq!(
+            unsafe { crate::value_ffi::asdf_value_as_mapping(transform, &mut map) },
+            AsdfValueErr::Ok
+        );
+
+        // A sequence property, as gwcs reads `inputs`.
+        let key = CString::new("inputs").unwrap();
+        let mut seq: *mut crate::value_ffi::AsdfSequence = core::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                asdf_get_optional_property(
+                    map,
+                    key.as_ptr(),
+                    AsdfValueType::Sequence as c_int,
+                    core::ptr::null(),
+                    (&raw mut seq).cast(),
+                )
+            },
+            AsdfValueErr::Ok
+        );
+        assert!(!seq.is_null());
+        assert_eq!(unsafe { crate::value_ffi::asdf_sequence_size(seq) }, 2);
+        unsafe { crate::file_ffi::asdf_value_destroy(seq) };
+
+        // And a mapping property, which reached the same fate.
+        let key = CString::new("meta").unwrap();
+        let mut inner: *mut crate::value_ffi::AsdfMapping = core::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                asdf_get_optional_property(
+                    map,
+                    key.as_ptr(),
+                    AsdfValueType::Mapping as c_int,
+                    core::ptr::null(),
+                    (&raw mut inner).cast(),
+                )
+            },
+            AsdfValueErr::Ok
+        );
+        assert!(!inner.is_null());
+        assert_eq!(unsafe { crate::value_ffi::asdf_mapping_size(inner) }, 1);
+        unsafe { crate::file_ffi::asdf_value_destroy(inner) };
+
+        unsafe { crate::file_ffi::asdf_value_destroy(transform) };
+        unsafe { asdf_close(file) };
+    }
+
+    /// A missing optional property must leave `*out` alone.
+    ///
+    /// gwcs relies on this: it pre-sets the handle to NULL and skips the key
+    /// when it comes back NULL, so writing a stale pointer would be as bad as
+    /// returning a freed one.
+    #[test]
+    fn an_absent_container_property_leaves_out_untouched() {
+        use crate::file_ffi::{AsdfFile, asdf_close, asdf_open_mem_ex};
+        use crate::types::{AsdfValueErr, AsdfValueType};
+
+        let doc = b"#ASDF 1.0.0\n#ASDF_STANDARD 1.5.0\n%YAML 1.1\n\
+--- !<tag:stsci.edu:asdf/core/asdf-1.1.0>\n\
+transform:\n  name: shifty\n...\n";
+
+        let file: *mut AsdfFile =
+            unsafe { asdf_open_mem_ex(doc.as_ptr().cast(), doc.len(), core::ptr::null_mut()) };
+        let path = CString::new("transform").unwrap();
+        let transform = unsafe { crate::file_ffi::asdf_get_value(file, path.as_ptr()) };
+        let mut map: *mut crate::value_ffi::AsdfMapping = core::ptr::null_mut();
+        unsafe { crate::value_ffi::asdf_value_as_mapping(transform, &mut map) };
+
+        let key = CString::new("inputs").unwrap();
+        let mut seq: *mut crate::value_ffi::AsdfSequence = core::ptr::null_mut();
+        let err = unsafe {
+            asdf_get_optional_property(
+                map,
+                key.as_ptr(),
+                AsdfValueType::Sequence as c_int,
+                core::ptr::null(),
+                (&raw mut seq).cast(),
+            )
+        };
+        assert_eq!(err, AsdfValueErr::NotFound);
+        assert!(seq.is_null(), "an absent property must not write to `out`");
+
+        unsafe { crate::file_ffi::asdf_value_destroy(transform) };
+        unsafe { asdf_close(file) };
     }
 }

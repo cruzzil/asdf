@@ -5,11 +5,11 @@ implementation is synchronised with.
 
 | | |
 |---|---|
-| **Commit** | `56d24aa11b3013c362a485b25c2f51db35622d0e` |
-| **Describe** | `0.1.0rc2-3-g56d24aa` |
-| **Subject** | Merge pull request #247 from embray/stc-symbol-leakage |
-| **Package version** | 0.1.0rc2 |
-| **Synced on** | 2026-09-03 |
+| **Commit** | `cff7ab0cc3a33673666f9013d92f4cc50edf2b19` |
+| **Describe** | `0.1.0-4-gcff7ab0` |
+| **Subject** | Merge pull request #254 from embray/issue-251 |
+| **Package version** | 0.1.0 |
+| **Synced on** | 2026-09-09 |
 
 ## What "synced" means here
 

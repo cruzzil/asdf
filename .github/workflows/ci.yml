@@ -26,17 +26,16 @@ jobs:
           - { name: linux-arm64,   os: ubuntu-24.04-arm, unix: true }
           - { name: macos-arm64,   os: macos-latest,     unix: true }
           - { name: macos-x64,     os: macos-15-intel,   unix: true }
-          # `--exclude libasdf-rs`: the C ABI crate cannot be built on Windows
-          # yet, and the reason is upstream's headers rather than anything
-          # here. `asdf/value.h` takes an `ssize_t`, which is POSIX and absent
-          # from the MSVC CRT, and `asdf/parser.h` and `asdf/emitter.h` assert
-          # `X < (1UL << 63)`, which is a shift past the width of `unsigned
-          # long` on LLP64. Reported as libasdf#251. The vendored headers are
-          # copied verbatim and are not ours to patch, so until that lands
-          # Windows covers the four pure-Rust crates, which is where a Windows
-          # user of the Rust API lives anyway.
-          - { name: windows-x64,   os: windows-latest,   unix: false, exclude_ffi: true }
-          - { name: windows-arm64, os: windows-11-arm,   unix: false, exclude_ffi: true, bootstrap: true }
+          # The C ABI crate now builds on Windows too. libasdf#251, which is
+          # what kept it off, is fixed upstream as of this sync: `asdf/value.h`
+          # takes an `asdf_depth_t` (`int64_t`) where it took a POSIX-only
+          # `ssize_t`, and the option-flag enums shift `1ULL` rather than
+          # `1UL`, which overflowed on LLP64. One gratuitous include remains --
+          # `asdf/core/time.h` pulls in `<sys/time.h>` for a `struct timespec`
+          # that `<time.h>` already provides -- and `build.rs` answers it with
+          # a generated shim rather than editing a vendored header.
+          - { name: windows-x64,   os: windows-latest,   unix: false }
+          - { name: windows-arm64, os: windows-11-arm,   unix: false, bootstrap: true }
     steps:
       # Must precede every checkout. Git on Windows rewrites text files to
       # CRLF as it checks them out, and several suites here compare against

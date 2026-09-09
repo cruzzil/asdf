@@ -1463,12 +1463,51 @@ pub unsafe extern "C" fn asdf_value_of_ndarray(
     file: *mut crate::file_ffi::AsdfFile,
     obj: *const asdf_ndarray_t,
 ) -> *mut crate::file_ffi::AsdfValue {
-    use asdf_core::yaml::{CollectionStyle, NodeData, Tag};
-
     guard("asdf_value_of_ndarray", core::ptr::null_mut(), || {
         if file.is_null() || obj.is_null() {
             return core::ptr::null_mut();
         }
+        let value = value_of_ndarray_inner(file, obj);
+        // `ndarray.h`: "assigning the ndarray this way transfers ownership of
+        // its data to ``file``". The payload has been copied into the file
+        // above, so the state hanging off `_reserved` is spent -- and callers
+        // that build an `asdf_ndarray_t` as a stack literal, which is what
+        // libasdf's own write example and every libasdf-gwcs serializer do,
+        // have nowhere to call `asdf_ndarray_deinit` from. Only the state we
+        // allocated goes; the caller's own `shape`/`strides` are left alone.
+        if !value.is_null() {
+            release_ndarray_state(obj.cast_mut());
+        }
+        value
+    })
+}
+
+/// Free the `_reserved` state, leaving the caller's public fields intact.
+///
+/// Unlike [`ndarray_deinit`] this does not null `shape`, `strides` or `ndim`:
+/// on the write path those point at storage the caller owns.
+fn release_ndarray_state(ndarray: *mut asdf_ndarray_t) {
+    if ndarray.is_null() {
+        return;
+    }
+    let array = unsafe { &mut *ndarray };
+    if !array._reserved.is_null() {
+        let state = unsafe { Box::from_raw(array._reserved.cast::<NdarrayState>()) };
+        if !state.block.is_null() {
+            unsafe { crate::block_ffi::asdf_block_close(state.block) };
+        }
+        drop(state);
+        array._reserved = core::ptr::null_mut();
+    }
+}
+
+fn value_of_ndarray_inner(
+    file: *mut crate::file_ffi::AsdfFile,
+    obj: *const asdf_ndarray_t,
+) -> *mut crate::file_ffi::AsdfValue {
+    use asdf_core::yaml::{CollectionStyle, NodeData, Tag};
+
+    {
         let array = unsafe { &*obj };
 
         // The shape and datatype come from the public fields, so an array
@@ -1580,7 +1619,7 @@ pub unsafe extern "C" fn asdf_value_of_ndarray(
         doc.node_mut(node).tag = Some(Tag::parse("tag:stsci.edu:asdf/core/ndarray-1.1.0"));
 
         Box::into_raw(Box::new(crate::file_ffi::AsdfValue::new(file, node)))
-    })
+    }
 }
 
 /// Warn when an inline array is larger than the file's threshold.
@@ -2722,5 +2761,67 @@ mod tests {
         let mut size = 99usize;
         assert!(unsafe { asdf_ndarray_data(null, &mut size) }.is_null());
         assert_eq!(size, 0);
+    }
+    /// Serializing an array must not strand the state we hung off it.
+    ///
+    /// `ndarray.h` says assigning an ndarray this way "transfers ownership of
+    /// its data to ``file``", and callers build the struct as a stack literal
+    /// -- libasdf's own write example and every libasdf-gwcs serializer do --
+    /// so there is nowhere for them to call `asdf_ndarray_deinit` from. The
+    /// payload is copied into the file, so the `_reserved` state is spent and
+    /// has to go with it; leaving it behind leaked ~1.2 KB per array written.
+    #[test]
+    fn serializing_an_array_reclaims_its_internal_state() {
+        use crate::file_ffi::{asdf_close, asdf_open_mem_ex};
+
+        let file = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
+        assert!(!file.is_null());
+
+        let shape = [2u64, 2];
+        let mut array = asdf_ndarray_t {
+            source: 0,
+            ndim: 2,
+            shape: shape.as_ptr(),
+            // 11 is `ASDF_DATATYPE_FLOAT64`; 60 is `ASDF_BYTEORDER_LITTLE`.
+            datatype: asdf_datatype_t {
+                type_: 11,
+                size: 0,
+                name: core::ptr::null(),
+                byteorder: 60,
+                ndim: 0,
+                shape: core::ptr::null(),
+                nfields: 0,
+                fields: core::ptr::null(),
+            },
+            byteorder: 60,
+            offset: 0,
+            strides: core::ptr::null(),
+            _reserved: core::ptr::null_mut(),
+        };
+
+        // What a gwcs serializer does: pick storage, copy the data in, then
+        // hand the array to the file.
+        unsafe { asdf_ndarray_storage_set(&mut array, AsdfArrayStorage::Inline) };
+        let data = [1.0f64, 2.0, 3.0, 4.0];
+        assert_eq!(
+            unsafe { asdf_ndarray_data_copy(&mut array, data.as_ptr().cast()) },
+            NdarrayErr::Ok
+        );
+        assert!(!array._reserved.is_null(), "the copy should have attached state");
+
+        let value = unsafe { asdf_value_of_ndarray(file, &array) };
+        assert!(!value.is_null());
+        assert!(
+            array._reserved.is_null(),
+            "the file owns the data now, so the array's state must be released"
+        );
+
+        // The caller's own fields are untouched: they point at storage the
+        // caller owns, unlike `asdf_ndarray_deinit`, which clears them.
+        assert_eq!(array.ndim, 2);
+        assert!(core::ptr::eq(array.shape, shape.as_ptr()));
+
+        unsafe { crate::file_ffi::asdf_value_destroy(value) };
+        unsafe { asdf_close(file) };
     }
 }

@@ -76,6 +76,50 @@ asdf_write_to(file, "out.asdf");
 asdf_close(file);
 ```
 
+## Using an extension
+
+Extensions are separate shared libraries that register themselves with
+libasdf before `main` and teach it new tags. They link against the C ABI, so
+they work against this implementation as they do against upstream's --
+[libasdf-gwcs](https://github.com/asdf-format/libasdf-gwcs), which adds GWCS
+reading, writing and evaluation, passes its whole suite here.
+
+Their build systems find libasdf through `pkg-config`, which cargo does not
+produce, so assemble a prefix once. Two of the pieces are generated rather
+than vendored: `asdf/config.h` records the build's capabilities, and, on
+MSVC, `sys/time.h`.
+
+```console
+$ cargo build --release
+$ PREFIX=$PWD/prefix
+$ mkdir -p $PREFIX/lib/pkgconfig $PREFIX/include
+$ cp -r crates/libasdf-rs/include/asdf crates/libasdf-rs/include/asdf.h $PREFIX/include/
+$ cp "$(find target/release/build -name config.h -path '*asdf*' | head -1)" $PREFIX/include/asdf/
+$ cp target/release/libasdf.so $PREFIX/lib/
+$ sed -e "s|@PREFIX@|$PREFIX|" > $PREFIX/lib/pkgconfig/libasdf.pc <<'EOF'
+prefix=@PREFIX@
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libasdf
+Description: ASDF C library
+Version: 0.1.0
+Libs: -L${libdir} -lasdf
+Cflags: -I${includedir}
+EOF
+```
+
+Then build the extension against it exactly as its own README says:
+
+```console
+$ cmake .. -DCMAKE_PREFIX_PATH=$PREFIX -DENABLE_TESTING=YES   # or:
+$ ./configure PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig
+```
+
+The `Version` above is the upstream ABI this library implements, recorded in
+[`SYNC_COMMIT.md`](SYNC_COMMIT.md) -- not the crate's own version. An
+extension that asks for a minimum libasdf version is asking about that one.
+
 ## Building
 
 ```console

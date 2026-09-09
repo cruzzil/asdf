@@ -96,7 +96,11 @@ fn target_dir() -> PathBuf {
 }
 
 fn include_dirs() -> Vec<PathBuf> {
-    env!("ASDF_INCLUDE_DIRS").split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect()
+    [env!("ASDF_VENDORED_INCLUDE"), env!("ASDF_GENERATED_INCLUDE")]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 fn shared_library() -> Option<PathBuf> {

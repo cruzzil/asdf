@@ -23,12 +23,17 @@ fn target_dir() -> PathBuf {
 
 /// The include directories build.rs exported.
 fn include_dirs() -> Vec<PathBuf> {
-    env!("ASDF_INCLUDE_DIRS").split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect()
+    [env!("ASDF_VENDORED_INCLUDE"), env!("ASDF_GENERATED_INCLUDE")]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 fn shared_library() -> Option<PathBuf> {
     let dir = target_dir();
-    for name in ["libasdf.so", "libasdf.dylib"] {
+    // MSVC names the same cdylib `asdf.dll`, with no `lib` prefix.
+    for name in ["libasdf.so", "libasdf.dylib", "asdf.dll"] {
         let path = dir.join(name);
         if path.is_file() {
             return Some(path);
