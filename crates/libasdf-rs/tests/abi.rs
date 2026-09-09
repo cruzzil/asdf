@@ -8,6 +8,21 @@
 //! They are wired up in phase 0, long before the API is complete, so that
 //! every later phase gets this feedback from its first commit rather than
 //! discovering layout problems at integration time.
+//!
+//! # Unix only, for now
+//!
+//! The harness itself is POSIX-shaped, not the library: it drives `cc` with
+//! `-std=c11 -I -L -lasdf -Wl,-rpath` and reads symbols with `nm -D`. MSVC
+//! speaks none of that -- it wants `cl` flag syntax, an import `.lib` beside
+//! the DLL, and `dumpbin /exports`. The crate itself builds and runs on
+//! Windows as of the 0.1.0 sync, and its 198 unit tests cover it there;
+//! what is missing is this harness's toolchain support, which is worth
+//! having precisely because Windows is where struct layouts differ.
+//!
+//! Until that lands the CI step is gated on `matrix.unix`, so the gate is
+//! absent on Windows rather than quietly reporting zero tests.
+
+#![cfg(unix)]
 
 extern crate alloc;
 

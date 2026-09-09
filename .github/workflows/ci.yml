@@ -80,20 +80,22 @@ jobs:
           submodules: true
 
       - name: Build
-        run: cargo build --workspace --all-targets ${{ matrix.exclude_ffi && '--exclude libasdf-rs' || '' }}
+        run: cargo build --workspace --all-targets
 
       - name: Test
         env:
           ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
           LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf
-        run: cargo test --workspace ${{ matrix.exclude_ffi && '--exclude libasdf-rs' || '' }}
+        run: cargo test --workspace
 
       # Real C programs against the vendored headers: symbols, struct layouts,
       # enum discriminants, the `_Generic` macros, and an extension
       # registering before `main`. Run separately so its counts appear in the
       # log rather than buried in the workspace run.
+      # Unix only: the harness drives `cc` and `nm`, which MSVC does not
+      # provide. See the note at the top of `tests/abi.rs`.
       - name: ABI conformance
-        if: ${{ !matrix.exclude_ffi }}
+        if: matrix.unix
         env:
           ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
           LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf

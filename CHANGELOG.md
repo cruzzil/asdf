@@ -56,10 +56,16 @@ against upstream's zero.
   exports and 58 struct layouts still agree, and upstream's C suite still
   passes 498 of 501.
 - **The C ABI crate is built and tested on Windows again**, x64 and arm64,
-  which [libasdf#251] had blocked. One gratuitous include remained --
-  `asdf/core/time.h` pulls in `<sys/time.h>` for a `struct timespec` that
-  `<time.h>` already provides -- and `build.rs` answers it with a generated
-  shim rather than editing a vendored header.
+  which [libasdf#251] had blocked. Three things beyond the headers had to
+  give: `asdf/core/time.h` pulls in `<sys/time.h>` for a `struct timespec`
+  that `<time.h>` already provides, so `build.rs` generates a shim rather
+  than editing a vendored header; the include-path list was colon-joined,
+  which a `C:\` path breaks; and the `.CRT$XCU` constructor pointer in
+  `shim.c` was `static`, so `/include:` could not resolve it and the DLL
+  failed to link -- that branch had never been compiled before. The
+  ABI conformance harness stays Unix-only: it drives `cc` and `nm`, which
+  MSVC does not provide. Porting it is worth doing, since Windows is where
+  struct layouts differ, and it is not done here.
 - The README explains how to build a third-party extension against this
   library, including the `pkg-config` prefix cargo does not produce.
 
