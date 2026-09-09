@@ -1490,15 +1490,21 @@ fn release_ndarray_state(ndarray: *mut asdf_ndarray_t) {
     if ndarray.is_null() {
         return;
     }
-    let array = unsafe { &mut *ndarray };
-    if !array._reserved.is_null() {
-        let state = unsafe { Box::from_raw(array._reserved.cast::<NdarrayState>()) };
-        if !state.block.is_null() {
-            unsafe { crate::block_ffi::asdf_block_close(state.block) };
-        }
-        drop(state);
-        array._reserved = core::ptr::null_mut();
+    // Reached through the raw pointer rather than a `&mut`, because the
+    // public signature takes a `*const` and a reference retag here would be
+    // a Stacked Borrows violation for any caller that had one. `ensure_state`
+    // writes the same field the same way.
+    let slot = unsafe { &raw mut (*ndarray)._reserved };
+    let reserved = unsafe { slot.read() };
+    if reserved.is_null() {
+        return;
     }
+    let state = unsafe { Box::from_raw(reserved.cast::<NdarrayState>()) };
+    if !state.block.is_null() {
+        unsafe { crate::block_ffi::asdf_block_close(state.block) };
+    }
+    drop(state);
+    unsafe { slot.write(core::ptr::null_mut()) };
 }
 
 fn value_of_ndarray_inner(
@@ -2799,27 +2805,34 @@ mod tests {
             _reserved: core::ptr::null_mut(),
         };
 
+        // One raw pointer throughout, as a C caller has: the entry point takes
+        // a `*const` but transfers ownership, so it writes through it.
+        let array_ptr: *mut asdf_ndarray_t = &raw mut array;
+
         // What a gwcs serializer does: pick storage, copy the data in, then
         // hand the array to the file.
-        unsafe { asdf_ndarray_storage_set(&mut array, AsdfArrayStorage::Inline) };
+        unsafe { asdf_ndarray_storage_set(array_ptr, AsdfArrayStorage::Inline) };
         let data = [1.0f64, 2.0, 3.0, 4.0];
         assert_eq!(
-            unsafe { asdf_ndarray_data_copy(&mut array, data.as_ptr().cast()) },
+            unsafe { asdf_ndarray_data_copy(array_ptr, data.as_ptr().cast()) },
             NdarrayErr::Ok
         );
-        assert!(!array._reserved.is_null(), "the copy should have attached state");
+        assert!(
+            !unsafe { (*array_ptr)._reserved }.is_null(),
+            "the copy should have attached state"
+        );
 
-        let value = unsafe { asdf_value_of_ndarray(file, &array) };
+        let value = unsafe { asdf_value_of_ndarray(file, array_ptr) };
         assert!(!value.is_null());
         assert!(
-            array._reserved.is_null(),
+            unsafe { (*array_ptr)._reserved }.is_null(),
             "the file owns the data now, so the array's state must be released"
         );
 
         // The caller's own fields are untouched: they point at storage the
         // caller owns, unlike `asdf_ndarray_deinit`, which clears them.
-        assert_eq!(array.ndim, 2);
-        assert!(core::ptr::eq(array.shape, shape.as_ptr()));
+        assert_eq!(unsafe { (*array_ptr).ndim }, 2);
+        assert!(core::ptr::eq(unsafe { (*array_ptr).shape }, shape.as_ptr()));
 
         unsafe { crate::file_ffi::asdf_value_destroy(value) };
         unsafe { asdf_close(file) };

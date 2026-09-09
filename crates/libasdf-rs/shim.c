@@ -143,7 +143,15 @@ static void asdf_shim_register_core(void) {
  * initialised data and the linker discards it.
  */
 #pragma section(".CRT$XCU", read)
-__declspec(allocate(".CRT$XCU")) static void (*asdf_shim_register_core_ptr)(void) =
+/*
+ * External linkage, not `static`: `/include:` names a symbol for the linker
+ * to resolve, and a `static` one is invisible to it -- the reference goes
+ * unresolved and the link fails with LNK2001. This is Microsoft's own
+ * spelling of the idiom. The name is inside the `asdf_` namespace the ABI
+ * gate polices, and nothing marks it `dllexport`, so it stays out of the
+ * DLL's export table.
+ */
+__declspec(allocate(".CRT$XCU")) void (*asdf_shim_register_core_ptr)(void) =
     asdf_shim_register_core;
 /* Nothing references the pointer, so keep the linker from dropping it. */
 #pragma comment(linker, "/include:asdf_shim_register_core_ptr")
