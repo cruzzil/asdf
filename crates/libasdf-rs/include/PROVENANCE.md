@@ -18,21 +18,25 @@ exist *only* in the headers:
 | | |
 |---|---|
 | Upstream | https://github.com/asdf-format/libasdf |
-| Commit | `cff7ab0cc3a33673666f9013d92f4cc50edf2b19` |
-| Describe | `0.1.0-4-gcff7ab0` |
-| Package version | 0.1.0 |
-| Vendored on | 2026-09-09 |
+| Commit | `4be9e73` |
+| Describe | `0.2.0` |
+| Package version | 0.2.0 |
+| Vendored on | 2026-09-16 |
 | Licence | BSD-3-Clause — the upstream text is vendored alongside, as `LICENSE` |
 
 `asdf/config.h.in` is **not** vendored; `build.rs` generates `asdf/config.h` for the
-target instead. It also generates an empty `sys/time.h` on MSVC, which has no such
-header: `asdf/core/time.h` includes it but needs only `struct timespec`, which
-`<time.h>` provides. Supplying a header the compiler asks for is not editing a
-vendored one.
+target instead.
+
+Up to 0.1.0 it also generated an empty `sys/time.h` for MSVC, which has no such
+header, because `asdf/core/time.h` included it while needing only `struct timespec`.
+Upstream dropped that include in 0.2.0 ([gh-261]), so the shim is gone.
+
+[gh-261]: https://github.com/asdf-format/libasdf/issues/261
 
 ## Rules
 
 1. **Do not hand-edit these files.** Re-vendor from a pinned upstream commit instead, and
    update the table above.
 2. Re-vendoring is a deliberate act: it can change the ABI. Run the layout-assertion and
-   symbol-manifest checks afterwards and review any diff.
+   symbol-manifest checks afterwards and review any diff. The procedure is
+   [`docs/UPSTREAM-SYNC.md`](../../../docs/UPSTREAM-SYNC.md).

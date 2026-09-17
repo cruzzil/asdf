@@ -85,9 +85,8 @@ they work against this implementation as they do against upstream's --
 reading, writing and evaluation, passes its whole suite here.
 
 Their build systems find libasdf through `pkg-config`, which cargo does not
-produce, so assemble a prefix once. Two of the pieces are generated rather
-than vendored: `asdf/config.h` records the build's capabilities, and, on
-MSVC, `sys/time.h`.
+produce, so assemble a prefix once. One piece is generated rather than
+vendored: `asdf/config.h`, which records the build's capabilities.
 
 ```console
 $ cargo build --release
@@ -103,7 +102,7 @@ includedir=${prefix}/include
 
 Name: libasdf
 Description: ASDF C library
-Version: 0.1.0
+Version: 0.2.0
 Libs: -L${libdir} -lasdf
 Cflags: -I${includedir}
 EOF
@@ -157,7 +156,7 @@ wired into the test suite rather than reasoned about:
   vendored headers and linked against the built library, covering the
   `_Generic` macros, struct layouts, enum discriminants, a third-party
   extension registering before `main`, and the exported symbol namespace.
-  Every symbol the headers declare is checked to exist: 376 of 376, read out
+  Every symbol the headers declare is checked to exist: 379 of 379, read out
   of the preprocessed headers rather than a list kept by hand.
 - **Differential tests against Python asdf** — files written here are read by
   the reference implementation and vice versa, across every compression
@@ -197,6 +196,8 @@ which upstream libasdf does not do either.
 | [`CONFORMANCE.md`](CONFORMANCE.md) | The ABI baseline, every gate, and what Miri found. |
 | [`KNOWN-DIVERGENCES.md`](KNOWN-DIVERGENCES.md) | Deliberate differences from upstream libasdf and from Python `asdf`, each with the test that pins it. |
 | [`SYNC_COMMIT.md`](SYNC_COMMIT.md) | The libasdf commit this implementation is synchronised with. |
+| [`docs/UPSTREAM-SYNC.md`](docs/UPSTREAM-SYNC.md) | What moving that commit involves. |
+| [`docs/SECURITY-REVIEW.md`](docs/SECURITY-REVIEW.md) | How untrusted files are handled, and the five findings that changed it. |
 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | Benchmarks, how they are run, and how this compares to the reference implementation. |
 | [`CHANGELOG.md`](CHANGELOG.md) | What has changed. |
 

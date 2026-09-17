@@ -405,7 +405,25 @@ impl Reader {
         let relative = external_relative_path(uri)?;
         let target = base.join(relative);
 
-        let referenced = Reader::open(&target).map_err(|e| {
+        // The lexical check above stops `..` and absolute paths, but a
+        // symlink is neither: `data.bin -> /etc/shadow` is a clean relative
+        // name that `File::open` follows straight out of the directory.
+        // Resolving both sides and comparing is the only check that sees it.
+        let resolved = target.canonicalize().map_err(|e| {
+            err!(InvalidArgument, "external source {uri:?} ({}): {e}", target.display())
+        })?;
+        let root = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+        if !resolved.starts_with(&root) {
+            return Err(err!(
+                InvalidArgument,
+                "external source {uri:?} resolves to {}, outside the referring file's \
+                 directory {}",
+                resolved.display(),
+                root.display()
+            ));
+        }
+
+        let referenced = Reader::open(&resolved).map_err(|e| {
             err!(InvalidArgument, "external source {uri:?} ({}): {e}", target.display())
         })?;
         if referenced.block_count() == 0 {

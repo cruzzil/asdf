@@ -4,22 +4,6 @@ Deliberate, tested differences between `libasdf-rs`, upstream libasdf, and the
 Python `asdf` library. Each is covered by a test that will fail if the
 behaviour drifts.
 
-## Scalar resolution: `.inf` / `.nan`
-
-**Upstream behaviour.** libasdf resolves plain scalars with C's `strtoull`,
-`strtoll` and `strtod` at base 0, requiring the whole string to be consumed.
-`strtod` does not accept YAML's `.inf` / `-.inf` / `.nan` spellings, so libasdf
-reads them back as **strings** — even though its own emitter *writes* those
-spellings for non-finite floats (`src/value.h`,
-`ASDF_NODE_OF_FLOAT_VALUE_TYPE`). This is a genuine round-trip asymmetry in
-upstream, verified against the C library's `strtod`.
-
-**What we do.** `Schema::Libasdf` (the default) reproduces it exactly, so
-drop-in parity holds. `Schema::Yaml11` resolves them as floats, which is what
-YAML 1.1 and 1.2 both specify and what Python asdf does.
-
-Covered by `scalar::tests::yaml_infinity_spellings_diverge_between_schemas`.
-
 ## Scalar resolution: integers before booleans
 
 libasdf tries integer parsing *before* boolean parsing, and its boolean parser
@@ -55,6 +39,23 @@ Equality is judged at the YAML-value level. The binary block layer is exempt:
 block headers, checksums, padding and index offsets are byte-exact by
 specification.
 
+## The compression name field is padded, not over-read
+
+libasdf 0.2.0 replaced the `strncpy` that fills a block header's four-byte
+compression field with a `memcpy` of the full field width, to silence
+`-Wstringop-truncation` (upstream `09c1d52`). The two agree for every name the
+format actually uses -- `zlib` and `bzp2` fill the field, `lz4` is three
+characters plus its terminator -- but `memcpy` reads four bytes from the
+source whatever its length, so a shorter name reads past the end of the
+caller's string.
+
+`BlockHeader::set_compression` zero-fills the field and copies only the name,
+which produces byte-identical headers for every real name without reading
+memory it was not given. Byte parity is what matters in the block layer, and
+it holds.
+
+Covered by `block::header::tests::compression_names_pad_and_trim`.
+
 ## Block checksums on compressed blocks
 
 **The specification** means the block's MD5 to cover the used data as stored,
@@ -89,16 +90,18 @@ never reaches the workaround, so the too-broad version test costs nothing.
 Measured by `differential::python_written_checksums_verify`, which reports
 which form the installed Python asdf actually used rather than assuming.
 
-## Five extra exported symbols: `asdf_shim_*`
+## Six extra exported symbols: `asdf_shim_*`
 
-Two parts of the C ABI cannot be written in stable Rust -- the three variadic
-entry points and `asdf_ndarray_read_float16_at`, whose `_Float16` return uses
-a different register class from `uint16_t`. They live in `shim.c`, which calls
-back into Rust through five helpers: `asdf_shim_error_set`,
-`asdf_shim_error_format`, `asdf_shim_error_set_system`, `asdf_shim_log_message`
-and `asdf_shim_ndarray_read_float16_bits_at`.
+Three parts of the C ABI cannot be written in stable Rust -- the three variadic
+entry points, `asdf_ndarray_read_float16_at`, whose `_Float16` return uses a
+different register class from `uint16_t`, and the pre-`main` constructor, which
+has no stable Rust equivalent. They live in `shim.c`, which calls back into
+Rust through six helpers: `asdf_shim_error_set`, `asdf_shim_error_format`,
+`asdf_shim_error_set_system`, `asdf_shim_log_message`,
+`asdf_shim_ndarray_read_float16_bits_at` and
+`asdf_shim_register_core_extensions`.
 
-Upstream declares no such symbols, so the shared library exports five names
+Upstream declares no such symbols, so the shared library exports six names
 upstream's does not. The version script cannot hide them: GNU ld resolves a
 symbol matching wildcards in both `global` and `local` in favour of the global
 one, and they have to match `asdf_*` to satisfy the symbol-leakage test that

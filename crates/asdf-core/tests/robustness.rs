@@ -10,6 +10,24 @@
 //! These are deterministic mutation tests rather than a fuzzer, so they run
 //! in CI on every change. A real `cargo-fuzz` target belongs alongside them,
 //! seeded from the same corpus.
+//!
+//! # Not panicking is not the whole job
+//!
+//! A panic unwinds and the C boundary catches it. An *abort* does not, and
+//! nothing can catch it: a failed allocation and an overflowed stack both
+//! take the caller's process down with them, panic guard or no. Several of
+//! the cases below are here because they abort rather than panic, and the
+//! only reason they went unnoticed is that `exercise` used to stop at the
+//! block layer -- it never asked for an array's elements, and never rendered
+//! a tree. Anything a caller can reach belongs in it.
+//!
+//! # Run this in release too
+//!
+//! A debug build catches an arithmetic overflow with a panic, which this
+//! suite treats as a failure and reports precisely. A release build wraps
+//! silently, and the wrapped value is what walks past a size check into an
+//! allocation. Both builds are therefore worth running; they fail in
+//! different places.
 
 use std::path::PathBuf;
 
@@ -65,6 +83,66 @@ fn exercise(bytes: &[u8]) {
     let _ = reader.tree();
     let _ = reader.tree_inlined();
     let _ = reader.has_python_checksum_bug();
+
+    // Rendering the tree, which follows aliases and so can be made to
+    // recurse for ever or to expand exponentially.
+    let _ = asdf_core::info::render(&reader, asdf_core::info::InfoOptions::default());
+
+    // And the array path, which is where a shape out of the tree turns into
+    // an allocation. Everything above stops at the block's bytes.
+    let Ok(Some(doc)) = reader.tree() else { return };
+    exercise_arrays(&reader, &doc);
+}
+
+/// Decode every `core/ndarray` the tree declares, by every route a caller has.
+fn exercise_arrays(reader: &Reader, doc: &asdf_core::yaml::Document) {
+    use asdf_core::core::elements::{decode_all, decode_inline};
+    use asdf_core::core::ndarray::{Ndarray, Source};
+
+    let Some(root) = doc.root() else { return };
+    let mut stack = vec![root];
+    let mut seen = 0usize;
+
+    while let Some(id) = stack.pop() {
+        // A tree may alias back on itself; a bounded walk is enough here.
+        seen += 1;
+        if seen > 10_000 {
+            return;
+        }
+
+        if let Ok(nd) = Ndarray::parse(doc, id) {
+            let block_bytes = match nd.source {
+                Source::Block(index) => reader.block_data(index).ok().map(|d| d.len() as u64),
+                _ => None,
+            };
+
+            if let Ok(shape) = nd.resolved_shape(block_bytes) {
+                let _ = nd.len(block_bytes);
+                let _ = nd.nbytes(block_bytes);
+                match nd.source {
+                    Source::Block(index) => {
+                        if let Ok(data) = reader.block_data(index) {
+                            let _ = decode_all(&nd, &shape, &data);
+                        }
+                    }
+                    Source::Inline(_) => {
+                        let _ = decode_inline(doc, &nd, &shape);
+                    }
+                    Source::External(_) | Source::LastBlock => {}
+                }
+            }
+        }
+
+        match &doc.node(doc.resolve(id)).data {
+            asdf_core::yaml::NodeData::Mapping { entries, .. } => {
+                stack.extend(entries.iter().map(|e| e.value));
+            }
+            asdf_core::yaml::NodeData::Sequence { items, .. } => {
+                stack.extend(items.iter().copied())
+            }
+            _ => {}
+        }
+    }
 }
 
 #[test]
@@ -295,4 +373,159 @@ fn absurd_declared_sizes_do_not_allocate() {
         reader.block_data(0).is_err(),
         "a block claiming to inflate to u64::MAX must be refused"
     );
+}
+
+/// The four inputs that used to take the process down.
+///
+/// Each of these is an *abort*, not a panic: a failed allocation or an
+/// overflowed stack. No `catch_unwind` anywhere -- including the one every
+/// `libasdf-rs` entry point wraps itself in -- can turn one back into an
+/// error return, so there is nothing to catch and the C caller's process
+/// simply dies. They are pinned here as assertions about the refusal rather
+/// than as "does not panic", because before the fix they did not panic
+/// either.
+mod aborts {
+    use asdf_core::Reader;
+    use asdf_core::core::elements::decode_all;
+    use asdf_core::core::ndarray::Ndarray;
+
+    const HEADER: &[u8] =
+        b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n\
+          --- !core/asdf-1.1.0\n";
+
+    fn file_with(tree: &str, block: &[u8], compression: &[u8], data_size: u64) -> Vec<u8> {
+        let mut f = HEADER.to_vec();
+        f.extend_from_slice(tree.as_bytes());
+        f.extend_from_slice(b"...\n");
+        let mut header = [0u8; 48];
+        header[4..4 + compression.len()].copy_from_slice(compression);
+        header[8..16].copy_from_slice(&(block.len() as u64).to_be_bytes());
+        header[16..24].copy_from_slice(&(block.len() as u64).to_be_bytes());
+        header[24..32].copy_from_slice(&data_size.to_be_bytes());
+        f.extend_from_slice(b"\xd3BLK\x00\x30");
+        f.extend_from_slice(&header);
+        f.extend_from_slice(block);
+        f
+    }
+
+    /// A shape the block cannot hold must be refused before it is allocated.
+    ///
+    /// `[100000000, 100000000]` is 10^16 elements. Decoded, each is an
+    /// `Element` several times wider than the stored value, so reserving for
+    /// them asks for hundreds of petabytes -- from a file of 225 bytes.
+    #[test]
+    fn an_impossible_shape_is_refused_before_it_is_allocated() {
+        let tree = "arr: !core/ndarray-1.1.0\n  source: 0\n  datatype: float64\n  \
+                    byteorder: little\n  shape: [100000000, 100000000]\n";
+        let bytes = file_with(tree, &[0u8; 8], b"", 8);
+        assert!(bytes.len() < 400, "the whole attack is {} bytes", bytes.len());
+
+        let reader = Reader::from_bytes(bytes).expect("the layout is well formed");
+        let doc = reader.tree().unwrap().unwrap();
+        let node = doc.mapping_get(doc.root().unwrap(), "arr").unwrap();
+        let nd = Ndarray::parse(&doc, node).unwrap();
+        let shape = nd.resolved_shape(Some(8)).unwrap();
+        let data = reader.block_data(0).unwrap();
+
+        let err = decode_all(&nd, &shape, &data).expect_err("must refuse");
+        assert!(
+            format!("{err}").contains("block holds"),
+            "the refusal should name the mismatch, got: {err}"
+        );
+    }
+
+    /// A shape whose product wraps must not come back as a small count.
+    ///
+    /// `(1 << 63) + 1` elements of two bytes is exactly 2 bytes once the
+    /// multiplication wraps -- so a size check done in the same arithmetic
+    /// passes, and whatever is sized from it is far too small.
+    #[test]
+    fn a_shape_whose_product_wraps_is_refused() {
+        let nelems: u64 = (1 << 63) + 1;
+        let tree = format!(
+            "arr: !core/ndarray-1.1.0\n  source: 0\n  datatype: int16\n  \
+             byteorder: little\n  shape: [{nelems}, 2]\n"
+        );
+        let reader =
+            Reader::from_bytes(file_with(&tree, &[0u8; 64], b"", 64)).expect("well formed");
+        let doc = reader.tree().unwrap().unwrap();
+        let node = doc.mapping_get(doc.root().unwrap(), "arr").unwrap();
+        let nd = Ndarray::parse(&doc, node).unwrap();
+
+        // The count itself must not wrap...
+        assert!(nd.len(Some(64)).is_err(), "a wrapping element count must be an error");
+
+        // ...and neither must the decode that would be sized from it.
+        let shape = nd.resolved_shape(Some(64)).unwrap();
+        let data = reader.block_data(0).unwrap();
+        assert!(decode_all(&nd, &shape, &data).is_err(), "must refuse");
+    }
+
+    /// A stream that inflates past what its header declares must be refused.
+    ///
+    /// The ratio guard bounds the *declared* size against the compressed
+    /// length, which a bomb evades simply by understating it: declare eight
+    /// bytes and let the codec produce as many as it likes.
+    #[test]
+    fn a_compressed_block_may_not_inflate_past_its_declared_size() {
+        let raw = vec![0u8; 8 << 20];
+        let comp = asdf_core::compression::Compression::Zlib.compress(&raw).unwrap();
+        assert!(comp.len() < 16 << 10, "8 MiB of zeros should compress small");
+
+        let tree = "x: 1\n";
+        let reader = Reader::from_bytes(file_with(tree, &comp, b"zlib", 8)).expect("well formed");
+
+        let err = reader.block_data(0).expect_err("must refuse");
+        assert!(
+            format!("{err}").contains("declares"),
+            "the refusal should name the declared size, got: {err}"
+        );
+
+        // The honest version of the same block still reads.
+        let ok = Reader::from_bytes(file_with(tree, &comp, b"zlib", raw.len() as u64)).unwrap();
+        assert_eq!(ok.block_data(0).unwrap().len(), raw.len());
+    }
+
+    /// An alias pointing at its own ancestor must not be followed for ever.
+    #[test]
+    fn a_self_referential_alias_does_not_recurse_for_ever() {
+        let mut f = HEADER.to_vec();
+        f.extend_from_slice(b"a: &a\n  b: *a\n...\n");
+        assert!(f.len() < 128, "the whole attack is {} bytes", f.len());
+
+        let reader = Reader::from_bytes(f).expect("well formed");
+        let rendered = asdf_core::info::render(&reader, asdf_core::info::InfoOptions::default())
+            .expect("rendering a cyclic tree should succeed, not recurse");
+        assert!(rendered.contains("(...)"), "the cycle should be marked, not followed");
+    }
+
+    /// Nested aliases must not expand without bound.
+    ///
+    /// Ten levels of ten-way nesting is 10^10 nodes from a few hundred
+    /// bytes. Expanding aliases is what `asdf info` is for, so the answer is
+    /// a budget rather than a refusal.
+    #[test]
+    fn nested_aliases_render_within_a_budget() {
+        let mut tree = String::from("a: &a [x,x,x,x,x,x,x,x,x,x]\n");
+        let mut prev = 'a';
+        for name in "bcdefghij".chars() {
+            tree.push_str(&format!("{name}: &{name} ["));
+            tree.push_str(&vec![format!("*{prev}"); 10].join(","));
+            tree.push_str("]\n");
+            prev = name;
+        }
+        let mut f = HEADER.to_vec();
+        f.extend_from_slice(tree.as_bytes());
+        f.extend_from_slice(b"...\n");
+        assert!(f.len() < 600, "the whole attack is {} bytes", f.len());
+
+        let reader = Reader::from_bytes(f).expect("well formed");
+        let rendered = asdf_core::info::render(&reader, asdf_core::info::InfoOptions::default())
+            .expect("rendering should complete");
+        assert!(
+            rendered.len() < 128 << 20,
+            "rendering ran past its budget at {} bytes",
+            rendered.len()
+        );
+    }
 }

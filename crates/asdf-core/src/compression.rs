@@ -106,18 +106,46 @@ fn check_expected_size(compressed_len: usize, expected: usize) -> Result<()> {
     Ok(())
 }
 
+/// Decompress into a buffer no larger than the block says it needs.
+///
+/// [`check_expected_size`] bounds what the header *claims*, which is the
+/// wrong quantity on its own: nothing there bounds what the codec actually
+/// produces, so understating `data_size` walks straight past the ratio check
+/// and `read_to_end` then expands the stream until memory runs out. A block
+/// header that lies downward is as much a lie as one that lies upward.
+///
+/// The destination is therefore capped at `expected` and the stream is read
+/// one byte further, so a stream with more in it than the block accounts for
+/// is an error rather than an allocation. This is the shape upstream libasdf
+/// uses -- it sizes the destination from `data_size` and fills it -- and it
+/// makes the declared size load-bearing in both directions.
+fn read_bounded(mut reader: impl std::io::Read, expected: usize, what: &str) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    let mut out = Vec::new();
+    // One byte past the limit distinguishes "exactly full" from "there was
+    // more", which `take` alone cannot.
+    let read = (&mut reader)
+        .take(expected as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| err!(CompressionFailed, "{what} decompression failed: {e}"))?;
+
+    if read > expected {
+        return Err(err!(
+            CompressionFailed,
+            "{what} stream expands past the {expected} bytes the block header declares"
+        ));
+    }
+    Ok(out)
+}
+
 mod zlib {
     use super::*;
 
     #[cfg(feature = "zlib")]
     pub fn decompress(data: &[u8], expected: usize) -> Result<Vec<u8>> {
-        use std::io::Read;
         check_expected_size(data.len(), expected)?;
-        let mut out = Vec::with_capacity(expected);
-        flate2::read::ZlibDecoder::new(data)
-            .read_to_end(&mut out)
-            .map_err(|e| err!(CompressionFailed, "zlib decompression failed: {e}"))?;
-        Ok(out)
+        read_bounded(flate2::read::ZlibDecoder::new(data), expected, "zlib")
     }
 
     #[cfg(feature = "zlib")]
@@ -145,13 +173,8 @@ mod bzp2 {
 
     #[cfg(feature = "bzp2")]
     pub fn decompress(data: &[u8], expected: usize) -> Result<Vec<u8>> {
-        use std::io::Read;
         check_expected_size(data.len(), expected)?;
-        let mut out = Vec::with_capacity(expected);
-        bzip2::read::BzDecoder::new(data)
-            .read_to_end(&mut out)
-            .map_err(|e| err!(CompressionFailed, "bzip2 decompression failed: {e}"))?;
-        Ok(out)
+        read_bounded(bzip2::read::BzDecoder::new(data), expected, "bzip2")
     }
 
     #[cfg(feature = "bzp2")]
@@ -203,7 +226,7 @@ pub mod lz4 {
     #[cfg(feature = "lz4")]
     pub fn decompress(data: &[u8], expected: usize) -> Result<Vec<u8>> {
         check_expected_size(data.len(), expected)?;
-        let mut out = Vec::with_capacity(expected);
+        let mut out = Vec::new();
         let mut pos = 0usize;
 
         while pos < data.len() {
@@ -233,6 +256,14 @@ pub mod lz4 {
             let chunk = &data[pos..pos + framed_len];
             let decoded = lz4_flex::block::decompress_size_prepended(chunk)
                 .map_err(|e| err!(CompressionFailed, "lz4 decompression failed: {e}"))?;
+            // Each chunk carries its own decompressed size, so the total is
+            // checked as it accumulates rather than trusted at the end.
+            if out.len() + decoded.len() > expected {
+                return Err(err!(
+                    CompressionFailed,
+                    "lz4 stream expands past the {expected} bytes the block header declares"
+                ));
+            }
             out.extend_from_slice(&decoded);
             pos += framed_len;
         }

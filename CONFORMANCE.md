@@ -2,30 +2,35 @@
 
 `libasdf-rs` is a drop-in replacement for a *specific* upstream libasdf. That
 target is pinned here so the ABI has a fixed definition rather than a moving
-one, since upstream is at `0.1.0rc2` and still changing.
+one, since upstream is at `0.2.0` and still changing.
 
 | | |
 |---|---|
 | Upstream repository | https://github.com/asdf-format/libasdf |
-| Pinned commit | `56d24aa11b3013c362a485b25c2f51db35622d0e` |
-| Describe | `0.1.0rc2-3-g56d24aa` |
-| Package version | `0.1.0rc2` |
-| Shared library `SOVERSION` | `0.0.0` |
+| Pinned commit | `4be9e73` |
+| Describe | `0.2.0` |
+| Package version | `0.2.0` |
+| Library interface version | `1:0:1` -- `SONAME` `libasdf.so.0` |
 | ASDF Standard | 1.6.0 (reading 1.0.0 through 1.6.0) |
 | ASDF file format | 1.0.0 |
 
+Upstream's `SONAME` stayed at `libasdf.so.0` across 0.1.0 -> 0.2.0: three
+interfaces were added and none removed, so `current` and `age` rose together
+and `current - age` did not move. A caller built against 0.1.0 keeps working.
+
 Re-basing onto a newer upstream is deliberate work, not a routine update: it
-can change the ABI. The procedure is to re-vendor the headers (see
-`crates/libasdf-rs/include/PROVENANCE.md`), update the table above, and then
-review the diff reported by the ABI gates below.
+can change the ABI, and most of what it changes is not in the ABI at all. The
+procedure is [`docs/UPSTREAM-SYNC.md`](docs/UPSTREAM-SYNC.md).
 
 ## The exported surface
 
-**376 distinct symbols**, every one of them declared `ASDF_EXPORT` in the
+**379 distinct symbols**, every one of them declared `ASDF_EXPORT` in the
 vendored headers. That figure is not maintained by hand: the
-`every_declared_export_is_defined` gate preprocesses `asdf.h`, reads the
-declarations out of the result, and fails if the shared library is missing any
-of them. Re-vendoring upstream's headers therefore moves the target by itself.
+`every_declared_export_is_defined` gate preprocesses each vendored header,
+reads the declarations out of the result, and fails if the shared library is
+missing any of them. Re-vendoring upstream's headers therefore moves the target
+by itself -- 0.2.0 raised it from 376 by adding `asdf_free`, `asdf_file_find`
+and `asdf_file_find_ex`.
 
 Of those, **77** come from `ASDF_DECLARE_EXTENSION`: eleven functions for each
 of the seven core extensions (`meta`, `datatype`, `ndarray`, `software`,
@@ -36,14 +41,16 @@ The count assumes `ASDF_HAVE_FLOAT16`. Where the target's C compiler lacks
 `_Float16`, upstream's headers leave `asdf_ndarray_read_float16_at`
 undeclared and the surface is 375.
 
-The library additionally exports the five `asdf_shim_*` helpers that `shim.c`
-calls back into; see KNOWN-DIVERGENCES.md for why they cannot be hidden.
+The library additionally exports the six `asdf_shim_*` helpers that `shim.c`
+calls back into, for **387 exported symbols in total**; see
+KNOWN-DIVERGENCES.md for why they cannot be hidden.
 
 Several API entry points are **not** symbols and exist only in the headers,
 which is why the headers are vendored rather than generated:
 
-- `asdf_open`, `asdf_open_ex`, `asdf_write_to`, and the `ASDF_ERROR_COMMON` /
-  `ASDF_ERROR_OOM` / `ASDF_ERROR_SYSTEM` family are `_Generic` macros.
+- `asdf_open`, `asdf_open_ex`, `asdf_write_to`, `asdf_find`, `asdf_find_ex`,
+  and the `ASDF_ERROR_COMMON` / `ASDF_ERROR_OOM` / `ASDF_ERROR_SYSTEM` family
+  are `_Generic` macros.
 - `asdf_open_file`, `asdf_open_fp`, `asdf_open_mem` and
   `asdf_scalar_datatype_size` are `static inline`.
 - `ASDF_REGISTER_EXTENSION` and `ASDF_DECLARE_EXTENSION` generate code in the
@@ -64,6 +71,7 @@ skip with a note when one is absent.
 | `shim_entry_points_are_exported` | The `shim.c` entry points survive linking. Nothing in Rust references them, so without `+whole-archive` and our own version script the linker drops them silently. |
 | `every_declared_export_is_defined` | Every `ASDF_EXPORT` declaration in the preprocessed headers resolves to a defined symbol. The complement of the leakage gate: that one catches what we export and should not, this one catches what upstream promises and we do not provide. A miss is a link error in a consumer, invisible to the Rust build. |
 | `c_caller_can_walk_the_event_stream` | The low-level event API, walked from C over `basic.asdf`: the event sequence, the YAML sub-events and their expanded tags, and the tree and block accessors. Ported from upstream's `tests/test-event.c`, reduced to what the public headers expose. |
+| `a_c_caller_can_use_the_0_2_0_additions` | `asdf_find` / `asdf_find_ex` on both arms of their `_Generic` dispatch, traversal order and depth limit, and `asdf_free` on a buffer `asdf_write_to_mem` allocated. Upstream covers these in `tests/test-file.c`, which the upstream-suite gate cannot compile. |
 
 A second family of gates lives in `asdf-core`'s test suite and compares
 rendered output against upstream's committed fixtures byte for byte:
@@ -81,11 +89,15 @@ The strongest conformance evidence the project can produce: the tests
 headers and linked against our shared library.
 
 Run with `cargo test -p libasdf-rs --test upstream_suite`. It needs a libasdf
-checkout with its munit submodule initialised:
+checkout at the pinned commit with its submodules initialised:
 
 ```console
-$ cd ~/code/libasdf && git submodule update --init tests/munit
+$ cd ~/code/libasdf && git submodule update --init tests/munit third_party/STC
 ```
+
+Without them the gate **skips**, which looks exactly like passing. Point it
+elsewhere with `LIBASDF_DIR`; when syncing, point it at a detached worktree of
+the new commit rather than at a checkout carrying local work.
 
 Eleven of upstream's twenty-one suites build against the public ABI. The
 other ten include libasdf's private headers -- `event.h`, `parser.h`,
@@ -134,12 +146,12 @@ and there they are exact.
 
 ## Undefined behaviour
 
-`cargo +nightly miri test -p libasdf-rs --lib` runs the FFI layer's 189 unit
+`cargo +nightly miri test -p libasdf-rs --lib` runs the FFI layer's 202 unit
 tests under Miri. That crate holds every unsafe block in the workspace bar one
 (`asdf-core`'s memory map, which Miri cannot execute and which `Reader::open`
 sidesteps under `cfg(miri)`).
 
-Miri found two defects that the 189 unit tests, the 501-case C suite, the ABI
+Miri found two defects that the unit tests, the 501-case C suite, the ABI
 layout assertions and the reference corpus all passed:
 
 - `asdf_ndarray_data` handed C a buffer aligned to 1, held in a `Vec<u8>`.
@@ -157,24 +169,45 @@ than a test. Run with `-Zmiri-ignore-leaks`: the extension registry is
 populated before `main` and never torn down, matching upstream's
 constructor-built one.
 
+### Panics are caught. Aborts are not.
+
+Every entry point wraps its body in `panic::guard`, so an unwind never reaches
+a C caller. That is the guarantee, and it holds.
+
+It is worth being precise about what it does *not* cover, because the
+[security review](docs/SECURITY-REVIEW.md) found three ways to take a caller's
+process down straight through it. A failed allocation calls
+`handle_alloc_error` and an overflowed stack calls the runtime's handler;
+neither unwinds, so there is nothing for `catch_unwind` to catch. A shape that
+asks for more memory than exists, or a YAML alias pointing at its own
+ancestor, aborts -- guard or no guard.
+
+The defence is therefore not the guard but refusing the input before it gets
+that far, which is where those fixes live. `asdf-core`'s `robustness` suite
+pins them, and asserts what is refused rather than only that nothing panicked
+-- an abort passes a "did not panic" test perfectly well.
+
 ## Platforms
 
 Linux and macOS, on x86-64 and aarch64, build and test everything.
 
-**Windows builds the four pure-Rust crates only.** The C ABI crate cannot be
-built there, and the obstacle is upstream's public headers rather than
-anything here:
+**Windows builds and tests all five crates**, x64 and arm64, since the fixes
+for [libasdf#251] landed upstream: `asdf/value.h` no longer takes a POSIX
+`ssize_t`, and the option-flag enums shift `1ULL` rather than a `1UL` that is
+32 bits wide on LLP64. 0.2.0 removed the last MSVC workaround on this side too
+-- `asdf/core/time.h` no longer includes `<sys/time.h>`, which MSVC does not
+ship, so `build.rs` no longer generates a stand-in for it ([libasdf#261]).
 
-- `asdf/value.h` takes an `ssize_t` in two prototypes. That is a POSIX type,
-  not a C one, and the MSVC CRT does not define it.
-- `asdf/emitter.h` and `asdf/parser.h` assert `X < (1UL << 63)`. `unsigned
-  long` is 32 bits on Windows, so the shift is undefined and the assertion
-  fails.
+**The ABI conformance harness stays Unix-only.** Not the library: the harness.
+It drives `cc` with `-std=c11 -I -L -lasdf -Wl,-rpath` and reads symbols with
+`nm -D`, none of which MSVC provides -- it wants `cl` flag syntax, an import
+`.lib` beside the DLL, and `dumpbin /exports`. The CI step is gated on
+`matrix.unix` so the gate is *absent* on Windows rather than quietly reporting
+zero tests. Porting it is worth doing, since Windows is where struct layouts
+differ, and it is not done.
 
-Both are one-line fixes, neither changes the ABI, and both are reported as
-[libasdf#251](https://github.com/asdf-format/libasdf/issues/251). The vendored
-headers are copied verbatim and are not ours to patch, so until that lands a
-Windows consumer gets the Rust API and not the C one.
+[libasdf#251]: https://github.com/asdf-format/libasdf/issues/251
+[libasdf#261]: https://github.com/asdf-format/libasdf/issues/261
 
 ## Not yet wired up
 - **Differential testing against the real libasdf.** Blocked on building the C

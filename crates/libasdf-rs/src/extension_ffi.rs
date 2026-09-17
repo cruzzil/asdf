@@ -482,9 +482,9 @@ unsafe impl<T> Sync for Identity<T> {}
 /// faults rather than silently corrupting the value every later reader sees.
 #[unsafe(no_mangle)]
 pub static libasdf_version: Identity<asdf_version_t> = Identity(asdf_version_t {
-    version: c"0.1.0".as_ptr(),
+    version: c"0.2.0".as_ptr(),
     major: 0,
-    minor: 1,
+    minor: 2,
     patch: 0,
     extra: core::ptr::null(),
 });
@@ -911,7 +911,7 @@ mod tests {
 
     #[test]
     fn the_library_reports_its_own_version() {
-        assert_eq!(unsafe { CStr::from_ptr(libasdf_version.0.version) }.to_str().unwrap(), "0.1.0");
+        assert_eq!(unsafe { CStr::from_ptr(libasdf_version.0.version) }.to_str().unwrap(), "0.2.0");
         assert_eq!(
             unsafe { CStr::from_ptr(libasdf_software.0.name) }.to_str().unwrap(),
             "libasdf-rs"

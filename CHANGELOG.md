@@ -14,6 +14,113 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-17
+
+**All five crates.** Two things happened at once: the sync to upstream libasdf
+0.2.0, and a security review of how untrusted files are handled that found
+five reproducible ways to abort the process.
+
+This is a **minor bump, not a patch**, because `Ndarray::c_strides` now returns
+`Option<Vec<i64>>` where it returned `Vec<i64>` -- it refuses a shape too large
+to stride rather than handing back a wrapped stride that silently addresses the
+wrong element. That is the only source-breaking change. Note what it means for
+the fixes below: `0.1.x` is not semver-compatible with `0.2.0`, so `cargo
+update` alone will not pick them up.
+
+### Changed
+
+- **Synced to libasdf `4be9e73` (0.2.0)**, up from `cff7ab0` (0.1.0). Three
+  new exported symbols and two new `_Generic` macros; no struct layout, enum
+  discriminant or existing signature moved, so this is additive and upstream's
+  own `SONAME` stays `libasdf.so.0`. The surface is now **379 declared
+  exports**, up from 376, and upstream's C suite still passes **498 of 501**
+  -- against its *new* suite, which gained the tests below.
+- **`.inf` and `.nan` now resolve as floats, and bare `inf` / `nan` no longer
+  do.** This was a documented divergence: libasdf *emitted* `.inf` and `.nan`
+  but its `strtod`-based reader read them back as strings, while accepting the
+  bare `inf`, `nan` and `infinity` that `strtod` takes and YAML does not.
+  Upstream closed the round trip in 0.2.0 and we follow, under both schemas --
+  `Schema::Yaml11` also stops accepting a signed `-.nan`, which PyYAML rejects.
+  Verified spelling by spelling against PyYAML itself. The entry in
+  `KNOWN-DIVERGENCES.md` is gone, because the divergence is.
+- **`libasdf_version` reports `0.2.0`.** That static is the upstream ABI
+  version implemented, not this crate's own version, which has not moved.
+
+### Security
+
+A review of how untrusted files are handled found **five reproducible ways to
+abort the process**, four of them from files under 500 bytes. All are fixed,
+each with a regression test; [`docs/SECURITY-REVIEW.md`](docs/SECURITY-REVIEW.md)
+has the detail.
+
+The common thread is worth stating plainly: this crate's safety property is
+that *panics* never cross the C boundary, and that held throughout. But an
+abort is not a panic -- a failed allocation and an overflowed stack do not
+unwind, so `panic::guard` cannot catch either, and three of these took the
+caller's process down straight through it. `CONFORMANCE.md` and
+`docs/DEVELOPING.md` now say so.
+
+- **An ndarray's element count was allocated before it was validated.** A
+  225-byte file with `shape: [100000000, 100000000]` asked for 320 petabytes,
+  through the C ABI, and aborted. The shape's product was also unchecked, so a
+  crafted shape could wrap to a small count. `decode_all` now checks the count
+  against the block's real length *before* reserving, `element_count` refuses
+  a product that does not fit, and `c_strides` returns `None` rather than a
+  wrapped stride that would silently address the wrong element.
+- **A decompression bomb evaded the ratio guard by understating `data_size`.**
+  The guard bounded the *declared* size; nothing bounded what the codec
+  produced. 40 KiB of zlib expanded to 40 MiB with `data_size: 8`.
+  Decompression is now bounded by the declared size in both directions, which
+  is the model upstream libasdf already used.
+- **`asdf info` expanded YAML aliases without bound.** 444 bytes of nested
+  aliases drove a 6.4 GB string. Rendering now has a 64 MiB budget; real trees
+  render in kilobytes and the 17 golden captures are unchanged.
+- **A self-referential alias recursed until the stack overflowed.** `a: &a\n
+  b: *a`, 96 bytes. The tree walker now carries its ancestor path and renders
+  a repeat as `(...)`.
+- **An external `source` could leave its directory through a symlink.** The
+  lexical check caught `..` and absolute paths but not a symlink, which is
+  neither. Both ends are now canonicalised and compared.
+
+`asdf-core`'s `robustness` suite is why these went unnoticed: it stopped at
+the block layer, so it never decoded an array or rendered a tree, and it only
+ran in debug, where an arithmetic overflow panics instead of wrapping. It now
+does both, and asserts what is *refused* rather than only that nothing
+panicked -- an abort passes a "did not panic" test perfectly well.
+
+### Added
+
+- **`asdf_free`**, for the four entry points that hand back a buffer the
+  library allocated (`asdf_write_to_mem`, `asdf_ndarray_read_all`,
+  `asdf_ndarray_read_tile_ndim`, `asdf_ndarray_read_tile_2d`). Upstream's
+  headers used to tell the caller to use `free()`, which made the C runtime's
+  allocator part of the interface -- raised as [libasdf#250] and now answered.
+  What this crate allocates with is unchanged: callers written against the
+  older headers are still calling `free()` on these buffers and still work.
+- **`asdf_file_find` and `asdf_file_find_ex`**, and the `asdf_find` /
+  `asdf_find_ex` `_Generic` macros that dispatch on `asdf_file_t *` or
+  `asdf_value_t *`. Searching from a file's root no longer needs the caller to
+  fetch and destroy a root handle.
+- A C gate for both of the above, in `tests/abi.rs`. Upstream covers them in
+  `tests/test-file.c`, which includes libasdf's private `file.h` and so cannot
+  run in the upstream-suite gate; and the `asdf_file_t *` arm of a `_Generic`
+  macro exists only in the header, where no Rust test can reach it.
+- [`docs/UPSTREAM-SYNC.md`](docs/UPSTREAM-SYNC.md) -- what a sync to a new
+  upstream libasdf actually involves. The half the ABI gates check is the easy
+  half; the half that bites is that upstream's C suite only covers upstream's
+  C ABI, so a change to scalar resolution or the block layer reaches our gates
+  only by luck. The commit log has to be read, not only run.
+
+### Removed
+
+- The generated MSVC `sys/time.h` stand-in. `asdf/core/time.h` included
+  `<sys/time.h>` for a `struct timespec` that `<time.h>` already provides, and
+  MSVC ships no `sys/` directory; upstream dropped the include in 0.2.0
+  ([libasdf#261]), so `build.rs` no longer has to supply one.
+
+[libasdf#250]: https://github.com/asdf-format/libasdf/issues/250
+[libasdf#261]: https://github.com/asdf-format/libasdf/issues/261
+
 ## [0.1.4] - 2026-09-09
 
 `libasdf-rs` only. The four other crates are unchanged.
@@ -197,7 +304,8 @@ is listed here so the first release notes are not written from scratch.
 - `asdf-core` reads a file whole rather than mapping it under `cfg(miri)`, so
   dependants can run Miri.
 
-[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/cruzzil/asdf/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/cruzzil/asdf/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/cruzzil/asdf/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/cruzzil/asdf/compare/v0.1.1...v0.1.2

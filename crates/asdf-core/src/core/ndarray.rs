@@ -274,8 +274,13 @@ impl Ndarray {
     }
 
     /// The number of elements, for a fully-known shape.
+    ///
+    /// The shape comes from the tree, so the product is checked: a crafted
+    /// shape can otherwise wrap to a small number and make a later read
+    /// address the wrong bytes, or wrap past a size check into an
+    /// allocation nothing justifies.
     pub fn len(&self, block_bytes: Option<u64>) -> Result<u64> {
-        Ok(self.resolved_shape(block_bytes)?.iter().product())
+        element_count(&self.resolved_shape(block_bytes)?)
     }
 
     /// Whether the array has no elements.
@@ -285,18 +290,24 @@ impl Ndarray {
 
     /// The number of bytes the elements occupy.
     pub fn nbytes(&self, block_bytes: Option<u64>) -> Result<u64> {
-        Ok(self.len(block_bytes)? * self.datatype.item_size())
+        self.len(block_bytes)?
+            .checked_mul(self.datatype.item_size())
+            .ok_or_else(|| err!(OverLimit, "array's size in bytes does not fit in 64 bits"))
     }
 
     /// C-contiguous strides for a shape, in bytes.
-    pub fn c_strides(shape: &[u64], item_size: u64) -> Vec<i64> {
+    ///
+    /// `None` when the shape is too large to stride, rather than a wrapped
+    /// value: a wrapped stride silently addresses the wrong element, which
+    /// for a data format is worse than refusing to read.
+    pub fn c_strides(shape: &[u64], item_size: u64) -> Option<Vec<i64>> {
         let mut strides = vec![0i64; shape.len()];
-        let mut acc = item_size as i64;
+        let mut acc = i64::try_from(item_size).ok()?;
         for idx in (0..shape.len()).rev() {
             strides[idx] = acc;
-            acc *= shape[idx] as i64;
+            acc = acc.checked_mul(i64::try_from(shape[idx]).ok()?)?;
         }
-        strides
+        Some(strides)
     }
 }
 
@@ -324,6 +335,23 @@ fn parse_source(doc: &Document, id: NodeId) -> Result<Source> {
         });
     }
     Ok(Source::External(text.to_string()))
+}
+
+/// The number of elements a shape describes, refusing to wrap.
+///
+/// Every dimension is a `uint64` read straight out of the tree, so the
+/// product is attacker-controlled. `[1 << 61, 8]` wraps to zero and
+/// `[(1 << 63) + 1, 2]` wraps to two -- either of which walks straight past
+/// a "does the block hold this much?" check that is done in the same
+/// arithmetic.
+pub fn element_count(shape: &[u64]) -> Result<u64> {
+    let mut count: u64 = 1;
+    for dim in shape {
+        count = count.checked_mul(*dim).ok_or_else(|| {
+            err!(OverLimit, "shape {shape:?} has more elements than 64 bits hold")
+        })?;
+    }
+    Ok(count)
 }
 
 /// Work out the shape of nested inline sequences.
@@ -511,9 +539,12 @@ mod tests {
     #[test]
     fn c_strides_are_row_major() {
         // A 2x3 array of 8-byte elements: rows are 24 bytes, columns 8.
-        assert_eq!(Ndarray::c_strides(&[2, 3], 8), vec![24, 8]);
-        assert_eq!(Ndarray::c_strides(&[4], 4), vec![4]);
-        assert_eq!(Ndarray::c_strides(&[2, 3, 4], 1), vec![12, 4, 1]);
+        assert_eq!(Ndarray::c_strides(&[2, 3], 8), Some(vec![24, 8]));
+        assert_eq!(Ndarray::c_strides(&[4], 4), Some(vec![4]));
+        assert_eq!(Ndarray::c_strides(&[2, 3, 4], 1), Some(vec![12, 4, 1]));
+        // A shape that would wrap gets no strides at all, rather than
+        // strides that silently address the wrong element.
+        assert_eq!(Ndarray::c_strides(&[u64::MAX / 2, 4, 4], 8), None);
     }
 
     #[test]

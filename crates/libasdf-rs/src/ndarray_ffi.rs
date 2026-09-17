@@ -439,7 +439,14 @@ pub(crate) fn ndarray_size(ndarray: *const asdf_ndarray_t) -> u64 {
         return 0;
     }
     let shape = unsafe { core::slice::from_raw_parts(array.shape, array.ndim as usize) };
-    shape.iter().product()
+    // Saturating, not wrapping. The shape can come from a file, and these
+    // two entry points return a bare `uint64_t` with no error channel, so
+    // the only honest answer for a shape that does not fit is the largest
+    // one there is: a caller's `if (nbytes > available)` then rejects it,
+    // where a wrapped small value would sail through. Upstream multiplies
+    // these unchecked and a caller that trusts the result overruns its own
+    // buffer.
+    shape.iter().try_fold(1u64, |acc, dim| acc.checked_mul(*dim)).unwrap_or(u64::MAX)
 }
 
 /// The number of bytes the elements occupy.
@@ -463,7 +470,7 @@ pub(crate) fn ndarray_nbytes(ndarray: *const asdf_ndarray_t) -> u64 {
     let count = ndarray_size(ndarray);
     // Only the field projection needs the unsafe; the size call does not.
     let datatype = unsafe { &raw const (*ndarray).datatype };
-    count * datatype_size(datatype.cast_mut())
+    count.saturating_mul(datatype_size(datatype.cast_mut()))
 }
 
 /// The size of one element of a datatype, computing it when left at zero.
@@ -886,7 +893,9 @@ pub unsafe extern "C" fn asdf_ndarray_read_all(
             return NdarrayErr::Inval;
         };
 
-        let total = elements.len() * width;
+        let Some(total) = elements.len().checked_mul(width) else {
+            return NdarrayErr::Inval;
+        };
         let mut buffer = vec![0u8; total];
         // An overflowing element saturates and the read continues: the
         // caller gets the whole converted array *and* the report that
@@ -1159,7 +1168,7 @@ fn encode_inline(
     }
 
     let elements = asdf_core::core::decode_inline(doc, parsed, shape).ok()?;
-    let mut out = vec![0u8; elements.len() * width];
+    let mut out = vec![0u8; elements.len().checked_mul(width)?];
     for (index, element) in elements.iter().enumerate() {
         let slot = &mut out[index * width..(index + 1) * width];
         if write_converted(element, scalar, slot) != NdarrayErr::Ok {
@@ -1530,9 +1539,17 @@ fn value_of_ndarray_inner(
             return core::ptr::null_mut();
         }
 
-        // The data is whatever the caller allocated or we read.
-        let element_count: u64 = shape.iter().product::<u64>().max(1);
-        let expected = (element_count * item_size) as usize;
+        // The data is whatever the caller allocated or we read. The shape
+        // is the caller's, but a wrapped product would size a buffer the
+        // following copy then overruns, so it is checked like any other.
+        let Ok(element_count) = asdf_core::core::ndarray::element_count(&shape) else {
+            return core::ptr::null_mut();
+        };
+        let Some(expected) =
+            element_count.max(1).checked_mul(item_size).and_then(|n| usize::try_from(n).ok())
+        else {
+            return core::ptr::null_mut();
+        };
         let payload: Vec<u8> = match ensure_state(obj.cast_mut()) {
             Some(state) => state
                 .allocated
@@ -1968,7 +1985,10 @@ pub(crate) fn ndarray_read_tile_ndim(
     // The tile is contiguous along the last axis only, so copy it one
     // run at a time and step the outer indices by hand.
     let run = tile[ndim - 1] as usize;
-    let mut buffer = vec![0u8; count * width];
+    let Some(total) = count.checked_mul(width) else {
+        return NdarrayErr::Inval;
+    };
+    let mut buffer = vec![0u8; total];
     let mut cursor = origin.clone();
     let mut written = 0usize;
     let mut overflowed = false;

@@ -1424,6 +1424,65 @@ pub unsafe extern "C" fn asdf_set_sequence(
     })
 }
 
+/// Find the first value in the file's tree matching `pred`, breadth-first.
+///
+/// Shorthand for starting an [`asdf_value_find`](crate::value_ffi::asdf_value_find)
+/// at the root, and the `asdf_file_t *` arm of the `asdf_find` macro.
+///
+/// # Safety
+/// `file` must be a valid file handle. The result must be released with
+/// [`asdf_value_destroy`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_file_find(
+    file: *mut AsdfFile,
+    pred: crate::value_ffi::AsdfValuePred,
+) -> *mut AsdfValue {
+    guard("asdf_file_find", core::ptr::null_mut(), || file_find_ex(file, pred, false, None, -1))
+}
+
+/// Find from the file's root with control over traversal order and depth.
+///
+/// See [`asdf_value_find_ex`](crate::value_ffi::asdf_value_find_ex) for what
+/// the options mean.
+///
+/// # Safety
+/// See [`asdf_file_find`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_file_find_ex(
+    file: *mut AsdfFile,
+    pred: crate::value_ffi::AsdfValuePred,
+    depth_first: bool,
+    descend_pred: crate::value_ffi::AsdfValuePred,
+    max_depth: i64,
+) -> *mut AsdfValue {
+    guard("asdf_file_find_ex", core::ptr::null_mut(), || {
+        file_find_ex(file, pred, depth_first, descend_pred, max_depth)
+    })
+}
+
+/// Safe internal form of [`asdf_file_find_ex`].
+///
+/// The root handle is built and released here rather than handed out, so a
+/// caller that finds nothing has nothing to destroy -- which is what
+/// `file.h` promises.
+fn file_find_ex(
+    file: *mut AsdfFile,
+    pred: crate::value_ffi::AsdfValuePred,
+    depth_first: bool,
+    descend_pred: crate::value_ffi::AsdfValuePred,
+    max_depth: i64,
+) -> *mut AsdfValue {
+    let Some((_, node)) = lookup(file, core::ptr::null()) else {
+        return core::ptr::null_mut();
+    };
+    let root = Box::into_raw(Box::new(AsdfValue { file, node }));
+    let found = crate::value_ffi::value_find_ex(root, pred, depth_first, descend_pred, max_depth);
+    // SAFETY: `root` was boxed just above and never handed to the caller;
+    // `value_find_ex` returns a handle of its own, never this one.
+    drop(unsafe { Box::from_raw(root) });
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1470,6 +1529,47 @@ mod tests {
         let f = unsafe { asdf_open_mem_ex(buf.as_ptr().cast(), buf.len(), core::ptr::null_mut()) };
         assert!(!f.is_null());
         Handle(f)
+    }
+
+    /// The predicate the find tests search for: the string `hit`.
+    unsafe extern "C" fn is_hit(value: *mut AsdfValue) -> bool {
+        let mut out: *const c_char = core::ptr::null();
+        let err = unsafe { crate::value_ffi::asdf_value_as_string0(value, &mut out) };
+        err == AsdfValueErr::Ok
+            && !out.is_null()
+            && unsafe { CStr::from_ptr(out) }.to_bytes() == b"hit"
+    }
+
+    #[test]
+    fn a_file_find_starts_at_the_root_and_owns_nothing_else() {
+        let h = handle_with("a_nested:\n  deep: hit\nz_top: hit\n");
+
+        // Breadth-first reaches the top-level value first, even though the
+        // nested branch is written above it.
+        let found = unsafe { asdf_file_find(h.0, Some(is_hit)) };
+        assert!(!found.is_null());
+        let path = unsafe { crate::value_ffi::asdf_value_path(found) };
+        assert_eq!(unsafe { CStr::from_ptr(path) }.to_str().unwrap(), "/z_top");
+        unsafe { asdf_value_destroy(found) };
+
+        // Depth-first reverses that.
+        let deep = unsafe { asdf_file_find_ex(h.0, Some(is_hit), true, None, -1) };
+        assert!(!deep.is_null());
+        let path = unsafe { crate::value_ffi::asdf_value_path(deep) };
+        assert_eq!(unsafe { CStr::from_ptr(path) }.to_str().unwrap(), "/a_nested/deep");
+        unsafe { asdf_value_destroy(deep) };
+    }
+
+    #[test]
+    fn a_file_find_that_matches_nothing_returns_null() {
+        let h = handle_with("a: 1\nb: 2\n");
+        assert!(unsafe { asdf_file_find(h.0, Some(is_hit)) }.is_null());
+        // A null file is a question, not a crash.
+        assert!(unsafe { asdf_file_find(core::ptr::null_mut(), Some(is_hit)) }.is_null());
+        assert!(
+            unsafe { asdf_file_find_ex(core::ptr::null_mut(), Some(is_hit), false, None, -1) }
+                .is_null()
+        );
     }
 
     #[test]

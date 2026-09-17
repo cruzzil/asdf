@@ -42,6 +42,7 @@ pub mod parser_ffi;
 pub mod time_ffi;
 pub mod trampoline;
 pub mod types;
+pub mod util_ffi;
 pub mod value_ffi;
 pub mod version_ffi;
 

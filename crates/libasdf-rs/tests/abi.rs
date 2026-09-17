@@ -65,6 +65,13 @@ fn shared_library() -> Option<PathBuf> {
 /// that is no longer there, which is worse than no gate at all, so it is
 /// rebuilt here rather than assumed current. When it is already current this
 /// costs one `cargo` no-op.
+///
+/// The rebuild has to use the *same profile* the test is running under.
+/// It did not, and under `cargo test --release` the gate happily reported on
+/// whatever `target/release/libasdf.so` happened to be lying around -- which
+/// is precisely the staleness this function exists to prevent, just one
+/// directory over. The profile is recovered from where cargo put this test
+/// binary, since there is no environment variable that carries it.
 fn ensure_library_is_current() {
     use std::sync::Once;
 
@@ -72,7 +79,11 @@ fn ensure_library_is_current() {
     ONCE.call_once(|| {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
         // Only the lib target, so this cannot recurse into the tests.
-        let out = Command::new(cargo).args(["build", "-p", "libasdf-rs", "--lib"]).output();
+        let mut args = vec!["build", "-p", "libasdf-rs", "--lib"];
+        if target_dir().file_name().is_some_and(|n| n == "release") {
+            args.push("--release");
+        }
+        let out = Command::new(cargo).args(&args).output();
         match out {
             Ok(out) if out.status.success() => {}
             Ok(out) => eprintln!(
@@ -545,6 +556,132 @@ int main(void) {
 }
 "##;
     let out = compile_and_run("c_macros", src, true).unwrap();
+    assert_eq!(out.trim(), "ok");
+}
+
+/// The entry points libasdf 0.2.0 added, driven from C.
+///
+/// Upstream covers these in `tests/test-file.c`, which includes libasdf's
+/// private `file.h` and so cannot run in the upstream-suite gate. They are
+/// worth the duplication: `asdf_find` and `asdf_find_ex` are `_Generic`
+/// macros, so the `asdf_file_t *` arm exists only in the header and a Rust
+/// test cannot reach it, and `asdf_free` is a promise about the allocator
+/// that only a C caller can actually take us up on.
+#[test]
+fn a_c_caller_can_use_the_0_2_0_additions() {
+    if !have_c_compiler() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    if shared_library().is_none() {
+        eprintln!("skipping: shared library not built");
+        return;
+    }
+
+    let src = r##"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <asdf.h>
+
+/* `a_nested` sorts first, so breadth-first reaches `z_top` first and
+   depth-first reaches `a_nested/deep` first. */
+static const char TREE[] =
+    "#ASDF 1.0.0\n"
+    "#ASDF_STANDARD 1.6.0\n"
+    "%YAML 1.1\n"
+    "%TAG ! tag:stsci.edu:asdf/\n"
+    "--- !core/asdf-1.1.0\n"
+    "a_nested:\n"
+    "  deep: hit\n"
+    "z_top: hit\n"
+    "buried:\n"
+    "  inner:\n"
+    "    x: needle\n"
+    "...\n";
+
+#define CHECK(cond, msg) \
+    do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); return 1; } } while (0)
+
+static bool is_text(asdf_value_t *value, const char *want) {
+    const char *str = NULL;
+    if (asdf_value_as_string0(value, &str) != ASDF_VALUE_OK)
+        return false;
+    return strcmp(str, want) == 0;
+}
+
+static bool is_hit(asdf_value_t *value) { return is_text(value, "hit"); }
+
+/* Three levels down, so it is out of reach of a shallow max_depth. */
+static bool is_needle(asdf_value_t *value) { return is_text(value, "needle"); }
+
+int main(void) {
+    asdf_file_t *file = asdf_open((const void *)TREE, sizeof(TREE) - 1);
+    CHECK(file != NULL, "asdf_open returned NULL");
+
+    /* asdf_find's asdf_file_t * arm: breadth-first from the tree root. */
+    asdf_value_t *found = asdf_find(file, is_hit);
+    CHECK(found != NULL, "asdf_find found nothing");
+    CHECK(strcmp(asdf_value_path(found), "/z_top") == 0, "asdf_find is breadth-first");
+    asdf_value_destroy(found);
+
+    /* The same call spelled out, and the asdf_value_t * arm of the macro,
+       which must dispatch to asdf_value_find and agree. */
+    found = asdf_file_find(file, is_hit);
+    CHECK(found != NULL, "asdf_file_find found nothing");
+    asdf_value_destroy(found);
+
+    asdf_value_t *root = asdf_get_value(file, "");
+    CHECK(root != NULL, "get root");
+    found = asdf_find(root, is_hit);
+    CHECK(found != NULL, "asdf_find on a value found nothing");
+    CHECK(strcmp(asdf_value_path(found), "/z_top") == 0, "value arm disagrees");
+    asdf_value_destroy(found);
+    asdf_value_destroy(root);
+
+    /* Depth-first reverses which of the two is reached first. */
+    found = asdf_find_ex(file, is_hit, ASDF_DEPTH_FIRST, asdf_find_descend_all, -1);
+    CHECK(found != NULL, "depth-first found nothing");
+    CHECK(strcmp(asdf_value_path(found), "/a_nested/deep") == 0, "not depth-first");
+    asdf_value_destroy(found);
+
+    /* max_depth counts the containers entered below the root, so /buried/inner/x
+       needs two of them.  One short of that finds nothing. */
+    found = asdf_find_ex(file, is_needle, ASDF_BREADTH_FIRST, asdf_find_descend_all, 0);
+    CHECK(found == NULL, "max_depth 0 descended anyway");
+    found = asdf_find_ex(file, is_needle, ASDF_BREADTH_FIRST, asdf_find_descend_all, 1);
+    CHECK(found == NULL, "max_depth 1 descended anyway");
+    found = asdf_find_ex(file, is_needle, ASDF_BREADTH_FIRST, asdf_find_descend_all, 2);
+    CHECK(found != NULL, "max_depth 2 did not reach the needle");
+    CHECK(strcmp(asdf_value_path(found), "/buried/inner/x") == 0, "wrong needle");
+    asdf_value_destroy(found);
+
+    /* No match at all is NULL, not a handle to destroy. */
+    found = asdf_file_find(file, asdf_value_is_ndarray);
+    CHECK(found == NULL, "found an ndarray that is not there");
+
+    asdf_close(file);
+
+    /* asdf_free releases a buffer the library allocated, and ignores NULL. */
+    asdf_free(NULL);
+
+    asdf_file_t *out = asdf_open(NULL);
+    CHECK(out != NULL, "open for writing");
+    CHECK(asdf_set_string0(out, "key", "value") == ASDF_VALUE_OK, "set key");
+
+    void *buf = NULL;
+    size_t size = 0;
+    CHECK(asdf_write_to_mem(out, &buf, &size) == 0, "write to mem");
+    CHECK(buf != NULL, "write_to_mem allocated nothing");
+    CHECK(size > 0, "write_to_mem wrote nothing");
+    asdf_close(out);
+    asdf_free(buf);
+
+    printf("ok\n");
+    return 0;
+}
+"##;
+    let out = compile_and_run("c_find_and_free", src, true).unwrap();
     assert_eq!(out.trim(), "ok");
 }
 

@@ -160,7 +160,27 @@ pub fn decode_all(nd: &Ndarray, shape: &[u64], bytes: &[u8]) -> Result<Vec<Eleme
         return Err(err!(InvalidArgument, "cannot decode elements of zero width"));
     }
 
-    let count: u64 = shape.iter().product();
+    let count = crate::core::ndarray::element_count(shape)?;
+
+    // Refuse before allocating, not after. The shape is attacker-controlled
+    // and `count` here is a count of `Element`s, each several times wider
+    // than a stored element, so a shape the block cannot possibly hold turns
+    // straight into an allocation nothing justifies -- and an allocation
+    // that large aborts the process rather than unwinding, which no
+    // `catch_unwind` at the C boundary can intercept. A file that claims
+    // more elements than its own block has bytes for is simply wrong.
+    let needed = count
+        .checked_mul(item)
+        .and_then(|n| n.checked_add(nd.offset))
+        .ok_or_else(|| err!(OverLimit, "array's extent does not fit in 64 bits"))?;
+    if needed > bytes.len() as u64 {
+        return Err(err!(
+            UnexpectedEof,
+            "array of {count} elements needs {needed} bytes but the block holds {}",
+            bytes.len()
+        ));
+    }
+
     let count = usize::try_from(count)
         .map_err(|_| err!(OverLimit, "array has too many elements for this platform"))?;
 
@@ -174,7 +194,8 @@ pub fn decode_all(nd: &Ndarray, shape: &[u64], bytes: &[u8]) -> Result<Vec<Eleme
                 shape.len()
             ));
         }
-        None => Ndarray::c_strides(shape, item),
+        None => Ndarray::c_strides(shape, item)
+            .ok_or_else(|| err!(OverLimit, "shape {shape:?} is too large to stride"))?,
     };
 
     let base = usize::try_from(nd.offset)
@@ -227,8 +248,11 @@ pub fn decode_inline(doc: &Document, array: &Ndarray, shape: &[u64]) -> Result<V
         return Err(err!(InvalidArgument, "this array's data is not inline"));
     };
 
-    let expected: u64 = shape.iter().copied().product();
-    let mut out = Vec::with_capacity(usize::try_from(expected).unwrap_or(0));
+    let expected = crate::core::ndarray::element_count(shape)?;
+    // Inline data is bounded by the tree that carries it, so the shape is
+    // checked against what is actually there rather than trusted to size a
+    // reservation. `collect_inline` grows the vector as it walks.
+    let mut out = Vec::new();
     collect_inline(doc, root, &array.datatype, shape, &mut out)?;
 
     if out.len() as u64 != expected {

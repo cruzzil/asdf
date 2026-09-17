@@ -175,7 +175,35 @@ struct TreeState {
     /// Whether each ancestor level still has siblings to come, deciding
     /// between a continuing `│ ` and a blank `  `.
     active: Vec<bool>,
+    /// The containers currently being rendered, innermost last.
+    ///
+    /// A YAML alias may point back at an ancestor -- `a: &a\n  b: *a` is
+    /// six words and perfectly well-formed -- and following it is infinite
+    /// descent. Recursion is bounded by the stack, and overflowing the
+    /// stack aborts the process; it does not unwind, so the C ABI's panic
+    /// guard cannot catch it either. A node already on the path is rendered
+    /// as the cycle it is and not entered again.
+    path: Vec<NodeId>,
+    /// How much rendered output is still allowed.
+    ///
+    /// Aliases need not be cyclic to be explosive: ten levels of ten-way
+    /// nesting is 10^10 nodes from a few hundred bytes, and the expansion
+    /// is what `asdf info` is *for*, so it cannot simply be refused.
+    /// Legitimate files never come close to this; a bomb stops at it.
+    budget: usize,
 }
+
+/// The rendered size at which tree output is cut short.
+///
+/// 64 MiB is far beyond any real tree -- the largest in the reference corpus
+/// renders in single-digit kilobytes -- and small enough that reaching it
+/// costs a moment rather than the machine.
+const TREE_OUTPUT_BUDGET: usize = 64 << 20;
+
+/// The deepest tree that is rendered, as a second bound independent of the
+/// cycle check: a legitimately deep tree is still a recursion this cannot
+/// afford to follow.
+const TREE_MAX_DEPTH: usize = 256;
 
 fn write_indent(out: &mut String, state: &TreeState, depth: usize, is_leaf: bool) {
     if depth < 1 {
@@ -209,6 +237,23 @@ fn write_node(
     is_leaf: bool,
     state: &mut TreeState,
 ) {
+    let resolved_id = doc.resolve(id);
+
+    if depth > TREE_MAX_DEPTH || state.path.contains(&resolved_id) {
+        write_indent(out, state, depth, is_leaf);
+        let _ = match index {
+            NodeIndex::Key(key) => writeln!(out, "{ANSI_BOLD}{key}{ANSI_RESET} (...)"),
+            NodeIndex::Index(idx) => writeln!(
+                out,
+                "{ANSI_DIM}[{ANSI_RESET}{ANSI_BOLD}{idx}{ANSI_RESET}{ANSI_DIM}]{ANSI_RESET} (...)"
+            ),
+        };
+        return;
+    }
+    if out.len() >= state.budget {
+        return;
+    }
+
     let label = node_label(doc, id);
     write_indent(out, state, depth, is_leaf);
 
@@ -224,7 +269,7 @@ fn write_node(
         }
     }
 
-    let resolved = doc.resolve(id);
+    let resolved = resolved_id;
     let node = doc.node(resolved);
 
     // A scalar, or an alias to one, ends the line with its value.
@@ -239,6 +284,7 @@ fn write_node(
         state.active.resize(depth + 1, false);
     }
     state.active[depth] = true;
+    state.path.push(resolved);
 
     match &node.data {
         NodeData::Mapping { entries, .. } => {
@@ -266,6 +312,8 @@ fn write_node(
         }
         _ => {}
     }
+
+    state.path.pop();
 }
 
 /// Render one block's table.
@@ -314,7 +362,8 @@ pub fn render(reader: &Reader, options: InfoOptions) -> crate::Result<String> {
         && let Some(doc) = reader.tree()?
         && let Some(root) = doc.root()
     {
-        let mut state = TreeState { active: vec![false; 16] };
+        let mut state =
+            TreeState { active: vec![false; 16], path: Vec::new(), budget: TREE_OUTPUT_BUDGET };
         write_node(&mut out, &doc, root, &NodeIndex::Key("root"), 0, true, &mut state);
     }
 

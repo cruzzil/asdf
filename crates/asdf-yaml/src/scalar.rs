@@ -4,9 +4,10 @@
 //! implementations do not agree on one:
 //!
 //! - **libasdf** (via libfyaml) resolves with C's `strtoull`/`strtoll`/`strtod`
-//!   at base 0. That gives it C-style octal (`010` is 8) and hex, and means the
-//!   YAML float spellings `.inf` and `.nan` resolve as *strings* -- even though
-//!   libasdf emits them.
+//!   at base 0. That gives it C-style octal (`010` is 8) and hex. Since 0.2.0
+//!   it also recognises YAML's `.inf` / `.nan` spellings, which it has always
+//!   emitted, and it no longer accepts the bare `inf` / `nan` / `infinity`
+//!   that `strtod` takes and YAML does not.
 //! - **Python asdf** (via PyYAML) applies the genuine YAML 1.1 resolver, where
 //!   `yes`/`no`/`on`/`off` are booleans and sexagesimals are numbers.
 //! - **saphyr** implements YAML 1.2.
@@ -262,27 +263,39 @@ struct Overflow;
 
 /// Emulate C `strtod` followed by the whole-string check.
 ///
-/// Rust's `f64::from_str` accepts `inf`/`NaN` like C does, but rejects the
-/// hex-float form C admits; hex floats do not occur in ASDF trees.
+/// `strtod` accepts `inf`, `infinity` and `nan`, which YAML spells only as
+/// `.inf` and `.nan` and otherwise reads as strings. libasdf keeps them out
+/// by refusing to call `strtod` at all unless the first character after an
+/// optional sign is a digit or `.`; this reproduces that gate, including the
+/// detail that it looks at the raw first byte, so leading whitespace -- which
+/// `strtod` itself would skip -- is rejected too.
+///
+/// Rust's `f64::from_str` then rejects the hex-float form C admits, which
+/// costs nothing: integer resolution is tried first and takes `0x10`.
 fn strtod_full(s: &str) -> Option<f64> {
-    let t = s.trim_start();
-    if t.is_empty() {
+    let body = s.strip_prefix(['+', '-']).unwrap_or(s);
+    if !body.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
         return None;
     }
-    // Rust accepts a trailing/leading form C would not and vice versa in a few
-    // corners; restrict to what both agree on.
-    let probe = t.strip_prefix(['+', '-']).unwrap_or(t);
-    if !probe.starts_with(|c: char| c.is_ascii_digit() || c == '.')
-        && !probe.starts_with("inf")
-        && !probe.starts_with("Inf")
-        && !probe.starts_with("INF")
-        && !probe.starts_with("nan")
-        && !probe.starts_with("NaN")
-        && !probe.starts_with("NAN")
-    {
-        return None;
+    s.parse::<f64>().ok()
+}
+
+/// YAML's non-finite float spellings, in the three cases the standard allows.
+///
+/// Infinity may carry a sign; NaN may not. PyYAML's resolver and libasdf's
+/// `is_yaml_special_float` agree on both halves, so `-.nan` is a string.
+fn special_float(text: &str) -> Option<f64> {
+    if let ".nan" | ".NaN" | ".NAN" = text {
+        return Some(f64::NAN);
     }
-    t.parse::<f64>().ok()
+    let (negative, body) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    match body {
+        ".inf" | ".Inf" | ".INF" => Some(if negative { f64::NEG_INFINITY } else { f64::INFINITY }),
+        _ => None,
+    }
 }
 
 /// Resolve a plain scalar's text under the given schema.
@@ -314,7 +327,11 @@ pub fn resolve_tagged(text: &str, tag_suffix: &str, schema: Schema) -> Option<Re
             Some(parsed.map_or(Resolved::String, Resolved::Bool))
         }
         "int" => Some(resolve_int_only(text).unwrap_or(Resolved::String)),
-        "float" => Some(strtod_full(text).map_or(Resolved::String, Resolved::Double)),
+        "float" => Some(
+            strtod_full(text)
+                .or_else(|| special_float(text))
+                .map_or(Resolved::String, Resolved::Double),
+        ),
         "str" => Some(Resolved::String),
         _ => None,
     }
@@ -346,7 +363,7 @@ fn resolve_libasdf(text: &str) -> Resolved {
     if let Some(b) = parse_bool_libasdf(text) {
         return Resolved::Bool(b);
     }
-    if let Some(d) = strtod_full(text) {
+    if let Some(d) = strtod_full(text).or_else(|| special_float(text)) {
         return Resolved::Double(d);
     }
     Resolved::String
@@ -423,16 +440,13 @@ fn finish_int_yaml11(v: i128) -> Option<Resolved> {
 
 fn resolve_float_yaml11(text: &str) -> Option<f64> {
     let t = text.replace('_', "");
-    // YAML's own infinity and not-a-number spellings, which libasdf misses.
+    if let Some(d) = special_float(&t) {
+        return Some(d);
+    }
     let (sign, rest) = match t.strip_prefix('-') {
         Some(r) => (-1.0, r),
         None => (1.0, t.strip_prefix('+').unwrap_or(&t)),
     };
-    match rest {
-        ".inf" | ".Inf" | ".INF" => return Some(sign * f64::INFINITY),
-        ".nan" | ".NaN" | ".NAN" => return Some(f64::NAN),
-        _ => {}
-    }
     if rest.contains(':') {
         let mut acc = 0f64;
         for part in rest.split(':') {
@@ -519,27 +533,34 @@ mod tests {
         assert_eq!(lib("-2.25"), Resolved::Double(-2.25));
     }
 
-    /// Documents a genuine upstream round-trip asymmetry: libasdf *writes*
-    /// `.nan` / `.inf` but its `strtod`-based reader rejects them, so they
-    /// come back as strings. We reproduce that under `Libasdf` and get it
-    /// right under `Yaml11`.
+    /// The non-finite spellings both schemas agree on, in all three cases.
+    /// libasdf emits these and, since 0.2.0, reads them back -- closing a
+    /// round-trip asymmetry this crate used to have to reproduce.
     #[test]
-    fn yaml_infinity_spellings_diverge_between_schemas() {
-        assert_eq!(lib(".inf"), Resolved::String);
-        assert_eq!(lib("-.inf"), Resolved::String);
-        assert_eq!(lib(".nan"), Resolved::String);
-
-        assert_eq!(y11(".inf"), Resolved::Double(f64::INFINITY));
-        assert_eq!(y11("-.inf"), Resolved::Double(f64::NEG_INFINITY));
-        assert!(matches!(y11(".nan"), Resolved::Double(d) if d.is_nan()));
+    fn yaml_infinity_spellings_resolve_under_both_schemas() {
+        for resolve in [lib as fn(&str) -> Resolved, y11] {
+            for s in [".inf", ".Inf", ".INF", "+.inf"] {
+                assert_eq!(resolve(s), Resolved::Double(f64::INFINITY), "{s:?}");
+            }
+            for s in ["-.inf", "-.Inf", "-.INF"] {
+                assert_eq!(resolve(s), Resolved::Double(f64::NEG_INFINITY), "{s:?}");
+            }
+            for s in [".nan", ".NaN", ".NAN"] {
+                assert!(matches!(resolve(s), Resolved::Double(d) if d.is_nan()), "{s:?}");
+            }
+        }
     }
 
-    /// Bare `inf`/`nan` *are* accepted by strtod, so libasdf reads them as
-    /// doubles even though it never writes them that way.
+    /// The spellings that look non-finite and are not. `strtod` accepts the
+    /// bare forms, and accepting them would make `inf` in a tree a float
+    /// where every other YAML reader sees a string; a mixed-case `.iNf` and
+    /// a signed NaN are in neither grammar.
     #[test]
-    fn bare_inf_and_nan_are_doubles_under_libasdf() {
-        assert_eq!(lib("inf"), Resolved::Double(f64::INFINITY));
-        assert!(matches!(lib("nan"), Resolved::Double(d) if d.is_nan()));
+    fn near_miss_non_finite_spellings_are_strings() {
+        for s in ["inf", "Inf", "-inf", "infinity", "nan", "NaN", ".iNf", "-.nan", "+.nan"] {
+            assert_eq!(lib(s), Resolved::String, "{s:?}");
+            assert_eq!(y11(s), Resolved::String, "{s:?}");
+        }
     }
 
     #[test]

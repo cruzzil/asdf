@@ -50,6 +50,8 @@ $ git clone --recurse-submodules https://github.com/asdf-format/libasdf ~/code/l
 
 `--recurse-submodules` matters: upstream's C suite needs `tests/munit` and
 `third_party/STC`, and without them the `upstream_suite` gate silently skips.
+The checkout should sit at the commit [`SYNC_COMMIT.md`](../SYNC_COMMIT.md)
+pins; a newer one runs a suite this library has not been synced to.
 
 They default to `~/code`; point elsewhere with:
 
@@ -80,6 +82,19 @@ own expectations. In rough order of how much each is worth:
 `upstream_suite.rs` records what each upstream suite scores. A change that
 makes *more* tests pass still fails the build until the table is updated. That
 is deliberate: an improvement should be recorded, not absorbed silently.
+
+### Untrusted input has its own suite
+
+`-p asdf-core --test robustness` is the gate for hostile files rather than
+merely malformed ones, and it is the one whose coverage is easiest to
+overstate: it was green throughout the review that found five reproducible
+ways to abort the process. Two habits keep it honest, both written into its
+header -- exercise everything a *caller* can reach, not just the layer under
+test, and run it in release as well as debug, because that is where an
+arithmetic overflow stops panicking and starts wrapping.
+
+[`SECURITY-REVIEW.md`](SECURITY-REVIEW.md) has the findings and what each one
+cost.
 
 ### Miri, and why it is not optional
 
@@ -115,9 +130,12 @@ Two conventions there are easy to get wrong:
   *uninitialised* destination, and a reference must always point at a valid
   value of its type. `Option<&T>` is right for inputs.
 - **`malloc`/`free` is confined to `CMallocBuf`.** Four upstream entry points
-  document the caller freeing the buffer with `free()`, which makes the
-  allocator part of the ABI — we cannot substitute Rust's. Raised upstream as
-  [libasdf#250](https://github.com/asdf-format/libasdf/issues/250).
+  hand the caller a buffer to release. Until 0.2.0 the headers said to use
+  `free()`, which made the C runtime's allocator part of the ABI — raised as
+  [libasdf#250](https://github.com/asdf-format/libasdf/issues/250) and
+  answered there by `asdf_free`. `malloc` stays, because callers written
+  against the older headers are still calling `free()` on these buffers, and
+  `asdf_free` is `free`.
 
 ### Enums crossing the boundary are `c_int`
 
@@ -125,11 +143,24 @@ C may pass any integer. Holding an out-of-range value in a `#[repr(i32)]` Rust
 enum is undefined behaviour, so parameters are taken as `c_int` and converted
 with a checked `from_i32`. Never take a `#[repr]` enum by value from C.
 
-### Panics never cross the boundary
+### Panics never cross the boundary. Aborts do.
 
 Unwinding out of an `extern "C"` function is undefined behaviour. Every entry
 point wraps its body in `panic::guard`, which catches, reports once, and
 returns a caller-supplied fallback.
+
+**The guard does not make the crate crash-proof, and it is worth knowing
+exactly where it stops.** A failed allocation calls `handle_alloc_error`; an
+overflowed stack calls the runtime's handler. Neither unwinds, so neither can
+be caught, and both kill the caller's process. Three findings in
+[`SECURITY-REVIEW.md`](SECURITY-REVIEW.md) went straight through the guard for
+that reason -- a 225-byte file asking for 320 PB, and a 96-byte one recursing
+for ever.
+
+So: anything sized from a number in the file gets checked *before* it is
+allocated, and anything that follows a YAML alias carries a cycle guard.
+Reaching the panic guard at all is a bug in the engine; reaching the allocator
+with a file-controlled size is a worse one.
 
 ### What lives in `shim.c`, and why
 
@@ -187,16 +218,13 @@ entry points exist *only* in the headers — `asdf_open` and friends are
 `static inline`, and `ASDF_REGISTER_EXTENSION` is a code-generating macro
 third-party extensions depend on.
 
-Re-vendoring can change the ABI, so it is a deliberate act:
-
-1. Copy the headers from a pinned upstream commit. Do not hand-edit them.
-   `asdf/config.h.in` is *not* vendored; `build.rs` generates `config.h`.
-2. Run `cargo test -p libasdf-rs --test abi -- --nocapture` and
-   `--test upstream_suite -- --nocapture`.
-3. Read the diff. A changed struct layout or enum discriminant is an ABI
-   break and needs saying so.
-4. Update [`SYNC_COMMIT.md`](../SYNC_COMMIT.md) and
-   `crates/libasdf-rs/include/PROVENANCE.md` in the same commit.
+Re-vendoring can change the ABI, so it is a deliberate act — and it is only
+one step of a larger one. The full procedure is
+[`UPSTREAM-SYNC.md`](UPSTREAM-SYNC.md), including the part no gate checks for
+you: upstream's C suite only exercises upstream's C ABI, so a change to scalar
+resolution or to the block layer reaches our gates only if upstream happened
+to write a public-header test for it. The commit log has to be read, not only
+run.
 
 ## Divergences are recorded, not discovered
 

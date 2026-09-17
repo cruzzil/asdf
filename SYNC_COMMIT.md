@@ -5,15 +5,16 @@ implementation is synchronised with.
 
 | | |
 |---|---|
-| **Commit** | `cff7ab0cc3a33673666f9013d92f4cc50edf2b19` |
-| **Describe** | `0.1.0-4-gcff7ab0` |
-| **Subject** | Merge pull request #254 from embray/issue-251 |
-| **Package version** | 0.1.0 |
-| **Synced on** | 2026-09-09 |
+| **Commit** | `4be9e73` |
+| **Describe** | `0.2.0` |
+| **Subject** | bump version 0.1.0 -> 0.2.0 |
+| **Package version** | 0.2.0 |
+| **Library interface version** | `1:0:1` — `SONAME` `libasdf.so.0`, filename `libasdf.so.0.1.0` |
+| **Synced on** | 2026-09-16 |
 
 ## What "synced" means here
 
-Three things are pinned to this commit, and all three have to move together:
+Four things are pinned to this commit, and all four have to move together:
 
 1. **The vendored public headers** in `crates/libasdf-rs/include/`, copied
    verbatim. They are the ABI contract, and `crates/libasdf-rs/tests/abi.rs`
@@ -24,17 +25,18 @@ Three things are pinned to this commit, and all three have to move together:
    links them against our `libasdf.so`. Each suite's pass count is pinned in
    both directions.
 3. **The committed CLI captures** the golden tests reproduce byte for byte.
+4. **The behaviour upstream's suite does not reach**, which is most of the
+   engine. Upstream's C tests cover the C ABI; a fix to scalar resolution or
+   to the block layer shows up there only if upstream happened to write a
+   test for it, so the commit log has to be read rather than only run.
 
 ## Updating it
 
-Re-vendoring is a deliberate act: it can change the ABI. The procedure is in
-[`docs/DEVELOPING.md`](docs/DEVELOPING.md#re-vendoring-the-headers). In short —
-copy the headers, run the ABI and upstream-suite gates, read the diff, and
-update this file and `crates/libasdf-rs/include/PROVENANCE.md` in the same
-commit.
+Re-vendoring is a deliberate act: it can change the ABI. The full procedure is
+[`docs/UPSTREAM-SYNC.md`](docs/UPSTREAM-SYNC.md).
 
 To see what has landed upstream since this point:
 
 ```console
-$ git -C /path/to/libasdf log --oneline 56d24aa11b3013c362a485b25c2f51db35622d0e..origin/main
+$ git -C /path/to/libasdf log --oneline 4be9e73..origin/main
 ```

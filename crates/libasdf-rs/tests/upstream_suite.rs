@@ -116,6 +116,13 @@ fn shared_library() -> Option<PathBuf> {
 /// that is no longer there, which is worse than no gate at all, so it is
 /// rebuilt here rather than assumed current. When it is already current this
 /// costs one `cargo` no-op.
+///
+/// The rebuild has to use the *same profile* the test is running under.
+/// It did not, and under `cargo test --release` the gate happily reported on
+/// whatever `target/release/libasdf.so` happened to be lying around -- which
+/// is precisely the staleness this function exists to prevent, just one
+/// directory over. The profile is recovered from where cargo put this test
+/// binary, since there is no environment variable that carries it.
 fn ensure_library_is_current() {
     use std::sync::Once;
 
@@ -123,7 +130,11 @@ fn ensure_library_is_current() {
     ONCE.call_once(|| {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
         // Only the lib target, so this cannot recurse into the tests.
-        let out = Command::new(cargo).args(["build", "-p", "libasdf-rs", "--lib"]).output();
+        let mut args = vec!["build", "-p", "libasdf-rs", "--lib"];
+        if target_dir().file_name().is_some_and(|n| n == "release") {
+            args.push("--release");
+        }
+        let out = Command::new(cargo).args(&args).output();
         match out {
             Ok(out) if out.status.success() => {}
             Ok(out) => eprintln!(
