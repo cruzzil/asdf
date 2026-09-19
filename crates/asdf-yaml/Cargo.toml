@@ -10,7 +10,6 @@ authors.workspace = true
 
 [dependencies]
 saphyr-parser.workspace = true
-hashlink.workspace = true
 thiserror.workspace = true
 
 [lints]

@@ -4,6 +4,15 @@ updates:
     directory: /
     schedule:
       interval: daily
+    ignore:
+      # `dtolnay/rust-toolchain@1.90.0` is not an action version: that tag is
+      # the *Rust toolchain* the action installs, and it is pinned there on
+      # purpose by the `msrv` job, which exists to check the `rust-version`
+      # we promise dependants. Bumping it points that check at a different
+      # compiler and the job goes green having tested nothing. Raising the
+      # MSRV is a decision that moves `rust-version` in the manifests, not a
+      # dependency update. See #4.
+      - dependency-name: dtolnay/rust-toolchain
 
   - package-ecosystem: cargo
     directory: /
