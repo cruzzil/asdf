@@ -46,7 +46,7 @@ jobs:
         if: runner.os == 'Windows'
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The windows-11-arm image ships no Rust toolchain.
       - name: Install rustup (Windows ARM64)
@@ -67,13 +67,13 @@ jobs:
       # skips most of its evidence, so they are checked out everywhere. The
       # libasdf submodules carry munit and STC, which its C suite needs.
       - name: Check out the ASDF Standard
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: asdf-format/asdf-standard
           path: corpora/asdf-standard
 
       - name: Check out libasdf
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: asdf-format/libasdf
           path: corpora/libasdf
@@ -147,8 +147,8 @@ jobs:
     name: differential (vs Python asdf)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           repository: asdf-format/asdf-standard
           path: corpora/asdf-standard
@@ -177,7 +177,7 @@ jobs:
   miri:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
@@ -194,7 +194,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -227,7 +227,7 @@ jobs:
   fuzz:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
@@ -263,7 +263,7 @@ jobs:
   msrv:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.90.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets
