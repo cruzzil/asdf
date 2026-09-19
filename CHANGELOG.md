@@ -14,6 +14,31 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-09-19
+
+`asdf-core` 0.2.3 and `asdf-yaml` 0.2.1. The other three crates are unchanged
+and ask for `^0.2.0`, which matches both, so they pick these up without
+releases of their own.
+
+A dependency release: no code changed, and no API with it.
+
+### Removed
+
+- **`asdf-yaml` no longer depends on `hashlink`.** It was declared and never
+  used -- it appears nowhere in the source, and the crate builds and passes
+  its suite without it. Anyone depending on `asdf-yaml`, and so on
+  `asdf-core`, now compiles one crate fewer.
+
+### Changed
+
+- **`md-5` 0.10 -> 0.11** and **`lz4_flex` 0.11 -> 0.14**, both major bumps of
+  crates that handle bytes out of an untrusted file. Neither appears in any
+  public signature, so neither is breaking for a consumer. Verified rather
+  than assumed: all 305 checksums across the reference corpus still verify
+  under the new digest, and all 17 compressed blocks -- including a real lz4
+  one -- still decode, with 105 of 105 reference pairs matching and the
+  round-trip against Python `asdf` still passing.
+
 ## [0.2.2] - 2026-09-19
 
 `asdf-core` only. The other four crates are unchanged and stay where they are;
@@ -405,7 +430,8 @@ is listed here so the first release notes are not written from scratch.
 - `asdf-core` reads a file whole rather than mapping it under `cfg(miri)`, so
   dependants can run Miri.
 
-[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/cruzzil/asdf/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/cruzzil/asdf/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/cruzzil/asdf/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/cruzzil/asdf/compare/v0.1.4...v0.2.0
