@@ -1,0 +1,77 @@
+# Tokens a raw-byte mutator will not invent on its own.
+#
+# Without these almost every generated input dies at the header, and the
+# fuzzer spends its time exploring the first twelve bytes of the file. The
+# format's magic strings, the block header's shape, and the YAML spellings
+# that drive scalar resolution are all things it has to be handed.
+
+# File and block structure
+header_asdf="#ASDF 1.0.0\x0a"
+header_std="#ASDF_STANDARD 1.6.0\x0a"
+block_magic="\xd3BLK"
+block_index="#ASDF BLOCK INDEX\x0a"
+yaml_directive="%YAML 1.1\x0a"
+tag_directive="%TAG ! tag:stsci.edu:asdf/\x0a"
+doc_start="--- "
+doc_end="...\x0a"
+
+# The core tags
+tag_asdf="!core/asdf-1.1.0"
+tag_ndarray="!core/ndarray-1.1.0"
+tag_complex="!core/complex-1.0.0"
+tag_software="!core/software-1.0.0"
+tag_history="!core/history_entry-1.0.0"
+tag_time="!time/time-1.1.0"
+
+# ndarray keys
+key_source="source: "
+key_datatype="datatype: "
+key_byteorder="byteorder: "
+key_shape="shape: "
+key_strides="strides: "
+key_offset="offset: "
+key_mask="mask: "
+key_data="data: "
+
+# datatypes
+dt_int8="int8"
+dt_int16="int16"
+dt_int32="int32"
+dt_int64="int64"
+dt_uint8="uint8"
+dt_uint16="uint16"
+dt_uint32="uint32"
+dt_uint64="uint64"
+dt_float16="float16"
+dt_float32="float32"
+dt_float64="float64"
+dt_complex64="complex64"
+dt_complex128="complex128"
+dt_bool8="bool8"
+dt_ascii="ascii"
+dt_ucs4="ucs4"
+order_little="little"
+order_big="big"
+
+# compression names, as they appear in a block header
+comp_zlib="zlib"
+comp_bzp2="bzp2"
+comp_lz4="lz4"
+comp_input="input"
+
+# YAML shapes the resolver cares about
+anchor="&a "
+alias="*a"
+star="'*'"
+scalar_inf=".inf"
+scalar_neginf="-.inf"
+scalar_nan=".nan"
+scalar_null="null"
+scalar_true="true"
+seq_open="[ "
+seq_close=" ]"
+
+# Sizes that sit on a boundary
+big_u64="18446744073709551615"
+pow63="9223372036854775808"
+pow62="4611686018427387904"

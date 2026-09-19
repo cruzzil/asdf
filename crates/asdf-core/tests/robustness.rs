@@ -583,12 +583,30 @@ mod aborts {
         assert!(f.len() < 600, "the whole attack is {} bytes", f.len());
 
         let reader = Reader::from_bytes(f).expect("well formed");
+        let started = std::time::Instant::now();
         let rendered = asdf_core::info::render(&reader, asdf_core::info::InfoOptions::default())
             .expect("rendering should complete");
+        let elapsed = started.elapsed();
+
+        // Two bounds, because the first version of this fix only had the
+        // one. A byte budget caps memory but not work: *reaching* a 64 MiB
+        // budget means formatting 64 MiB first, which a fuzz run measured at
+        // a third of a second from a 573-byte file. The visit budget is what
+        // stops the walk, so the output should come in well under the byte
+        // budget rather than exactly at it -- if it lands on the byte budget,
+        // the visit budget is not doing its job.
         assert!(
-            rendered.len() < 128 << 20,
-            "rendering ran past its budget at {} bytes",
+            rendered.len() < 4 << 20,
+            "rendering hit the byte budget at {} bytes; the visit budget should \
+             have stopped it long before",
             rendered.len()
+        );
+        // Generous enough not to be flaky on a loaded machine, tight enough
+        // that the 375ms version would fail it.
+        assert!(
+            elapsed < core::time::Duration::from_millis(250),
+            "rendering a {} byte file took {elapsed:?}",
+            reader.bytes().len()
         );
     }
 }

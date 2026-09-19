@@ -14,6 +14,35 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+### Security
+
+- **Rendering a tree bounded memory but not work.** 0.2.0 capped `asdf info`'s
+  output at 64 MiB, which stops the memory blowup -- but *reaching* a 64 MiB
+  cap means formatting 64 MiB first. A **573-byte** file cost **375 ms and
+  64 MB** per render, a hundred-thousandfold amplification: merely annoying in
+  a CLI, a denial of service in anything rendering files in a loop. Now
+  bounded by nodes visited, scaled to the document's own node count, with the
+  byte budget lowered to 8 MiB -- the largest tree in the reference corpus
+  renders in single-digit kilobytes, so 64 MiB was never headroom, just a big
+  number. **375 ms -> 2.8 ms, 64 MiB -> 650 KB**, with all 24 golden captures
+  unchanged.
+
+  Found by a one-hour fuzz campaign, as a *slow unit* rather than a crash.
+  The existing regression test asserted the output was under 128 MiB, which a
+  64 MiB blowup passes comfortably; it now asserts the output lands well under
+  the byte budget -- which is what shows the visit budget stopped the walk --
+  plus a wall-clock bound.
+
+### Changed
+
+- **A 57-entry fuzzing dictionary** (`fuzz/asdf.dict`), used by CI's campaign
+  too. A raw-byte mutator will not invent `#ASDF 1.0.0` or `\xd3BLK`, so
+  without one almost every generated input dies in the first twelve bytes.
+  With it, an hour's campaign reached ~800 more coverage edges per target than
+  the undicted runs.
+- CI's fuzz campaign passes `-malloc_limit_mb` below its RSS limit, so an
+  out-of-memory report names the allocating line rather than only the process.
+
 ## [0.2.1] - 2026-09-19
 
 `asdf-core` and `libasdf-rs`. The other three crates are unchanged and stay at

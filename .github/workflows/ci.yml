@@ -247,12 +247,16 @@ jobs:
               -runs=0 -rss_limit_mb=2048 -timeout=25
         working-directory: fuzz
       # A brief campaign on top, which is free and occasionally lucky.
+      # `-malloc_limit_mb` below the RSS limit so a report names the
+      # allocation's own stack, not just the process's.
       - name: Short campaign
         run: |
           cargo +nightly fuzz run read_path -- \
-              -max_total_time=120 -rss_limit_mb=2048 -timeout=25
+              -max_total_time=120 -dict=asdf.dict \
+              -rss_limit_mb=2048 -malloc_limit_mb=1024 -timeout=25
           cargo +nightly fuzz run render_tree -- \
-              -max_total_time=120 -rss_limit_mb=2048 -timeout=25
+              -max_total_time=120 -dict=asdf.dict \
+              -rss_limit_mb=2048 -malloc_limit_mb=1024 -timeout=25
         working-directory: fuzz
 
   # rather than asserted.

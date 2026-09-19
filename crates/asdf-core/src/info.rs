@@ -191,14 +191,30 @@ struct TreeState {
     /// is what `asdf info` is *for*, so it cannot simply be refused.
     /// Legitimate files never come close to this; a bomb stops at it.
     budget: usize,
+    /// How many more nodes may be visited.
+    ///
+    /// The byte budget alone bounds memory and not work: *reaching* it means
+    /// formatting every one of those bytes first, which a fuzz run measured
+    /// at a third of a second per call from a 573-byte file. Counting
+    /// visits bounds the time directly, and stops the walk long before the
+    /// bytes pile up.
+    visits: u64,
 }
 
 /// The rendered size at which tree output is cut short.
 ///
-/// 64 MiB is far beyond any real tree -- the largest in the reference corpus
-/// renders in single-digit kilobytes -- and small enough that reaching it
-/// costs a moment rather than the machine.
-const TREE_OUTPUT_BUDGET: usize = 64 << 20;
+/// The largest tree in the reference corpus renders in single-digit
+/// kilobytes, so 8 MiB is a thousandfold headroom for anything real.
+const TREE_OUTPUT_BUDGET: usize = 8 << 20;
+
+/// How many nodes a render may visit, as a multiple of the document's size.
+///
+/// A node can legitimately be visited more than once -- that is what an alias
+/// is for, and a shared value referenced by fifty arrays is ordinary. What is
+/// not ordinary is visiting one 10^10 times, which is what nested aliases do.
+/// Scaling to the document keeps the bound proportionate rather than
+/// arbitrary.
+const TREE_VISITS_PER_NODE: u64 = 64;
 
 /// The deepest tree that is rendered, as a second bound independent of the
 /// cycle check: a legitimately deep tree is still a recursion this cannot
@@ -250,9 +266,10 @@ fn write_node(
         };
         return;
     }
-    if out.len() >= state.budget {
+    if out.len() >= state.budget || state.visits == 0 {
         return;
     }
+    state.visits -= 1;
 
     let label = node_label(doc, id);
     write_indent(out, state, depth, is_leaf);
@@ -362,8 +379,12 @@ pub fn render(reader: &Reader, options: InfoOptions) -> crate::Result<String> {
         && let Some(doc) = reader.tree()?
         && let Some(root) = doc.root()
     {
-        let mut state =
-            TreeState { active: vec![false; 16], path: Vec::new(), budget: TREE_OUTPUT_BUDGET };
+        let mut state = TreeState {
+            active: vec![false; 16],
+            path: Vec::new(),
+            budget: TREE_OUTPUT_BUDGET,
+            visits: (doc.node_count() as u64).saturating_mul(TREE_VISITS_PER_NODE).max(4096),
+        };
         write_node(&mut out, &doc, root, &NodeIndex::Key("root"), 0, true, &mut state);
     }
 

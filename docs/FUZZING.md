@@ -13,7 +13,8 @@ review had missed.
 
 ```console
 $ cd fuzz
-$ cargo +nightly fuzz run read_path -- -rss_limit_mb=2048 -timeout=25
+$ cargo +nightly fuzz run read_path -- \
+>     -dict=asdf.dict -rss_limit_mb=2048 -timeout=25
 ```
 
 Nightly is required; `cargo-fuzz` builds with `-Zsanitizer=address`. Stop it
@@ -32,8 +33,32 @@ $ cargo +nightly fuzz run read_path fuzz/artifacts/read_path/crash-<hash>
   finding. Without it libFuzzer's default still applies, but stating it keeps
   the number the same between a laptop and CI.
 - **`-timeout`** is what turns a hang into one. This matters more here than
-  it looks: the sixth defect was a hang, not a crash, and a target without a
-  timeout simply appears to be working hard.
+  it looks: finding 5 was a hang, not a crash, and a target without a timeout
+  simply appears to be working hard.
+- **`-malloc_limit_mb`**, lower than the RSS limit, makes libFuzzer print the
+  *allocation's* stack trace rather than only the process's. That is the
+  difference between "something asked for 4 GB" and knowing which line did.
+  It is how finding 6 was located.
+- **`-dict=asdf.dict`** is worth more here than in most projects. A raw-byte
+  mutator will not invent `#ASDF 1.0.0` or `\xd3BLK`, so without a dictionary
+  almost every generated input dies in the first twelve bytes and the campaign
+  explores the header rather than the format. The dictionary carries the
+  magic strings, the tags, the datatype names, the compression names, and the
+  YAML spellings that drive scalar resolution.
+
+### Running longer
+
+libFuzzer parallelises itself. On a 24-core machine:
+
+```console
+$ cargo +nightly fuzz run read_path <corpus-dir> -- \
+>     -workers=6 -jobs=6 -max_total_time=3600 \
+>     -dict=asdf.dict -rss_limit_mb=1536 -malloc_limit_mb=1024 -timeout=25
+```
+
+Point it at a **working corpus outside the repo**. The committed one is a
+regression set, not a place to accumulate; pointing a campaign at it fills
+the working tree with thousands of generated files.
 
 ## The targets
 
@@ -89,17 +114,42 @@ changes, and enough to catch the corpus regressing. **It is not enough to find
 anything new.** A real campaign is hours on one machine, and belongs off the
 pull-request path.
 
+## Watch the slow units, not just the crashes
+
+libFuzzer reports three kinds of finding, and only one of them looks like a
+bug at a glance:
+
+- a **crash** — a signal or an abort;
+- an **OOM** — an allocation past `-rss_limit_mb`;
+- a **slow unit** — an input that simply took a long time.
+
+The third is the one that gets ignored, and it is where finding 7 came from:
+a 573-byte file that made `asdf info` spend 375 ms and 64 MB. Nothing crashed.
+The budget added two days earlier was working exactly as written — it capped
+the *output* at 64 MiB, and reaching that cap meant formatting 64 MiB first.
+
+A slow unit is a statement that some input costs wildly more than its size
+justifies. In a format whose whole job is to be handed files by other people,
+that is a finding.
+
 ## What it found
 
-Two defects in its first two hours, on top of the five the review had found by
-reading. Both are written up in
-[`SECURITY-REVIEW.md`](SECURITY-REVIEW.md) as findings 5 and 6, and both make
-the same point:
+Three defects, on top of the five the review had found by reading. All three
+are in [`SECURITY-REVIEW.md`](SECURITY-REVIEW.md), as findings 5, 6 and 7, and
+they are one lesson in three costumes:
 
-> A bound placed after the allocation it is meant to prevent is not a bound.
+> A bound has to name the dimension that actually runs away, and sit where the
+> running-away happens.
 
-The second one, in particular, was a hole in a fix written three days earlier
-while looking directly at the function it was in.
+| finding | bounded | left open |
+|---|---|---|
+| 5 | one function's walk | the same bomb through another function |
+| 6 | the accumulated total | the single allocation before the total |
+| 7 | memory | time |
+
+Two of the three were holes in fixes written days earlier while looking
+directly at the code they were in. That is the argument for fuzzing in one
+sentence.
 
 The first is worth reading in full as a lesson about targeted fixes:
 

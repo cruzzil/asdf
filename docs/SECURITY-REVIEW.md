@@ -37,10 +37,10 @@ and the mechanism that was supposed to prevent it never applied.
 
 ## Findings
 
-All seven are fixed. Five came from the review itself; two came from the fuzz
-targets the review recommended -- the first before they had generated a single
-input of their own, the second after two hours of running. Severities are as
-assessed at the time.
+All eight are fixed. Five came from the review itself; three came from the
+fuzz targets the review recommended -- one before they had generated a single
+input of their own, one after two hours, one in a one-hour campaign.
+Severities are as assessed at the time.
 
 ### 1. A decompression bomb evaded the guard by lying downwards — High
 
@@ -214,7 +214,51 @@ placed after the allocation it is meant to prevent is not a bound.** Both
 fixes were written while looking at the right function, and both left a
 window open one call deeper.
 
-### 7. External sources could be escaped with a symlink — Low
+Findings 5, 6 and 7 are all one lesson in three costumes. A bound has to name
+the dimension that actually runs away, and be placed where the running-away
+happens:
+
+| | bounded | left open |
+|---|---|---|
+| 5 | one function's walk | the same bomb through another function |
+| 6 | the accumulated total | the single allocation before the total |
+| 7 | memory | time |
+
+### 7. Rendering bounded memory but not work — Medium
+
+**Found by the fuzz target**, in a one-hour campaign, and the third time a
+fix bounded one dimension and left another open.
+
+Finding 3 capped `asdf info`'s tree output at 64 MiB. That does stop the
+memory blowup. It does not stop the *work*, because reaching a 64 MiB budget
+means formatting 64 MiB of output first:
+
+| | |
+|---|---|
+| input | **573 bytes** |
+| output | 64 MiB |
+| time | **375 ms** per render |
+
+A hundred-thousandfold amplification, and the kind of thing that is merely
+annoying in a CLI and a denial of service in anything that renders files in a
+loop. libFuzzer noticed it as a *slow unit* rather than a crash -- under
+AddressSanitizer the same input took 9 seconds -- which is why `-timeout` and
+attention to slow units matter as much as watching for signals.
+
+**Fixed** by bounding the number of nodes a render may visit, scaled to the
+document's own node count, and lowering the byte budget to 8 MiB: the largest
+tree in the reference corpus renders in single-digit kilobytes, so 64 MiB was
+never headroom, it was just a big number. **375 ms → 2.8 ms, 64 MiB →
+650 KB**, with all 24 golden captures still byte-exact.
+
+Pinned by `aborts::nested_aliases_render_within_a_budget`, which was already
+there and too loose to catch this -- it asserted the output was under 128 MiB,
+which a 64 MiB blowup passes comfortably. It now asserts the output lands well
+*under* the byte budget, which is what shows the visit budget stopped the walk
+rather than the byte budget, plus a wall-clock bound. Verified by reverting
+`info.rs` alone: the tightened test fails on the old code at 67,108,887 bytes.
+
+### 8. External sources could be escaped with a symlink — Low
 
 `reader::external_relative_path` rejects absolute paths, `..` components,
 drive and UNC prefixes, and anything with a scheme — a careful lexical check.
