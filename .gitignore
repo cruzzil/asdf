@@ -3,3 +3,4 @@
 *.pdb
 /fuzz/target
 /fuzz/artifacts
+/lcov.info

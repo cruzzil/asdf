@@ -1,0 +1,29 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: daily
+    # No blanket ignore of patch and minor updates here.
+    #
+    # The usual advice for a library is to ignore them, because a consumer
+    # builds against its own lockfile rather than ours. This workspace
+    # publishes `asdf-cli`, a binary, and a binary *is* built from this
+    # lockfile -- so a stale dependency here ships to whoever runs
+    # `cargo install asdf-cli --locked`.
+    #
+    # It also matters more than usual that the compression crates stay
+    # current: `flate2`, `bzip2` and `lz4_flex` decode attacker-controlled
+    # bytes, and `docs/SECURITY-REVIEW.md` records what that is worth.
+
+  # The fuzz targets are their own workspace, with their own lockfile, so
+  # cargo does not reach them from the root manifest.
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly

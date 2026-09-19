@@ -97,6 +97,17 @@ arithmetic overflow stops panicking and starts wrapping.
 cost, and [`FUZZING.md`](FUZZING.md) the targets that found the two the
 reading missed.
 
+### Coverage is a map, not a score
+
+`.github/workflows/coverage.yml` publishes to Codecov. The number is worth
+having as a way to find code nothing exercises; it is not worth chasing.
+
+One thing about it does matter: **it checks out both corpora and drives the
+CLI.** Without the corpora the corpus, reference-pairs, golden and
+upstream-suite tests all skip, and what comes back is the coverage of the
+subset that needs no fixtures -- a number that looks fine and means nothing.
+The same trap as a green `cargo test` on a bare clone, and the same fix.
+
 ### Miri, and why it is not optional
 
 Every unsafe block in the workspace is in `libasdf-rs`. Miri found two real

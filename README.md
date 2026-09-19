@@ -1,3 +1,15 @@
+[![CI](https://github.com/cruzzil/asdf/actions/workflows/ci.yml/badge.svg)](https://github.com/cruzzil/asdf/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/cruzzil/asdf/graph/badge.svg)](https://codecov.io/gh/cruzzil/asdf)
+[![Dependency status](https://deps.rs/repo/github/cruzzil/asdf/status.svg)](https://deps.rs/repo/github/cruzzil/asdf)
+
+| Crate | Version | Docs | |
+|---|---|---|---|
+| [`asdf-rs`](https://crates.io/crates/asdf-rs) | [![Crates.io](https://img.shields.io/crates/v/asdf-rs.svg)](https://crates.io/crates/asdf-rs) | [![Documentation](https://docs.rs/asdf-rs/badge.svg)](https://docs.rs/asdf-rs/) | the idiomatic Rust API |
+| [`libasdf-rs`](https://crates.io/crates/libasdf-rs) | [![Crates.io](https://img.shields.io/crates/v/libasdf-rs.svg)](https://crates.io/crates/libasdf-rs) | [![Documentation](https://docs.rs/libasdf-rs/badge.svg)](https://docs.rs/libasdf-rs/) | the C ABI |
+| [`asdf-cli`](https://crates.io/crates/asdf-cli) | [![Crates.io](https://img.shields.io/crates/v/asdf-cli.svg)](https://crates.io/crates/asdf-cli) | [![Documentation](https://docs.rs/asdf-cli/badge.svg)](https://docs.rs/asdf-cli/) | the `asdf` command |
+| [`asdf-core`](https://crates.io/crates/asdf-core) | [![Crates.io](https://img.shields.io/crates/v/asdf-core.svg)](https://crates.io/crates/asdf-core) | [![Documentation](https://docs.rs/asdf-core/badge.svg)](https://docs.rs/asdf-core/) | the engine |
+| [`asdf-yaml`](https://crates.io/crates/asdf-yaml) | [![Crates.io](https://img.shields.io/crates/v/asdf-yaml.svg)](https://crates.io/crates/asdf-yaml) | [![Documentation](https://docs.rs/asdf-yaml/badge.svg)](https://docs.rs/asdf-yaml/) | the document model |
+
 # libasdf-rs
 
 A Rust implementation of [ASDF](https://www.asdf-format.org/) (Advanced

@@ -1,0 +1,77 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+name: Coverage
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
+      LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update stable
+      - name: Output rust version for educational purposes
+        run: rustup --version
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # Without these the corpus, reference-pairs, golden and upstream-suite
+      # tests all skip, and the coverage number that comes out is not of this
+      # library but of the subset that needs no fixtures. A misleading
+      # coverage figure is worse than none.
+      - name: Check out the ASDF Standard
+        uses: actions/checkout@v4
+        with:
+          repository: asdf-format/asdf-standard
+          path: corpora/asdf-standard
+      - name: Check out libasdf
+        uses: actions/checkout@v4
+        with:
+          repository: asdf-format/libasdf
+          path: corpora/libasdf
+          submodules: true
+
+      - name: Generate code coverage
+        run: |
+          cargo llvm-cov clean --workspace # remove artifacts that may affect the coverage results
+
+          # The whole suite: unit tests, the corpora, the golden captures, the
+          # ABI harness and upstream's own C suite.
+          cargo llvm-cov --workspace --no-report
+
+          # The CLI is a published binary and its four subcommands are a
+          # real part of the surface, so they are driven rather than left
+          # uncovered. The fixtures come from libasdf, checked out above.
+          FIX="$LIBASDF_DIR/tests/fixtures"
+          asdf() { cargo llvm-cov run --bin asdf --no-report -- "$@"; }
+
+          asdf --help
+          asdf info "$FIX/255-2-blocks.asdf"
+          asdf info --no-tree --blocks "$FIX/255-2-blocks.asdf"
+          asdf info --verify-checksums "$FIX/255-2-blocks.asdf"
+          asdf events "$FIX/255-2-blocks.asdf"
+          asdf events --verbose --cap-tree "$FIX/255-2-blocks.asdf"
+          asdf events --no-yaml "$FIX/255-2-blocks.asdf"
+          asdf verify-checksums --verbose "$FIX/255-2-blocks.asdf"
+          asdf dd "$FIX/255-2-blocks.asdf" /dev/null
+          asdf dd --block=1 --raw --chunk-size=64 "$FIX/255-2-blocks.asdf" /dev/null
+
+          # Failure paths are as worth covering as the happy ones, and each of
+          # these exits non-zero on purpose.
+          asdf verify-checksums "$FIX/255-invalid-checksum.asdf" || true
+          asdf info /nonexistent.asdf || true
+          asdf dd --block=99 "$FIX/255-2-blocks.asdf" - || true
+          asdf || true
+
+          cargo llvm-cov report --lcov --output-path lcov.info
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: cruzzil/asdf
+          files: lcov.info
