@@ -94,6 +94,7 @@ pub fn available() -> Vec<Compression> {
 /// waiting to happen.
 const MAX_EXPANSION_RATIO: usize = 4096;
 
+#[deny(clippy::arithmetic_side_effects)]
 fn check_expected_size(compressed_len: usize, expected: usize) -> Result<()> {
     let ceiling = compressed_len.saturating_mul(MAX_EXPANSION_RATIO).max(1 << 20);
     if expected > ceiling {
@@ -254,11 +255,27 @@ pub mod lz4 {
             // plus the block, which together are what `decompress_size_prepended`
             // expects.
             let chunk = &data[pos..pos + framed_len];
+
+            // That header is four attacker-chosen bytes, and
+            // `decompress_size_prepended` allocates from it *before* it
+            // decodes anything -- so checking the total after the call is one
+            // line too late to stop a 4 GiB allocation from a four-byte lie.
+            // Read the size first and refuse here.
+            let declared = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
+            let remaining = expected.saturating_sub(out.len());
+            if declared > remaining {
+                return Err(err!(
+                    CompressionFailed,
+                    "lz4 chunk declares {declared} bytes with {remaining} left of the \
+                     {expected} the block header allows"
+                ));
+            }
+
             let decoded = lz4_flex::block::decompress_size_prepended(chunk)
                 .map_err(|e| err!(CompressionFailed, "lz4 decompression failed: {e}"))?;
-            // Each chunk carries its own decompressed size, so the total is
-            // checked as it accumulates rather than trusted at the end.
-            if out.len() + decoded.len() > expected {
+            // The decoder is trusted to honour its own header, but not
+            // blindly: a mismatch means the stream is not what it said.
+            if decoded.len() > remaining {
                 return Err(err!(
                     CompressionFailed,
                     "lz4 stream expands past the {expected} bytes the block header declares"
@@ -434,6 +451,37 @@ mod tests {
     }
 
     #[cfg(feature = "lz4")]
+    /// A chunk may not allocate from its own four-byte size header.
+    ///
+    /// Found by the fuzz target. python-lz4's framing prepends a
+    /// little-endian decompressed size to every chunk, and
+    /// `decompress_size_prepended` allocates from it before decoding
+    /// anything -- so a total-so-far check after the call never runs. Four
+    /// bytes of `0xff` asked for 4 GiB.
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn an_lz4_chunk_may_not_allocate_from_its_own_header() {
+        let mut stream = Vec::new();
+        // One chunk: a big-endian framed length, then a little-endian
+        // decompressed size of nearly 4 GiB, then a byte of nothing.
+        let body = {
+            let mut b = Vec::new();
+            b.extend_from_slice(&0xFFFF_FF00u32.to_le_bytes());
+            b.push(0);
+            b
+        };
+        stream.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        stream.extend_from_slice(&body);
+
+        // The block header says the whole thing comes to 64 bytes.
+        let err = Compression::Lz4.decompress(&stream, 64).expect_err("must refuse");
+        let text = format!("{err}");
+        assert!(
+            text.contains("declares") && text.contains("left of the"),
+            "the refusal should name the chunk's own claim, got: {text}"
+        );
+    }
+
     #[test]
     fn truncated_lz4_streams_are_rejected() {
         let data = vec![0x11u8; 5000];

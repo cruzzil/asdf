@@ -14,6 +14,61 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+### Security
+
+Two more findings, both from the `cargo-fuzz` targets that [0.2.0]'s review
+recommended and this change adds. Both are the same mistake in different
+places, and worth naming as a shape: **a bound placed after the allocation it
+is meant to prevent is not a bound.**
+
+- **An LZ4 chunk allocated from its own four-byte header.** 0.2.0 bounded
+  decompression by the block's declared `data_size`, accumulating chunk by
+  chunk -- but python-lz4's framing has each chunk declare its own
+  decompressed size, and `lz4_flex` allocates from that declaration before it
+  decodes anything, so the accumulation check ran one line too late. Four
+  bytes of `0xff` in a 4 KB file asked for **4.28 GB**. The chunk's claim is
+  now checked against the remaining budget before the decoder sees it.
+- **The alias bomb had a second route, through inline arrays.** 0.2.0 fixed
+  alias expansion in `asdf info` with a rendering budget. The fuzz target then
+  hung for fifteen minutes on the same input in a path that never calls
+  `info::render`: `Ndarray::parse` treats a bare nested sequence as an inline
+  array and surveys every element to infer its datatype, following aliases
+  with no memo and no depth bound. Two neighbours came out with it --
+  `infer_inline_shape` looping for ever on `a: &a [*a]`, ten bytes, and
+  `collect_inline` materialising the expansion. All three are now bounded by
+  the document's node count, exactly as a block-backed array is bounded by its
+  block's length.
+
+Two smaller ones from auditing for the same shape afterwards:
+`inline_ndarray` reserved from a caller-supplied shape before checking it
+described the elements given, and `asdf_block_create` aborted on a size the
+allocator could not satisfy where `block.h` promises `NULL`.
+
+### Added
+
+- **`fuzz/`, two `cargo-fuzz` targets** and the guide in
+  [`docs/FUZZING.md`](docs/FUZZING.md). `read_path` covers the read path
+  through to an array's decoded elements; `render_tree` covers the renderers
+  and the alias graph. The committed corpus is small and deliberate -- every
+  file in it once broke something.
+- **A CI `fuzz` job**: builds both targets, replays the committed corpus, and
+  runs a two-minute campaign. That catches the targets rotting and the corpus
+  regressing; it is not long enough to find anything new, and does not pretend
+  to be.
+
+### Changed
+
+- **`clippy::arithmetic_side_effects` is denied on the functions that turn
+  file-controlled numbers into an extent.** The review had suggested whole
+  modules; measured, that was 39 hits across five files, nearly all loop
+  indices, and that volume of `#[allow]` teaches a reader to add another
+  without thinking. Scoped to the extent-computing functions it is 4 hits, one
+  of which was a real bug -- `strides[dim] * idx` in `decode_all`, both
+  operands straight from the file. Now checked.
+- **CI runs the robustness suite capped (`ulimit -v` 4 GB) and in release**,
+  so a regression of the allocation kind fails in seconds instead of swapping
+  the runner, and one of the arithmetic kind fails at all.
+
 ## [0.2.0] - 2026-09-17
 
 **All five crates.** Two things happened at once: the sync to upstream libasdf

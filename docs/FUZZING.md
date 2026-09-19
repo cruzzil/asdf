@@ -1,0 +1,129 @@
+# Fuzzing
+
+`fuzz/` holds two `cargo-fuzz` targets. They exist because
+[`SECURITY-REVIEW.md`](SECURITY-REVIEW.md) ended with the observation that
+every finding in it was within a handful of mutations of the reference
+corpus — a fuzzer would have found them unaided.
+
+That turned out to be literally true. The first corpus replay, before either
+target had generated a single input of its own, found a sixth defect the
+review had missed.
+
+## Running one
+
+```console
+$ cd fuzz
+$ cargo +nightly fuzz run read_path -- -rss_limit_mb=2048 -timeout=25
+```
+
+Nightly is required; `cargo-fuzz` builds with `-Zsanitizer=address`. Stop it
+with Ctrl-C. A finding is written to `fuzz/artifacts/<target>/` and replayed
+with:
+
+```console
+$ cargo +nightly fuzz run read_path fuzz/artifacts/read_path/crash-<hash>
+```
+
+`cargo fuzz tmin` shrinks it before you go looking for the cause.
+
+### The flags are not optional
+
+- **`-rss_limit_mb`** is what turns a runaway allocation into a *reported*
+  finding. Without it libFuzzer's default still applies, but stating it keeps
+  the number the same between a laptop and CI.
+- **`-timeout`** is what turns a hang into one. This matters more here than
+  it looks: the sixth defect was a hang, not a crash, and a target without a
+  timeout simply appears to be working hard.
+
+## The targets
+
+| | |
+|---|---|
+| `read_path` | The whole read path, from `scan` through to an array's decoded elements. Driven by the block layer and the datatypes. |
+| `render_tree` | `info::render` and the event stream. Driven by the tree's anchor and alias graph. |
+
+They are split because they explore different things. Both findings in the
+alias graph came from inputs that a block-layer-driven target would take a
+long time to reach, and vice versa.
+
+`read_path` is deliberately wider than the API most callers use. That is the
+lesson of the review: `robustness.rs` stopped at the block layer, so it never
+decoded an array, and three of five findings lived past that line. **A target
+that stops where the old test stopped would have found none of them.**
+
+## The corpus
+
+Two corpora, and only one of them is committed.
+
+**Committed** — `fuzz/corpus/<target>/`, about 76 KB. Every file is there
+because it once broke something: the hand-crafted attacks from
+[`SECURITY-REVIEW.md`](SECURITY-REVIEW.md), and `regress-lz4-chunk-oom`,
+which is the fuzzer's own output from finding 6. Replaying it is a regression
+test with better provenance than anything written by hand, and it stays small
+enough that CI replays it in under a second.
+
+**Local** — a working corpus for actually fuzzing, which after an hour is tens
+of megabytes and has no business in git. Seed it from the checkouts
+[`DEVELOPING.md`](DEVELOPING.md#the-corpora) describes:
+
+```console
+$ find ~/code/asdf-standard ~/code/libasdf/tests/fixtures -name '*.asdf' \
+>     -exec cp {} fuzz/corpus/read_path/ \;
+```
+
+Run `cargo fuzz cmin <target>` when it gets unwieldy — it prunes to a minimal
+set with the same coverage. **Then put the committed set back**, or a
+`git add` sweeps thousands of generated files into the repo. Only promote a
+generated input to the committed corpus when it is a finding, and give it a
+name that says what it is.
+
+The reference files are not committed here because they already exist in the
+`asdf-standard` checkout the rest of the suite needs; duplicating them would
+be 700 KB of the same bytes.
+
+## What CI does, and does not, do
+
+CI builds both targets, replays the committed corpus, and runs a two-minute
+campaign. That is enough to catch the targets rotting when an API they drive
+changes, and enough to catch the corpus regressing. **It is not enough to find
+anything new.** A real campaign is hours on one machine, and belongs off the
+pull-request path.
+
+## What it found
+
+Two defects in its first two hours, on top of the five the review had found by
+reading. Both are written up in
+[`SECURITY-REVIEW.md`](SECURITY-REVIEW.md) as findings 5 and 6, and both make
+the same point:
+
+> A bound placed after the allocation it is meant to prevent is not a bound.
+
+The second one, in particular, was a hole in a fix written three days earlier
+while looking directly at the function it was in.
+
+The first is worth reading in full as a lesson about targeted fixes:
+
+The review found that `asdf info` expanded YAML aliases without bound, and
+fixed it with a rendering budget. The fuzzer then hung for fifteen minutes
+on the *same input* in `read_path`, which never calls `info::render` at all.
+The alias bomb had a second route: `Ndarray::parse` treats a bare nested
+sequence as an inline array and calls `survey_inline` to infer its datatype,
+which walks every element following aliases, with no memo and no depth bound.
+Same 10^10 nodes, different function, untouched by the fix.
+
+Two more of its kind were next to it once the first was found —
+`infer_inline_shape` looping for ever on `a: &a [*a]`, and `collect_inline`
+materialising the expansion — so the fix bounds all three: inline arrays are
+now bounded by the document's node count, exactly as block-backed arrays are
+bounded by their block's length.
+
+The moral is not that the first fix was wrong. It is that a fix aimed at one
+function is a fix to one function, and only something that explores the whole
+input space knows how many other ways in there are.
+
+The second finding made the same point about the *shape* of a fix rather than
+its location. Finding 1 had bounded LZ4 decompression by accumulating each
+chunk's output against the block's declared size — correct, and one line too
+late, because python-lz4's framing has each chunk declare its own size and
+`lz4_flex` allocates from that declaration before decoding. Four bytes asked
+for 4.28 GB.

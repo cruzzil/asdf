@@ -88,6 +88,25 @@ jobs:
           LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf
         run: cargo test --workspace
 
+      # The hostile-input suite, run the two ways it fails differently.
+      #
+      # Under a 4 GB address-space cap, because the failure it guards against
+      # is an allocation nothing justifies -- uncapped, a regression swaps the
+      # runner to death for ten minutes instead of failing in seconds.
+      #
+      # And in release, because a debug build catches an arithmetic overflow
+      # with a panic while a release build wraps silently, and the wrapped
+      # value is what walks past a size check. Both builds are worth running;
+      # they fail in different places.
+      - name: Robustness (capped, release)
+        if: matrix.unix
+        env:
+          ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
+          LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf
+        run: |
+          cargo build --release -p asdf-core --tests
+          ( ulimit -v 4194304; cargo test --release -p asdf-core --test robustness )
+
       # Real C programs against the vendored headers: symbols, struct layouts,
       # enum discriminants, the `_Generic` macros, and an extension
       # registering before `main`. Run separately so its counts appear in the
@@ -187,6 +206,47 @@ jobs:
           cargo doc -p libasdf-rs --no-deps --target-dir target/doc-ffi
 
   # The declared `rust-version` is a promise to dependants, so it is checked
+  # The fuzz targets, built and smoke-run.
+  #
+  # CI cannot fuzz for long enough to find anything new, and that is not what
+  # this job is for. It is for the two ways the targets rot: they stop
+  # compiling when an API they drive changes, and the committed corpus stops
+  # replaying clean. The second is the one that matters -- the corpus holds
+  # every input that has ever been a finding, so replaying it is a regression
+  # test with better provenance than anything written by hand.
+  #
+  # A real campaign runs elsewhere, for hours. See docs/FUZZING.md.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target\nfuzz -> fuzz/target"
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Build the targets
+        run: cargo +nightly fuzz build
+        working-directory: fuzz
+      # -runs=0 replays the committed corpus and exits. A crash, an OOM past
+      # the RSS limit, or a unit slower than the timeout all fail the job.
+      - name: Replay the corpus
+        run: |
+          cargo +nightly fuzz run read_path -- \
+              -runs=0 -rss_limit_mb=2048 -timeout=25
+          cargo +nightly fuzz run render_tree -- \
+              -runs=0 -rss_limit_mb=2048 -timeout=25
+        working-directory: fuzz
+      # A brief campaign on top, which is free and occasionally lucky.
+      - name: Short campaign
+        run: |
+          cargo +nightly fuzz run read_path -- \
+              -max_total_time=120 -rss_limit_mb=2048 -timeout=25
+          cargo +nightly fuzz run render_tree -- \
+              -max_total_time=120 -rss_limit_mb=2048 -timeout=25
+        working-directory: fuzz
+
   # rather than asserted.
   msrv:
     runs-on: ubuntu-latest

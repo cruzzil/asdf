@@ -1,7 +1,8 @@
 # Security review: handling untrusted input
 
 Conducted 2026-09-16 against the tree at the libasdf 0.2.0 sync, by reading
-the read path and then trying to break it. Every finding below was
+the read path and then trying to break it, and extended on 2026-09-19 by the
+fuzz targets in [`FUZZING.md`](FUZZING.md). Every finding below was
 **reproduced**, not inferred; each now has a regression test.
 
 ## Threat model
@@ -36,7 +37,10 @@ and the mechanism that was supposed to prevent it never applied.
 
 ## Findings
 
-All five are fixed. Severities are as assessed at the time of the review.
+All seven are fixed. Five came from the review itself; two came from the fuzz
+targets the review recommended -- the first before they had generated a single
+input of their own, the second after two hours of running. Severities are as
+assessed at the time.
 
 ### 1. A decompression bomb evaded the guard by lying downwards — High
 
@@ -141,7 +145,76 @@ this reason — and simply had not been applied here.
 
 Pinned by `aborts::a_self_referential_alias_does_not_recurse_for_ever`.
 
-### 5. External sources could be escaped with a symlink — Low
+### 5. The alias bomb had a second route, through inline arrays — High
+
+**Found by the fuzz target, after the other five were fixed.** Worth the
+separate entry, because of how it was missed.
+
+Finding 3 fixed alias expansion in `asdf info` with a rendering budget. The
+`read_path` fuzz target then hung for fifteen minutes on the *same input* —
+and it never calls `info::render`. The bomb had another way in:
+`Ndarray::parse` treats a bare nested sequence as an inline array and calls
+`survey_inline` to infer its datatype, which walks every element following
+aliases, with no memo and no depth bound. The same 10^10 nodes, in a function
+the earlier fix never looked at, and one that *every* caller reading an array
+goes through.
+
+Two neighbours came out with it once the first was found:
+
+- `infer_inline_shape` follows the first element down to learn the shape.
+  `a: &a [*a]` — **ten bytes** — makes that descent a cycle, and it pushes a
+  dimension per iteration for ever.
+- `collect_inline` would then faithfully materialise the expansion.
+
+**Fixed** by bounding all three the way `decode_all` is bounded, and on the
+same principle: a block-backed array is bounded by its block's length, so an
+inline array is bounded by its document's node count. Every element of a real
+inline array is a scalar node; a shape calling for more elements than the tree
+has nodes can only be alias expansion. `survey_inline` also gets a visit
+budget and a depth cap, and `infer_inline_shape` stops when the descent
+returns to where it has been.
+
+Pinned by `aborts::nested_aliases_do_not_explode_the_inline_array_walk` and
+`aborts::a_cyclic_inline_sequence_does_not_loop`.
+
+The lesson is not that finding 3's fix was wrong. It is that **a fix aimed at
+one function fixes one function**, and only something that explores the whole
+input space knows how many other ways in there are. See
+[`FUZZING.md`](FUZZING.md).
+
+### 6. An LZ4 chunk allocated from its own four-byte header — High
+
+**Found by the fuzz target**, two hours after finding 5, and a repeat of the
+same mistake in a different place.
+
+Finding 1 bounded decompression by the block header's declared `data_size`,
+and for LZ4 did it by accumulating chunk by chunk:
+
+```rust
+let decoded = lz4_flex::block::decompress_size_prepended(chunk)?;  // allocates here
+if out.len() + decoded.len() > expected { ... }                    // checks here
+```
+
+python-lz4's framing prepends a little-endian decompressed size to every
+chunk, and `decompress_size_prepended` allocates from it *before* it decodes
+anything. The check is one line too late. Four bytes of `0xff` in a 4 KB file
+requested **4.28 GB**, which is what libFuzzer's `-rss_limit_mb` reported.
+
+**Fixed** by reading the chunk's declared size directly and refusing it
+against the remaining budget *before* handing the chunk to the decoder, with
+the post-decode check kept as a second line in case the decoder does not
+honour its own header.
+
+Pinned by `compression::tests::an_lz4_chunk_may_not_allocate_from_its_own_header`,
+and the fuzzer's own input is committed at
+`fuzz/corpus/read_path/regress-lz4-chunk-oom`.
+
+Note the shape of this, because it is the same shape as finding 5: **a bound
+placed after the allocation it is meant to prevent is not a bound.** Both
+fixes were written while looking at the right function, and both left a
+window open one call deeper.
+
+### 7. External sources could be escaped with a symlink — Low
 
 `reader::external_relative_path` rejects absolute paths, `..` components,
 drive and UNC prefixes, and anything with a scheme — a careful lexical check.
@@ -176,6 +249,12 @@ wrong assertion. Every one of these already passed it: an abort is not a
 panic, so a test that catches unwinding sees nothing. The new cases assert
 what is *refused*, and would have failed before the fix.
 
+A fourth, learned from finding 5: **a hang is a finding too**, and no
+assertion catches one. `robustness.rs` would have sat in the alias bomb until
+the CI runner timed out, reporting nothing useful. That is what
+`-timeout` on a fuzz target is for, and why CI now runs the suite under
+`ulimit -v` — both turn "still working" into a failure.
+
 ## Not findings
 
 Checked and found sound, recorded so the next reviewer can skip them:
@@ -187,7 +266,9 @@ Checked and found sound, recorded so the next reviewer can skip them:
 - **YAML nesting depth.** saphyr enforces a recursion limit; a million
   brackets is refused at the parser, not at the stack.
 - **`tree_inlined` alias handling.** Does not expand aliases eagerly, so the
-  bomb in finding 3 does not reach it.
+  bomb in finding 3 does not reach it. Note what this checked and what it did
+  not: `tree_inlined` was clean, and the *array* walk one call away was not.
+  Finding 5 is what that gap cost.
 - **Path traversal, lexically.** The component-by-component check is correct
   and was only missing the symlink case.
 
@@ -204,15 +285,36 @@ Checked and found sound, recorded so the next reviewer can skip them:
   it means giving up mapping, which is what makes a multi-gigabyte array
   readable at all. Recorded rather than changed.
 
+## Done since
+
+All three follow-ups the review named, with one revised by measurement.
+
+- **The `cargo-fuzz` targets** are in `fuzz/`, seeded from the reference
+  corpus, upstream's fixtures and the attacks above. They found finding 5 on
+  the first corpus replay. [`FUZZING.md`](FUZZING.md).
+- **`clippy::arithmetic_side_effects`** is denied — but on the *functions*
+  that turn file-controlled numbers into an extent, not on whole modules as
+  originally suggested. Measured, the module-wide form was 39 hits across
+  five files, nearly all of them loop indices; that volume of `#[allow]`
+  trains a reader to add another without thinking, which is how the next real
+  one gets through. Scoped to the extent-computing functions it is 4 hits,
+  **one of which was a real bug** — `strides[dim] * idx` in `decode_all`,
+  with both operands straight from the file. Now checked.
+- **CI runs the robustness suite capped and in release** (`ulimit -v`
+  4 GB), so a regression of finding 2 fails in seconds rather than swapping
+  the runner, and one of the arithmetic kind fails at all.
+
 ## Worth doing next
 
-- **A `cargo-fuzz` target**, seeded from the reference corpus and from the
-  five files in these findings. `robustness.rs` says in its own header that
-  one belongs beside it. Every finding here was reachable in a handful of
-  mutations; a fuzzer would have found them unaided.
-- **`clippy::arithmetic_side_effects`**, denied on the modules that compute
-  sizes from file-controlled numbers. Four of the five findings were an
-  unchecked multiply, and the lint names them all.
-- **Run the robustness suite under a memory cap in CI** (`ulimit -v`), so a
-  regression of finding 2 fails the build in seconds rather than swapping the
-  runner to death.
+- **A longer fuzz campaign, off the pull-request path.** CI's two minutes
+  catches rot, not novelty. Hours on one machine is where the next one comes
+  from.
+- **A structured-input fuzz target.** Both current targets mutate raw bytes,
+  so most inputs die at the header. One that generates well-formed files with
+  hostile *trees* would reach the parts of the tree walk that raw mutation
+  rarely does.
+- **Audit every remaining "allocate then check".** Findings 5 and 6 were both
+  a bound placed after the allocation it guards. That is a shape worth
+  grepping for deliberately rather than waiting to trip over: any
+  `with_capacity`, `vec![_; n]` or third-party decoder call whose size comes
+  from the file, with its validation on a later line.

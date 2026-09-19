@@ -499,6 +499,69 @@ mod aborts {
         assert!(rendered.contains("(...)"), "the cycle should be marked, not followed");
     }
 
+    /// Nested aliases must not expand without bound on the *array* path
+    /// either.
+    ///
+    /// Found by the fuzz target, not by reading: `read_path` replayed the
+    /// seed corpus for fifteen minutes without finishing. The budget added
+    /// for `asdf info` did not cover this, because it is a different walk --
+    /// `Ndarray::parse` treats a bare nested sequence as an inline array and
+    /// surveys every element to infer a datatype, so the same 10^10 nodes
+    /// get visited somewhere the earlier fix never looked.
+    #[test]
+    fn nested_aliases_do_not_explode_the_inline_array_walk() {
+        use asdf_core::core::elements::decode_inline;
+        use asdf_core::core::ndarray::{Ndarray, Source};
+
+        let mut tree = String::from("a: &a [1,1,1,1,1,1,1,1,1,1]\n");
+        let mut prev = 'a';
+        for name in "bcdefghij".chars() {
+            tree.push_str(&format!("{name}: &{name} ["));
+            tree.push_str(&vec![format!("*{prev}"); 10].join(","));
+            tree.push_str("]\n");
+            prev = name;
+        }
+        let mut f = HEADER.to_vec();
+        f.extend_from_slice(tree.as_bytes());
+        f.extend_from_slice(b"...\n");
+
+        let reader = Reader::from_bytes(f).expect("well formed");
+        let doc = reader.tree().unwrap().unwrap();
+        let root = doc.root().unwrap();
+
+        // Every top-level value, which is what a caller reading arrays does.
+        let entries = match &doc.node(doc.resolve(root)).data {
+            asdf_core::yaml::NodeData::Mapping { entries, .. } => entries.clone(),
+            other => panic!("expected a mapping, got {other:?}"),
+        };
+        for entry in entries {
+            // Parsing must return rather than survey 10^10 aliased nodes.
+            let Ok(nd) = Ndarray::parse(&doc, entry.value) else { continue };
+            let Ok(shape) = nd.resolved_shape(None) else { continue };
+            if let Source::Inline(_) = nd.source {
+                // And decoding must refuse: a tree of this size cannot hold
+                // the elements the shape implies.
+                let _ = decode_inline(&doc, &nd, &shape);
+            }
+        }
+    }
+
+    /// An inline array whose first element aliases its own sequence must not
+    /// make the shape walk loop.
+    #[test]
+    fn a_cyclic_inline_sequence_does_not_loop() {
+        let mut f = HEADER.to_vec();
+        f.extend_from_slice(b"a: &a [*a]\n...\n");
+        let reader = Reader::from_bytes(f).expect("well formed");
+        let doc = reader.tree().unwrap().unwrap();
+        let root = doc.root().unwrap();
+        let node = doc.mapping_get(root, "a").expect("a is present");
+
+        let nd = asdf_core::core::ndarray::Ndarray::parse(&doc, node).expect("parses");
+        let shape = nd.resolved_shape(None).expect("a shape");
+        assert!(shape.len() <= 64, "the shape walk followed the cycle {} deep", shape.len());
+    }
+
     /// Nested aliases must not expand without bound.
     ///
     /// Ten levels of ten-way nesting is 10^10 nodes from a few hundred

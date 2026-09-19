@@ -154,6 +154,7 @@ fn decode_one(datatype: &Datatype, bytes: &[u8], array_order: ByteOrder) -> Resu
 ///
 /// `shape` must be fully resolved. Strides, when present, are honoured, so a
 /// tile view or a Fortran-order array reads correctly.
+#[deny(clippy::arithmetic_side_effects)]
 pub fn decode_all(nd: &Ndarray, shape: &[u64], bytes: &[u8]) -> Result<Vec<Element>> {
     let item = nd.datatype.item_size();
     if item == 0 {
@@ -206,9 +207,23 @@ pub fn decode_all(nd: &Ndarray, shape: &[u64], bytes: &[u8]) -> Result<Vec<Eleme
 
     for _ in 0..count {
         // Byte position of this element, from the per-dimension strides.
-        let mut pos = base as i64;
+        //
+        // Both halves come from the file -- `strides` verbatim from the tree
+        // and `index` from the shape -- so the product is checked. Unchecked
+        // it panics in debug and wraps in release, and a wrapped position
+        // reads a different element than the one asked for: bounds-checked,
+        // so not unsafe, but silently the wrong number, which in a data
+        // format is its own kind of wrong.
+        let mut pos = i64::try_from(base)
+            .map_err(|_| err!(InvalidArgument, "ndarray offset overflows this platform"))?;
         for (dim, idx) in index.iter().enumerate() {
-            pos += strides[dim] * (*idx as i64);
+            let step = i64::try_from(*idx)
+                .ok()
+                .and_then(|i| strides[dim].checked_mul(i))
+                .ok_or_else(|| err!(OverLimit, "strides address a position past 64 bits"))?;
+            pos = pos
+                .checked_add(step)
+                .ok_or_else(|| err!(OverLimit, "strides address a position past 64 bits"))?;
         }
         let pos = usize::try_from(pos)
             .map_err(|_| err!(InvalidArgument, "strides address a negative offset"))?;
@@ -218,7 +233,10 @@ pub fn decode_all(nd: &Ndarray, shape: &[u64], bytes: &[u8]) -> Result<Vec<Eleme
         })?;
         out.push(decode_one(&nd.datatype, slice, nd.byteorder)?);
 
-        // Odometer step, last dimension fastest.
+        // Odometer step, last dimension fastest. Each counter is compared
+        // against its own dimension immediately after, so it cannot run past
+        // it, and `count` above is already bounded by the block's length.
+        #[allow(clippy::arithmetic_side_effects, reason = "bounded by shape[dim] on the next line")]
         for dim in (0..shape.len()).rev() {
             index[dim] += 1;
             if index[dim] < shape[dim] {
@@ -249,9 +267,22 @@ pub fn decode_inline(doc: &Document, array: &Ndarray, shape: &[u64]) -> Result<V
     };
 
     let expected = crate::core::ndarray::element_count(shape)?;
-    // Inline data is bounded by the tree that carries it, so the shape is
-    // checked against what is actually there rather than trusted to size a
-    // reservation. `collect_inline` grows the vector as it walks.
+
+    // Inline data is bounded by the tree that carries it, exactly as a
+    // block-backed array is bounded by its block. Every element of a real
+    // inline array is a scalar node, so a shape calling for more elements
+    // than the document has nodes can only be alias expansion -- one node
+    // standing in for a subtree, over and over. `collect_inline` would
+    // faithfully materialise all 10^10 of them.
+    let ceiling = doc.node_count() as u64;
+    if expected > ceiling {
+        return Err(err!(
+            InvalidArgument,
+            "inline array of {expected} elements, but the whole tree holds only \
+             {ceiling} nodes"
+        ));
+    }
+
     let mut out = Vec::new();
     collect_inline(doc, root, &array.datatype, shape, &mut out)?;
 
@@ -275,6 +306,14 @@ fn collect_inline(
 ) -> Result<()> {
     let resolved = doc.resolve(node);
 
+    if shape.len() > MAX_INLINE_DEPTH {
+        return Err(err!(
+            InvalidArgument,
+            "inline array is nested {} deep, past the {MAX_INLINE_DEPTH}-dimension limit",
+            shape.len()
+        ));
+    }
+
     let Some((dim, rest)) = shape.split_first() else {
         // Past the last dimension: this is one element.
         out.push(leaf_element(doc, resolved, datatype)?);
@@ -296,6 +335,13 @@ fn collect_inline(
     }
     Ok(())
 }
+
+/// The deepest nesting `collect_inline` will follow.
+///
+/// Its recursion is driven by `shape`, so this only bites for a shape that
+/// came from somewhere other than `infer_inline_shape` -- a `shape` key in
+/// the tree, which is attacker-controlled and need not be short.
+const MAX_INLINE_DEPTH: usize = 64;
 
 /// Read one element: a scalar, or a record for a compound datatype.
 fn leaf_element(doc: &Document, node: NodeId, datatype: &Datatype) -> Result<Element> {
@@ -513,6 +559,20 @@ pub fn inline_ndarray(
     elements: &[Element],
     shape: &[u64],
 ) -> Result<()> {
+    // `nest` reserves a dimension at a time and indexes `elements` as it
+    // goes, so a shape that does not describe these elements is an
+    // allocation from an unvalidated number followed by an out-of-bounds
+    // index. This is a public entry point, so the two are not guaranteed to
+    // agree just because every caller in this crate makes them.
+    let expected = crate::core::ndarray::element_count(shape)?;
+    if expected != elements.len() as u64 {
+        return Err(err!(
+            InvalidArgument,
+            "shape {shape:?} describes {expected} elements but {} were given",
+            elements.len()
+        ));
+    }
+
     let data = nest(doc, elements, shape);
     let target = doc.resolve(id);
 

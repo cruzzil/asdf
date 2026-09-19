@@ -201,7 +201,16 @@ pub unsafe extern "C" fn asdf_block_create(data: *const c_void, size: usize) -> 
         let payload = if !data.is_null() {
             BlockData::Borrowed { ptr: data.cast::<u8>(), len: size }
         } else if size > 0 {
-            BlockData::Owned(vec![0u8; size])
+            // `block.h` says this returns NULL on failure, so a size the
+            // allocator cannot satisfy has to come back as NULL rather than
+            // abort the caller's process -- which is what `vec![0u8; size]`
+            // does, and which no panic guard can intercept.
+            let mut buf = Vec::new();
+            if buf.try_reserve_exact(size).is_err() {
+                return core::ptr::null_mut();
+            }
+            buf.resize(size, 0);
+            BlockData::Owned(buf)
         } else {
             BlockData::Empty
         };

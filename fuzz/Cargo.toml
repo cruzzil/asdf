@@ -1,0 +1,33 @@
+# Deliberately its own workspace, not a member of the root one.
+#
+# `cargo-fuzz` builds with `-Zsanitizer=address`, which has to apply to the
+# whole dependency graph including `std`. Making this a workspace member
+# would put those flags on every ordinary `cargo build` in the repo.
+[package]
+name = "asdf-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+asdf-core = { path = "../crates/asdf-core" }
+
+[[bin]]
+name = "read_path"
+path = "fuzz_targets/read_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "render_tree"
+path = "fuzz_targets/render_tree.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

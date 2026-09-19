@@ -94,7 +94,8 @@ test, and run it in release as well as debug, because that is where an
 arithmetic overflow stops panicking and starts wrapping.
 
 [`SECURITY-REVIEW.md`](SECURITY-REVIEW.md) has the findings and what each one
-cost.
+cost, and [`FUZZING.md`](FUZZING.md) the targets that found the two the
+reading missed.
 
 ### Miri, and why it is not optional
 

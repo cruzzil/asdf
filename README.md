@@ -197,7 +197,8 @@ which upstream libasdf does not do either.
 | [`KNOWN-DIVERGENCES.md`](KNOWN-DIVERGENCES.md) | Deliberate differences from upstream libasdf and from Python `asdf`, each with the test that pins it. |
 | [`SYNC_COMMIT.md`](SYNC_COMMIT.md) | The libasdf commit this implementation is synchronised with. |
 | [`docs/UPSTREAM-SYNC.md`](docs/UPSTREAM-SYNC.md) | What moving that commit involves. |
-| [`docs/SECURITY-REVIEW.md`](docs/SECURITY-REVIEW.md) | How untrusted files are handled, and the five findings that changed it. |
+| [`docs/SECURITY-REVIEW.md`](docs/SECURITY-REVIEW.md) | How untrusted files are handled, and the seven findings that changed it. |
+| [`docs/FUZZING.md`](docs/FUZZING.md) | The `cargo-fuzz` targets, and what they found. |
 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | Benchmarks, how they are run, and how this compares to the reference implementation. |
 | [`CHANGELOG.md`](CHANGELOG.md) | What has changed. |
 

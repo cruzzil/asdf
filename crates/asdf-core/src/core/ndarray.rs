@@ -84,10 +84,43 @@ pub fn infer_inline_datatype(doc: &Document, node: NodeId) -> ScalarType {
 
 /// Walk an inline array's values, recording what types they need.
 fn survey_inline(doc: &Document, node: NodeId, seen: &mut InlineTypes) {
+    survey_inline_bounded(doc, node, seen, 0, &mut inline_budget(doc));
+}
+
+/// The deepest nesting any of the inline walkers will follow.
+///
+/// Well past the 32 dimensions numpy allows, and far short of what it takes
+/// to overflow a stack.
+const MAX_INLINE_DEPTH: usize = 64;
+
+/// How many nodes an inline walk may visit before giving up.
+///
+/// A YAML alias lets one node stand in for a whole subtree, so the number of
+/// nodes a walk *visits* is not bounded by the number the document *holds*:
+/// ten anchors each aliasing the one before, ten ways, is 10^10 visits from a
+/// few hundred bytes. Real inline data has one node per element, so allowing
+/// a generous multiple of the document's size costs a legitimate file
+/// nothing and stops that cold.
+fn inline_budget(doc: &Document) -> u64 {
+    (doc.node_count() as u64).saturating_mul(8).max(1024)
+}
+
+fn survey_inline_bounded(
+    doc: &Document,
+    node: NodeId,
+    seen: &mut InlineTypes,
+    depth: usize,
+    budget: &mut u64,
+) {
+    if depth > MAX_INLINE_DEPTH || *budget == 0 {
+        return;
+    }
+    *budget -= 1;
+
     let resolved = doc.resolve(node);
     if let Some(items) = doc.sequence_items(resolved).map(<[_]>::to_vec) {
         for item in items {
-            survey_inline(doc, item, seen);
+            survey_inline_bounded(doc, item, seen, depth + 1, budget);
         }
         return;
     }
@@ -244,6 +277,7 @@ impl Ndarray {
     ///
     /// A streamed array's first dimension is `*` in the file and is derived
     /// from how many whole rows the block holds.
+    #[deny(clippy::arithmetic_side_effects)]
     pub fn resolved_shape(&self, block_bytes: Option<u64>) -> Result<Vec<u64>> {
         let item = self.datatype.item_size();
         let mut out = Vec::with_capacity(self.shape.len());
@@ -258,6 +292,10 @@ impl Ndarray {
                             "shape dimension {idx} is '*' but no block size is available"
                         )
                     })?;
+                    #[allow(
+                        clippy::arithmetic_side_effects,
+                        reason = "idx indexes self.shape, so idx + 1 is at most its length"
+                    )]
                     let row: u64 = self.shape[idx + 1..]
                         .iter()
                         .map(|d| d.unwrap_or(1))
@@ -266,6 +304,10 @@ impl Ndarray {
                     let row_bytes = row.checked_mul(item).filter(|b| *b != 0).ok_or_else(|| {
                         err!(InvalidArgument, "cannot size a '*' dimension with a zero-width row")
                     })?;
+                    #[allow(
+                        clippy::arithmetic_side_effects,
+                        reason = "row_bytes was filtered non-zero just above"
+                    )]
                     out.push(bytes / row_bytes);
                 }
             }
@@ -300,6 +342,7 @@ impl Ndarray {
     /// `None` when the shape is too large to stride, rather than a wrapped
     /// value: a wrapped stride silently addresses the wrong element, which
     /// for a data format is worse than refusing to read.
+    #[deny(clippy::arithmetic_side_effects)]
     pub fn c_strides(shape: &[u64], item_size: u64) -> Option<Vec<i64>> {
         let mut strides = vec![0i64; shape.len()];
         let mut acc = i64::try_from(item_size).ok()?;
@@ -344,6 +387,7 @@ fn parse_source(doc: &Document, id: NodeId) -> Result<Source> {
 /// `[(1 << 63) + 1, 2]` wraps to two -- either of which walks straight past
 /// a "does the block hold this much?" check that is done in the same
 /// arithmetic.
+#[deny(clippy::arithmetic_side_effects)]
 pub fn element_count(shape: &[u64]) -> Result<u64> {
     let mut count: u64 = 1;
     for dim in shape {
@@ -360,10 +404,24 @@ fn infer_inline_shape(doc: &Document, id: NodeId) -> Vec<Option<u64>> {
     let mut current = id;
     // Follow the first element down; a ragged array is not valid ASDF, so the
     // first branch describes the whole.
+    //
+    // `a: &a [*a]` makes that descent a cycle -- the first element resolves
+    // back to the sequence it came from -- so the walk is bounded as well as
+    // followed. Without the bound it pushes a dimension per iteration and
+    // never returns.
     while let Some(items) = doc.sequence_items(current) {
+        if shape.len() >= MAX_INLINE_DEPTH {
+            break;
+        }
         shape.push(Some(items.len() as u64));
         match items.first() {
-            Some(first) => current = doc.resolve(*first),
+            Some(first) => {
+                let next = doc.resolve(*first);
+                if next == current {
+                    break;
+                }
+                current = next;
+            }
             None => break,
         }
     }
