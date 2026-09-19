@@ -90,22 +90,30 @@ jobs:
 
       # The hostile-input suite, run the two ways it fails differently.
       #
-      # Under a 4 GB address-space cap, because the failure it guards against
-      # is an allocation nothing justifies -- uncapped, a regression swaps the
-      # runner to death for ten minutes instead of failing in seconds.
+      # In release, because a debug build catches an arithmetic overflow with
+      # a panic while a release build wraps silently, and the wrapped value is
+      # what walks past a size check. Both builds are worth running; they fail
+      # in different places.
       #
-      # And in release, because a debug build catches an arithmetic overflow
-      # with a panic while a release build wraps silently, and the wrapped
-      # value is what walks past a size check. Both builds are worth running;
-      # they fail in different places.
-      - name: Robustness (capped, release)
+      # And under a 4 GB address-space cap where the platform has one, because
+      # the failure it guards against is an allocation nothing justifies --
+      # uncapped, a regression swaps the runner to death for ten minutes
+      # instead of failing in seconds. Darwin has no working `ulimit -v`, so
+      # there the release run stands on its own and the log says so rather
+      # than implying a cap that is not there.
+      - name: Robustness (release, capped where supported)
         if: matrix.unix
         env:
           ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
           LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf
         run: |
           cargo build --release -p asdf-core --tests
-          ( ulimit -v 4194304; cargo test --release -p asdf-core --test robustness )
+          if ulimit -v 4194304 2>/dev/null; then
+            echo "address space capped at 4 GB"
+          else
+            echo "note: no usable 'ulimit -v' here; running uncapped"
+          fi
+          cargo test --release -p asdf-core --test robustness
 
       # Real C programs against the vendored headers: symbols, struct layouts,
       # enum discriminants, the `_Generic` macros, and an extension
