@@ -14,6 +14,15 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-19
+
+`asdf-core` and `libasdf-rs`. The other three crates are unchanged and stay at
+0.2.0; both fixed crates are a patch bump, so a dependant already asking for
+`^0.2.0` picks them up without needing a release of its own.
+
+A security release. Everything here is a fix or the machinery that found it --
+no API changed.
+
 ### Security
 
 Two more findings, both from the `cargo-fuzz` targets that [0.2.0]'s review
@@ -359,7 +368,8 @@ is listed here so the first release notes are not written from scratch.
 - `asdf-core` reads a file whole rather than mapping it under `cfg(miri)`, so
   dependants can run Miri.
 
-[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/cruzzil/asdf/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/cruzzil/asdf/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/cruzzil/asdf/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/cruzzil/asdf/compare/v0.1.2...v0.1.3
