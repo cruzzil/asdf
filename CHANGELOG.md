@@ -14,6 +14,14 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-19
+
+`asdf-core` only. The other four crates are unchanged and stay where they are;
+`^0.2.0` matches this, so every one of them picks it up without a release of
+its own.
+
+No API changed.
+
 ### Security
 
 - **Rendering a tree bounded memory but not work.** 0.2.0 capped `asdf info`'s
@@ -397,7 +405,8 @@ is listed here so the first release notes are not written from scratch.
 - `asdf-core` reads a file whole rather than mapping it under `cfg(miri)`, so
   dependants can run Miri.
 
-[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/cruzzil/asdf/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/cruzzil/asdf/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/cruzzil/asdf/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/cruzzil/asdf/compare/v0.1.3...v0.1.4
