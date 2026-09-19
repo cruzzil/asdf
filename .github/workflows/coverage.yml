@@ -12,7 +12,7 @@ jobs:
       ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
       LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust
         run: rustup update stable
       - name: Output rust version for educational purposes
@@ -25,12 +25,12 @@ jobs:
       # library but of the subset that needs no fixtures. A misleading
       # coverage figure is worse than none.
       - name: Check out the ASDF Standard
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: asdf-format/asdf-standard
           path: corpora/asdf-standard
       - name: Check out libasdf
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: asdf-format/libasdf
           path: corpora/libasdf
@@ -69,9 +69,18 @@ jobs:
           asdf || true
 
           cargo llvm-cov report --lcov --output-path lcov.info
+      # `fail_ci_if_error` is deliberately on. It defaults to off, which
+      # means a failed upload still leaves the job green -- and the first run
+      # of this workflow did exactly that, reporting success while Codecov
+      # rejected all three calls with "Token required because branch is
+      # protected". A job that passes while doing nothing is worse than no
+      # job, so this one is allowed to fail.
+      #
+      # It needs CODECOV_TOKEN set as a repository secret.
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: cruzzil/asdf
           files: lcov.info
+          fail_ci_if_error: true

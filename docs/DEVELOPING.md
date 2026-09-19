@@ -102,11 +102,19 @@ reading missed.
 `.github/workflows/coverage.yml` publishes to Codecov. The number is worth
 having as a way to find code nothing exercises; it is not worth chasing.
 
-One thing about it does matter: **it checks out both corpora and drives the
-CLI.** Without the corpora the corpus, reference-pairs, golden and
-upstream-suite tests all skip, and what comes back is the coverage of the
-subset that needs no fixtures -- a number that looks fine and means nothing.
-The same trap as a green `cargo test` on a bare clone, and the same fix.
+Two things about it do matter.
+
+**It checks out both corpora and drives the CLI.** Without the corpora the
+corpus, reference-pairs, golden and upstream-suite tests all skip, and what
+comes back is the coverage of the subset that needs no fixtures -- a number
+that looks fine and means nothing. The same trap as a green `cargo test` on a
+bare clone, and the same fix.
+
+**It fails when the upload fails.** `codecov-action` defaults to leaving the
+job green when it cannot upload, and the workflow's first run did exactly
+that: three rejected calls, `Token required because branch is protected`, and
+a green tick. It needs `CODECOV_TOKEN` in the repository's secrets; without
+it the job now goes red instead of pretending.
 
 ### Miri, and why it is not optional
 
