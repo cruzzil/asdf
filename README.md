@@ -1,5 +1,5 @@
 [![CI](https://github.com/cruzzil/asdf/actions/workflows/ci.yml/badge.svg)](https://github.com/cruzzil/asdf/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/cruzzil/asdf/graph/badge.svg)](https://codecov.io/gh/cruzzil/asdf)
+[![codecov](https://codecov.io/gh/cruzzil/asdf/graph/badge.svg?token=lHxH0FeUgp)](https://codecov.io/gh/cruzzil/asdf)
 [![Dependency status](https://deps.rs/repo/github/cruzzil/asdf/status.svg)](https://deps.rs/repo/github/cruzzil/asdf)
 
 | Crate | Version | Docs | |
