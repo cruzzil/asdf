@@ -110,11 +110,20 @@ comes back is the coverage of the subset that needs no fixtures -- a number
 that looks fine and means nothing. The same trap as a green `cargo test` on a
 bare clone, and the same fix.
 
-**It fails when the upload fails.** `codecov-action` defaults to leaving the
-job green when it cannot upload, and the workflow's first run did exactly
-that: three rejected calls, `Token required because branch is protected`, and
-a green tick. It needs `CODECOV_TOKEN` in the repository's secrets; without
-it the job now goes red instead of pretending.
+**It fails when the upload fails -- but only when it could have uploaded.**
+`codecov-action` defaults to leaving the job green when it cannot upload, and
+the workflow's first run did exactly that: three rejected calls, `Token
+required because branch is protected`, and a green tick. So
+`fail_ci_if_error` is on.
+
+The step is skipped outright when no token is present, which is not a
+loophole but the other half of the same idea. Dependabot pull requests read a
+different secret store from Actions, so `secrets.CODECOV_TOKEN` is empty on
+them no matter how the repository is configured; with the flag on and no
+skip, every dependabot PR showed a red coverage check for something the PR
+could not affect. A check that is always red is one people learn to merge
+past, and #12 was merged through exactly that. Loud when it can upload and
+does not; quiet when it never could.
 
 ### Miri, and why it is not optional
 

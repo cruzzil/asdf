@@ -11,6 +11,10 @@ jobs:
       CARGO_TERM_COLOR: always
       ASDF_STANDARD_DIR: ${{ github.workspace }}/corpora/asdf-standard
       LIBASDF_DIR: ${{ github.workspace }}/corpora/libasdf
+      # Lifted to the job so the upload step can test for it. Dependabot runs
+      # read a different secret store from Actions, so this is empty there
+      # however it is configured on the repository.
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust
@@ -69,15 +73,24 @@ jobs:
           asdf || true
 
           cargo llvm-cov report --lcov --output-path lcov.info
-      # `fail_ci_if_error` is deliberately on. It defaults to off, which
-      # means a failed upload still leaves the job green -- and the first run
-      # of this workflow did exactly that, reporting success while Codecov
-      # rejected all three calls with "Token required because branch is
-      # protected". A job that passes while doing nothing is worse than no
-      # job, so this one is allowed to fail.
+      # Two rules that look contradictory and are not.
       #
-      # It needs CODECOV_TOKEN set as a repository secret.
+      # `fail_ci_if_error` is on, because it defaults to off and a failed
+      # upload then leaves the job green -- this workflow's first run did
+      # exactly that, reporting success while Codecov rejected all three
+      # calls. A job that passes while doing nothing is worse than no job.
+      #
+      # But the step is skipped when there is no token to upload with.
+      # Dependabot runs read a different secret store from Actions, so
+      # `secrets.CODECOV_TOKEN` is always empty on its pull requests, and
+      # with `fail_ci_if_error` on that made *every* dependabot PR show a red
+      # coverage check for a reason the PR could do nothing about. A check
+      # that is always red is a check people learn to merge past -- #12 was
+      # merged through exactly this -- which costs more than the coverage
+      # gained. So: loud when it can upload and does not, quiet when it was
+      # never going to be able to.
       - name: Upload coverage reports to Codecov
+        if: env.CODECOV_TOKEN != ''
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
