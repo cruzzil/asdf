@@ -14,6 +14,31 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+### Security
+
+- **An unchecked `.product()` sized a `'*'` dimension.** `shape: ['*', 1<<62, 4]`
+  panicked in debug and wrapped in release, resolving the streamed dimension
+  to a number bearing no relation to the block. Four more of the same shape
+  were in `Datatype::item_size`, `asdf-rs::set_array_shaped` and the C ABI's
+  inline-storage path; all five are now checked, saturating where the
+  signature has no error channel.
+
+  Worth noting where it survived: the function already carried
+  `#[deny(clippy::arithmetic_side_effects)]`, added a fortnight ago as the
+  mitigation for exactly this class. **The lint flags operators, and
+  `.product()` is a method call.** Every place the arithmetic wore an operator
+  was fixed then; not one place where it wore a method's clothes was.
+
+### Added
+
+- **A third fuzz target, `structured`.** The other two mutate file bytes, so
+  most of their budget goes on getting past the header. This one mutates a
+  *description* of a file and renders a valid one, putting every input into
+  the shape, stride, datatype and alias code where the findings actually live.
+  It reached 7,090 coverage edges from three random seeds in 5,859 runs --
+  `read_path` needed a 1,600-file corpus and 145,000 executions for 7,508 --
+  and found the defect above in its first minutes. CI builds and replays it.
+
 ## [0.2.3] - 2026-09-19
 
 `asdf-core` 0.2.3 and `asdf-yaml` 0.2.1. The other three crates are unchanged

@@ -610,3 +610,40 @@ mod aborts {
         );
     }
 }
+
+/// A `*` dimension sized against a row whose product does not fit.
+///
+/// Found by the structured fuzz target, and notable for where it hid: the
+/// function it is in already carried `#[deny(clippy::arithmetic_side_effects)]`,
+/// added after the earlier review found four unchecked multiplies. The lint
+/// sees *operators*, and this was `.product()` -- a method call, invisible to
+/// it. Four more of the same shape were sitting in other crates.
+#[test]
+fn a_star_dimension_may_not_overflow_its_row() {
+    use asdf_core::core::ndarray::Ndarray;
+
+    // `[*, 1<<62, 4]`: the trailing dimensions multiply past 64 bits, and
+    // sizing the `*` against them is where the product happened.
+    let tree = "arr: !core/ndarray-1.1.0\n  source: 0\n  datatype: int8\n  \
+                byteorder: little\n  shape: ['*', 4611686018427387904, 4]\n";
+    let mut f = b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n\
+          --- !core/asdf-1.1.0\n"
+        .to_vec();
+    f.extend_from_slice(tree.as_bytes());
+    f.extend_from_slice(b"...\n");
+    let mut header = [0u8; 48];
+    for off in [8usize, 16, 24] {
+        header[off..off + 8].copy_from_slice(&64u64.to_be_bytes());
+    }
+    f.extend_from_slice(b"\xd3BLK\x00\x30");
+    f.extend_from_slice(&header);
+    f.extend_from_slice(&[0u8; 64]);
+
+    let reader = Reader::from_bytes(f).expect("well formed");
+    let doc = reader.tree().unwrap().unwrap();
+    let node = doc.mapping_get(doc.root().unwrap(), "arr").expect("arr is there");
+    let nd = Ndarray::parse(&doc, node).expect("parses");
+
+    // An error, not a panic and not a wrapped row that sizes the `*` wrongly.
+    assert!(nd.resolved_shape(Some(64)).is_err(), "must refuse to size the '*' dimension");
+}

@@ -1575,7 +1575,7 @@ fn value_of_ndarray_inner(
         // Inline storage writes the values into the tree instead of a block,
         // which is what `asdf_ndarray_storage_set(.., INLINE)` asks for.
         if storage == AsdfArrayStorage::Inline {
-            let count: u64 = shape.iter().product::<u64>().max(1);
+            let count = shape.iter().fold(1u64, |acc, d| acc.saturating_mul(*d)).max(1);
             warn_if_inline_is_large(file, count, config.inline_ndarray_warning_thresh);
             return inline_value_of_ndarray(file, array, &shape, &payload);
         }

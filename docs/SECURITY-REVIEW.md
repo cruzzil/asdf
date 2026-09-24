@@ -37,10 +37,10 @@ and the mechanism that was supposed to prevent it never applied.
 
 ## Findings
 
-All eight are fixed. Five came from the review itself; three came from the
-fuzz targets the review recommended -- one before they had generated a single
-input of their own, one after two hours, one in a one-hour campaign.
-Severities are as assessed at the time.
+All nine are fixed. Five came from the review itself; four came from the fuzz
+targets the review recommended -- one before they had generated a single input
+of their own, one after two hours, one in a one-hour campaign, and one within
+minutes of a third target existing. Severities are as assessed at the time.
 
 ### 1. A decompression bomb evaded the guard by lying downwards — High
 
@@ -258,7 +258,40 @@ which a 64 MiB blowup passes comfortably. It now asserts the output lands well
 rather than the byte budget, plus a wall-clock bound. Verified by reverting
 `info.rs` alone: the tightened test fails on the old code at 67,108,887 bytes.
 
-### 8. External sources could be escaped with a symlink — Low
+### 8. An unchecked `.product()` the arithmetic lint could not see — Medium
+
+**Found by the `structured` fuzz target**, within minutes of it first running.
+
+`Ndarray::resolved_shape` sizes a `'*'` dimension by multiplying the
+dimensions below it. That product was unchecked, so `shape: ['*', 1<<62, 4]`
+panics in debug and wraps in release -- and a wrapped row size makes the
+`'*'` dimension resolve to a number bearing no relation to the block.
+
+What makes it worth its own entry is **where it survived**. That function
+already carried `#[deny(clippy::arithmetic_side_effects)]`, added as the
+mitigation for finding 2's family after the review found four unchecked
+multiplies. The lint flags *operators*. `.product()` is a method call. The
+same blind spot hid four more, found by grepping for the shape once this one
+was known:
+
+| | |
+|---|---|
+| `Ndarray::resolved_shape` | the crash |
+| `Datatype::item_size` | a `.sum()` over a compound type's fields, and a `.product()` over a field's sub-array shape |
+| `asdf-rs::set_array_shaped` | a `.product()` over a caller's shape |
+| `ndarray_ffi` inline storage | a `.product()` over a C caller's shape |
+
+All five are now checked, saturating where the signature has no error channel.
+
+The lesson is about the mitigation rather than the bug. **A lint that covers a
+syntactic form covers only that form.** Every place the arithmetic wore an
+operator got a `checked_mul` after the review; not one place where it wore a
+method's clothes did, and nothing noticed for a fortnight.
+
+Pinned by `aborts::a_star_dimension_may_not_overflow_its_row`, verified to
+fail on the unfixed code.
+
+### 9. External sources could be escaped with a symlink — Low
 
 `reader::external_relative_path` rejects absolute paths, `..` components,
 drive and UNC prefixes, and anything with a scheme — a careful lexical check.
@@ -353,10 +386,8 @@ All three follow-ups the review named, with one revised by measurement.
 - **A longer fuzz campaign, off the pull-request path.** CI's two minutes
   catches rot, not novelty. Hours on one machine is where the next one comes
   from.
-- **A structured-input fuzz target.** Both current targets mutate raw bytes,
-  so most inputs die at the header. One that generates well-formed files with
-  hostile *trees* would reach the parts of the tree walk that raw mutation
-  rarely does.
+- ~~A structured-input fuzz target.~~ Built, as `fuzz/fuzz_targets/structured.rs`;
+  it found finding 8 in its first minutes. See [`FUZZING.md`](FUZZING.md).
 - **Audit every remaining "allocate then check".** Findings 5 and 6 were both
   a bound placed after the allocation it guards. That is a shape worth
   grepping for deliberately rather than waiting to trip over: any

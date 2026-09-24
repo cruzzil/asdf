@@ -245,6 +245,8 @@ jobs:
               -runs=0 -rss_limit_mb=2048 -timeout=25
           cargo +nightly fuzz run render_tree -- \
               -runs=0 -rss_limit_mb=2048 -timeout=25
+          cargo +nightly fuzz run structured -- \
+              -runs=0 -rss_limit_mb=2048 -timeout=25
         working-directory: fuzz
       # A brief campaign on top, which is free and occasionally lucky.
       # `-malloc_limit_mb` below the RSS limit so a report names the
@@ -256,6 +258,11 @@ jobs:
               -rss_limit_mb=2048 -malloc_limit_mb=1024 -timeout=25
           cargo +nightly fuzz run render_tree -- \
               -max_total_time=120 -dict=asdf.dict \
+              -rss_limit_mb=2048 -malloc_limit_mb=1024 -timeout=25
+          # No dictionary for this one: it does not mutate file bytes, so
+          # file-format tokens mean nothing to it.
+          cargo +nightly fuzz run structured -- \
+              -max_total_time=120 \
               -rss_limit_mb=2048 -malloc_limit_mb=1024 -timeout=25
         working-directory: fuzz
 

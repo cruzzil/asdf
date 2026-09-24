@@ -1009,7 +1009,13 @@ impl AsdfBuilder {
         values: &[T],
         shape: &[u64],
     ) -> Result<()> {
-        let expected: u64 = shape.iter().product();
+        let expected =
+            shape.iter().try_fold(1u64, |acc, d| acc.checked_mul(*d)).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::OverLimit,
+                    format!("shape {shape:?} has more elements than 64 bits hold"),
+                )
+            })?;
         if expected != values.len() as u64 {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,

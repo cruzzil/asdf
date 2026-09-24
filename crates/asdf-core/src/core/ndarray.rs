@@ -292,15 +292,27 @@ impl Ndarray {
                             "shape dimension {idx} is '*' but no block size is available"
                         )
                     })?;
+                    // Checked, and not by the lint on this function: that
+                    // sees operators, and `.product()` is a method call, so
+                    // an unchecked product sails straight past it. A fuzz
+                    // target found this one within minutes of existing.
                     #[allow(
                         clippy::arithmetic_side_effects,
                         reason = "idx indexes self.shape, so idx + 1 is at most its length"
                     )]
-                    let row: u64 = self.shape[idx + 1..]
-                        .iter()
-                        .map(|d| d.unwrap_or(1))
-                        .product::<u64>()
-                        .max(1);
+                    let tail = &self.shape[idx + 1..];
+                    let mut row: u64 = 1;
+                    for d in tail {
+                        row = row.checked_mul(d.unwrap_or(1)).ok_or_else(|| {
+                            err!(
+                                OverLimit,
+                                "shape {:?} describes a row too large to size a '*' dimension \
+                                 against",
+                                self.shape
+                            )
+                        })?;
+                    }
+                    let row = row.max(1);
                     let row_bytes = row.checked_mul(item).filter(|b| *b != 0).ok_or_else(|| {
                         err!(InvalidArgument, "cannot size a '*' dimension with a zero-width row")
                     })?;

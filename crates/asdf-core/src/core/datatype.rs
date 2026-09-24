@@ -249,15 +249,22 @@ impl Datatype {
     ///
     /// For a compound type this is the sum of its fields; for a field with a
     /// sub-array shape, the element size times the number of elements.
+    /// Saturating, because every input is a number out of the tree: a
+    /// compound type's field list and a field's own sub-array shape are both
+    /// attacker-controlled, and a wrapped item size is one a later bounds
+    /// check agrees with. There is no error channel here, so `u64::MAX` is
+    /// the honest answer for "does not fit" -- no real element is that wide,
+    /// and every caller sizing a read against it then refuses.
     pub fn item_size(&self) -> u64 {
         let base = if self.is_structured() {
-            self.fields.iter().map(|f| f.datatype.item_size()).sum()
+            self.fields.iter().fold(0u64, |acc, f| acc.saturating_add(f.datatype.item_size()))
         } else if self.size != 0 {
             self.size
         } else {
             self.scalar.size()
         };
-        base * self.shape.iter().product::<u64>().max(1)
+        let elements = self.shape.iter().fold(1u64, |acc, d| acc.saturating_mul(*d)).max(1);
+        base.saturating_mul(elements)
     }
 
     /// Parse a datatype from a tree node.

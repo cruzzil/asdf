@@ -66,10 +66,32 @@ the working tree with thousands of generated files.
 |---|---|
 | `read_path` | The whole read path, from `scan` through to an array's decoded elements. Driven by the block layer and the datatypes. |
 | `render_tree` | `info::render` and the event stream. Driven by the tree's anchor and alias graph. |
+| `structured` | The same read path, but reached from a *generated* file rather than mutated bytes. See below. |
 
 They are split because they explore different things. Both findings in the
 alias graph came from inputs that a block-layer-driven target would take a
 long time to reach, and vice versa.
+
+### Why `structured` does not mutate bytes
+
+The other two mutate the file. Even with `asdf.dict` that spends most of the
+budget on the first few dozen bytes: the header has to be right, then the YAML
+has to parse, then the block headers have to be self-consistent, and only then
+does anything interesting run. The parts of this library with the most logic
+in them -- shape and stride arithmetic, datatype conversion, the alias graph,
+block framing -- sit behind all of that.
+
+So `structured` mutates a *description* of a file and renders a valid one. The
+framing is always plausible; what varies is the part a real writer gets right
+and an attacker does not. Its dimensions are drawn from a weighted enum rather
+than a uniform `u64`, because a random 64-bit number is never `1 << 61` in
+practice and those are the values that wrap.
+
+The difference is stark: `read_path` needed a 1,600-file corpus and 145,000
+executions to reach 7,508 coverage edges. `structured` reached 7,090 from
+three random seeds in 5,859 runs -- and found a defect in its first minutes.
+
+It takes no dictionary, since it never sees file-format tokens.
 
 `read_path` is deliberately wider than the API most callers use. That is the
 lesson of the review: `robustness.rs` stopped at the block layer, so it never
@@ -166,6 +188,24 @@ Two more of its kind were next to it once the first was found —
 materialising the expansion — so the fix bounds all three: inline arrays are
 now bounded by the document's node count, exactly as block-backed arrays are
 bounded by their block's length.
+
+### What `structured` found
+
+An unchecked `.product()` in `Ndarray::resolved_shape`, sizing a `'*'`
+dimension against the row below it. Eight crashes in the first minutes.
+
+Where it hid is the interesting part. That function already carried
+`#[deny(clippy::arithmetic_side_effects)]`, added deliberately after the
+earlier review found four unchecked multiplies -- and the lint did not see
+this one, because it flags *operators* and `.product()` is a method call.
+Grepping for the same shape turned up four more, in `Datatype::item_size`
+(both a `.sum()` and a `.product()`), in `asdf-rs`'s `set_array_shaped`, and
+in the C ABI's inline-storage path.
+
+The lesson is about the mitigation, not the bug: **a lint that covers a
+syntactic form covers only that form.** `checked_mul` was reached for
+everywhere an operator appeared, and not once where the same arithmetic wore
+a method's clothes.
 
 The moral is not that the first fix was wrong. It is that a fix aimed at one
 function is a fix to one function, and only something that explores the whole
