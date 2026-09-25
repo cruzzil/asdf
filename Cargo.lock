@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "asdf-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "asdf-yaml",
  "bzip2",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "asdf-rs"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "asdf-core",
  "divan",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "libasdf-rs"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "asdf-core",
  "cc",

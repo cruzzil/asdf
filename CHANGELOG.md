@@ -14,6 +14,17 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-09-25
+
+`asdf-core` 0.2.4, `asdf-rs` 0.2.1 and `libasdf-rs` 0.2.2. `asdf-yaml` and
+`asdf-cli` are unchanged; both ask for `^0.2.0`, so they pick the engine up
+without releases of their own.
+
+No public signature changed, so this is a patch. Two behaviours did:
+`Datatype::item_size` saturates where it used to wrap, and
+`set_array_shaped` returns `OverLimit` for a shape that does not fit rather
+than panicking.
+
 ### Security
 
 - **An unchecked `.product()` sized a `'*'` dimension.** `shape: ['*', 1<<62, 4]`
@@ -455,7 +466,8 @@ is listed here so the first release notes are not written from scratch.
 - `asdf-core` reads a file whole rather than mapping it under `cfg(miri)`, so
   dependants can run Miri.
 
-[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/cruzzil/asdf/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/cruzzil/asdf/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/cruzzil/asdf/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/cruzzil/asdf/compare/v0.2.0...v0.2.1
