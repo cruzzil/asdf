@@ -627,3 +627,185 @@ for b in bits:
     assert_eq!(lines.next(), None, "python produced more lines than we consumed");
     eprintln!("{checked} float and complex spellings match CPython exactly");
 }
+
+/// `Schema::Yaml11` exists to read files Python asdf wrote, so it has to
+/// resolve every plain scalar exactly as PyYAML does. Checked spelling by
+/// spelling against PyYAML itself, across the edges of each of its grammars,
+/// each with and without a sign.
+#[test]
+fn the_yaml11_schema_resolves_as_pyyaml_does() {
+    use asdf_yaml::{Resolved, ScalarStyle, Schema, resolve};
+
+    let Some(interpreter) = python() else {
+        eprintln!("skipping: no Python with asdf available");
+        return;
+    };
+
+    let bodies = [
+        // ints, in every radix PyYAML or anything else might claim
+        "0",
+        "00",
+        "0_",
+        "07",
+        "08",
+        "010",
+        "0_7",
+        "1",
+        "1_000",
+        "1__0",
+        "1_",
+        "_1",
+        "42",
+        "0b101",
+        "0b_1",
+        "0b2",
+        "0B1",
+        "0x1F",
+        "0xff",
+        "0x_f",
+        "0xg",
+        "0X1F",
+        "0o17",
+        "0o",
+        "18446744073709551615",
+        "18446744073709551616",
+        "9223372036854775808",
+        "99999999999999999999999",
+        // sexagesimals
+        "1:30",
+        "190:20:30",
+        "1:7",
+        "1:60",
+        "1:123",
+        "1:",
+        "0:30",
+        "1:30.5",
+        "1:30.",
+        "1:5:5.25",
+        // floats
+        "1.",
+        "1.5",
+        "0.",
+        "1._",
+        "1_0.5",
+        ".5",
+        "._5",
+        ".",
+        "1.5e3",
+        "1.5e+3",
+        "1.5E-3",
+        "1.e5",
+        "1.e+5",
+        ".5e+3",
+        "1e5",
+        "1e+5",
+        "1e-08",
+        "1.0e-08",
+        "3.14e+00",
+        "12e3",
+        "1.5e+",
+        "1.5e+x",
+        // the non-finite spellings and their near misses
+        ".inf",
+        ".Inf",
+        ".INF",
+        ".iNf",
+        "inf",
+        ".nan",
+        ".NaN",
+        ".NAN",
+        "nan",
+    ];
+    let mut texts: Vec<String> = Vec::new();
+    for body in bodies {
+        for sign in ["", "-", "+"] {
+            texts.push(format!("{sign}{body}"));
+        }
+    }
+    texts.extend(
+        [
+            "",
+            "~",
+            "null",
+            "Null",
+            "NULL",
+            "nUll",
+            "true",
+            "True",
+            "TRUE",
+            "tRue",
+            "false",
+            "yes",
+            "Yes",
+            "YES",
+            "yES",
+            "no",
+            "No",
+            "on",
+            "On",
+            "ON",
+            "off",
+            "Off",
+            "OFF",
+            "y",
+            "Y",
+            "n",
+            "N",
+            "2001-12-14",
+            "hello",
+            "1.2.3",
+        ]
+        .map(String::from),
+    );
+
+    let hex: Vec<String> =
+        texts.iter().map(|t| t.bytes().map(|b| format!("{b:02x}")).collect()).collect();
+    let script = format!(
+        r#"
+import datetime, struct, yaml
+for h in {hex:?}:
+    text = bytes.fromhex(h).decode()
+    try:
+        v = yaml.safe_load('k: ' + text)['k'] if text else None
+    except Exception:
+        print('error'); continue
+    if v is None: print('null')
+    elif isinstance(v, bool): print('bool', v)
+    elif isinstance(v, int): print('int', v)
+    elif isinstance(v, float): print('float', struct.pack('>d', v).hex())
+    elif isinstance(v, str): print('str')
+    elif isinstance(v, (datetime.date, datetime.datetime)): print('timestamp')
+    else: print('other', type(v).__name__)
+"#
+    );
+    let output = run_python(&interpreter, &script).expect("run PyYAML");
+    let lines: Vec<&str> = output.lines().collect();
+    assert_eq!(lines.len(), texts.len(), "one answer per spelling");
+
+    let mut mismatches = Vec::new();
+    for (text, python) in texts.iter().zip(&lines) {
+        let ours = resolve(text, ScalarStyle::Plain, Schema::Yaml11);
+        let agrees = match (python.split_once(' ').unwrap_or((python, "")), ours) {
+            (("null", _), Resolved::Null) => true,
+            (("bool", v), Resolved::Bool(b)) => v == if b { "True" } else { "False" },
+            (("int", v), Resolved::Uint(u, _)) => v == u.to_string(),
+            (("int", v), Resolved::Int(i, _)) => v == i.to_string(),
+            // Python's ints are unbounded; ours report the overflow.
+            (("int", v), Resolved::IntOverflow) => {
+                v.parse::<u64>().is_err() && v.parse::<i64>().is_err()
+            }
+            (("float", bits), Resolved::Double(d)) => {
+                let theirs = f64::from_bits(u64::from_str_radix(bits, 16).unwrap());
+                theirs.to_bits() == d.to_bits() || (theirs.is_nan() && d.is_nan())
+            }
+            // No `Resolved` form for a timestamp, and PyYAML raising on
+            // `0b_` leaves nothing better than the text itself.
+            (("str" | "timestamp" | "error", _), Resolved::String) => true,
+            _ => false,
+        };
+        if !agrees {
+            mismatches.push(format!("{text:?}: PyYAML {python}, ours {ours:?}"));
+        }
+    }
+    assert!(mismatches.is_empty(), "\n{}", mismatches.join("\n"));
+}
