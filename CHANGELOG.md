@@ -14,6 +14,14 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-10-12
+
+`asdf-cli` 0.3.0, and nothing else: the libraries are unchanged from 0.2.5.
+
+A minor bump, because the binary is renamed and scripts that call `asdf`
+will stop working. Install it with `cargo install asdf-cli` as before; the
+command it installs is now `asdftool`.
+
 ### Changed
 
 - **The command-line tool is now `asdftool`**, not `asdf` (`asdf-cli`). The
@@ -551,7 +559,8 @@ is listed here so the first release notes are not written from scratch.
 - `asdf-core` reads a file whole rather than mapping it under `cfg(miri)`, so
   dependants can run Miri.
 
-[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/cruzzil/asdf/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/cruzzil/asdf/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/cruzzil/asdf/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/cruzzil/asdf/compare/v0.2.2...v0.2.3
