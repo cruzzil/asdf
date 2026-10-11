@@ -196,15 +196,14 @@ pub fn parse_bool_libasdf(s: &str) -> Option<bool> {
     }
 }
 
-/// Parse a boolean under YAML 1.1, which admits many more spellings.
+/// Parse a boolean as PyYAML's YAML 1.1 resolver does.
+///
+/// The YAML 1.1 type repository also lists `y` / `Y` / `n` / `N`, but PyYAML
+/// does not resolve them, and so neither does Python asdf.
 pub fn parse_bool_yaml11(s: &str) -> Option<bool> {
     match s {
-        "y" | "Y" | "yes" | "Yes" | "YES" | "true" | "True" | "TRUE" | "on" | "On" | "ON" => {
-            Some(true)
-        }
-        "n" | "N" | "no" | "No" | "NO" | "false" | "False" | "FALSE" | "off" | "Off" | "OFF" => {
-            Some(false)
-        }
+        "yes" | "Yes" | "YES" | "true" | "True" | "TRUE" | "on" | "On" | "ON" => Some(true),
+        "no" | "No" | "NO" | "false" | "False" | "FALSE" | "off" | "Off" | "OFF" => Some(false),
         _ => None,
     }
 }
@@ -538,98 +537,150 @@ fn resolve_libasdf(text: &str) -> Resolved {
     Resolved::String
 }
 
-/// The YAML 1.1 resolver, as PyYAML implements it.
+/// PyYAML's resolver, the genuine YAML 1.1 one: null, bool, float, int, else
+/// string.
+///
+/// The grammars below are PyYAML's implicit-resolver regular expressions, one
+/// function per alternative, and the values are what its `SafeConstructor`
+/// builds from them. Its timestamps have no `Resolved` form and stay strings.
 fn resolve_yaml11(text: &str) -> Resolved {
     if is_null(text) {
         return Resolved::Null;
     }
-    // 1.1 resolves booleans before numbers, so `y` and `n` never look integral.
     if let Some(b) = parse_bool_yaml11(text) {
         return Resolved::Bool(b);
     }
-    if let Some(r) = resolve_int_yaml11(text) {
-        return r;
-    }
-    if let Some(d) = resolve_float_yaml11(text) {
+    if let Some(d) = parse_float_yaml11(text) {
         return Resolved::Double(d);
     }
-    Resolved::String
+    resolve_int_yaml11(text).unwrap_or(Resolved::String)
 }
 
-fn resolve_int_yaml11(text: &str) -> Option<Resolved> {
-    let t = text.replace('_', "");
-    let (neg, body) = match t.strip_prefix('-') {
-        Some(rest) => (true, rest.to_string()),
-        None => (false, t.strip_prefix('+').unwrap_or(&t).to_string()),
+/// Does `s` start with `[0-9][0-9_]*`, and how long is that run?
+fn span_leading_digits(s: &[u8], first: impl Fn(u8) -> bool) -> usize {
+    if s.first().is_some_and(|&b| first(b)) { span_digits(s, 10) } else { 0 }
+}
+
+/// PyYAML's int, as a sign and a magnitude:
+///
+/// ```text
+/// [-+]?0b[0-1_]+ | [-+]?0[0-7_]+ | [-+]?(?:0|[1-9][0-9_]*)
+///   | [-+]?0x[0-9a-fA-F_]+ | [-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+
+/// ```
+///
+/// `0b_` and `0x_` match but have no digits, so PyYAML's constructor raises
+/// on them rather than returning anything; they are strings here.
+fn parse_int_yaml11(text: &str) -> Option<Result<(bool, u64), Overflow>> {
+    let (negative, body) = split_sign(text);
+    let b = body.as_bytes();
+    let with_sign = |r: Option<Result<u64, Overflow>>| r.map(|r| r.map(|m| (negative, m)));
+
+    if let Some(digits) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0x")) {
+        let radix = if b[1] == b'b' { 2 } else { 16 };
+        if digits.is_empty() || span_digits(digits.as_bytes(), radix) != digits.len() {
+            return None;
+        }
+        return with_sign(parse_digits(digits, radix));
+    }
+    if b.len() > 1 && b[0] == b'0' {
+        return if span_digits(b, 8) == b.len() { with_sign(parse_digits(body, 8)) } else { None };
+    }
+    if body == "0" {
+        return Some(Ok((negative, 0)));
+    }
+
+    let head = span_leading_digits(b, |c| (b'1'..=b'9').contains(&c));
+    if head == 0 {
+        return None;
+    }
+    if head == b.len() {
+        return with_sign(parse_digits(body, 10));
+    }
+    let tail = &body[head..];
+    if span_base60(tail.as_bytes()) != tail.len() {
+        return None;
+    }
+    let mut magnitude = match parse_digits(&body[..head], 10)? {
+        Ok(m) => m,
+        Err(Overflow) => return Some(Err(Overflow)),
     };
-    if body.is_empty() {
-        return None;
+    for component in tail[1..].split(':') {
+        let c: u64 = component.parse().ok()?;
+        match magnitude.checked_mul(60).and_then(|m| m.checked_add(c)) {
+            Some(m) => magnitude = m,
+            None => return Some(Err(Overflow)),
+        }
     }
-
-    let (digits, radix) =
-        if let Some(h) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
-            (h.to_string(), 16)
-        } else if let Some(o) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) {
-            (o.to_string(), 8)
-        } else if let Some(b) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
-            (b.to_string(), 2)
-        } else if body.contains(':') {
-            // Sexagesimal, e.g. 190:20:30
-            let mut acc: i128 = 0;
-            for part in body.split(':') {
-                if part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()) {
-                    return None;
-                }
-                acc = acc.checked_mul(60)?.checked_add(part.parse::<i128>().ok()?)?;
-            }
-            let v = if neg { -acc } else { acc };
-            return finish_int_yaml11(v);
-        } else if body.len() > 1 && body.starts_with('0') {
-            (body[1..].to_string(), 8)
-        } else {
-            (body.clone(), 10)
-        };
-
-    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
-        return None;
-    }
-    let mag = i128::from_str_radix(&digits, radix).ok()?;
-    finish_int_yaml11(if neg { -mag } else { mag })
+    Some(Ok((negative, magnitude)))
 }
 
-fn finish_int_yaml11(v: i128) -> Option<Resolved> {
-    if v >= 0 {
-        let u = u64::try_from(v).ok()?;
-        Some(Resolved::Uint(u, narrow_uint(u)))
-    } else {
-        let i = i64::try_from(v).ok()?;
-        Some(Resolved::Int(i, narrow_int(i)))
+/// Resolve a PyYAML int. Python's ints have no ceiling, so one too large for
+/// `u64` or `i64` is [`Resolved::IntOverflow`] rather than a string.
+fn resolve_int_yaml11(text: &str) -> Option<Resolved> {
+    match parse_int_yaml11(text)? {
+        Ok((false, m)) => Some(Resolved::Uint(m, narrow_uint(m))),
+        Ok((true, m)) => Some(match 0i64.checked_sub_unsigned(m) {
+            // Python's `-0` is plain `0`, which is non-negative.
+            Some(0) => Resolved::Uint(0, ValueType::Uint8),
+            Some(v) => Resolved::Int(v, narrow_int(v)),
+            None => Resolved::IntOverflow,
+        }),
+        Err(Overflow) => Some(Resolved::IntOverflow),
     }
 }
 
-fn resolve_float_yaml11(text: &str) -> Option<f64> {
-    let t = text.replace('_', "");
-    if let Some(d) = special_float(&t) {
+/// The length of `(?:[eE][-+][0-9]+)?` at the start of `s`: unlike libasdf,
+/// PyYAML requires the exponent's sign.
+fn span_signed_exponent(s: &[u8]) -> usize {
+    if !matches!(s.first(), Some(b'e' | b'E')) || !matches!(s.get(1), Some(b'-' | b'+')) {
+        return 0;
+    }
+    let digits = s[2..].iter().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 { 0 } else { 2 + digits }
+}
+
+/// PyYAML's float:
+///
+/// ```text
+/// [-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?
+///   | \.[0-9][0-9_]*(?:[eE][-+][0-9]+)?
+///   | [-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*
+///   | [-+]?\.(?:inf|Inf|INF) | \.(?:nan|NaN|NAN)
+/// ```
+///
+/// So the `.` is required, an exponent must be signed, and a float that
+/// starts with its `.` cannot be: `1.5e3` and `-.5` are strings.
+fn parse_float_yaml11(text: &str) -> Option<f64> {
+    if let Some(d) = special_float(text) {
         return Some(d);
     }
-    let (sign, rest) = match t.strip_prefix('-') {
-        Some(r) => (-1.0, r),
-        None => (1.0, t.strip_prefix('+').unwrap_or(&t)),
-    };
-    if rest.contains(':') {
-        let mut acc = 0f64;
-        for part in rest.split(':') {
-            let p: f64 = part.parse().ok()?;
-            acc = acc * 60.0 + p;
-        }
-        return Some(sign * acc);
+    if let Some(rest) = text.strip_prefix('.') {
+        let r = rest.as_bytes();
+        let frac = span_leading_digits(r, |c| c.is_ascii_digit());
+        return (frac > 0 && frac + span_signed_exponent(&r[frac..]) == r.len())
+            .then(|| parse_float_digits(text))?;
     }
-    // Rust's parser also takes `inf` and `nan`, which YAML reads as strings,
-    // so only hand it text that starts like a number.
-    if !rest.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
+
+    let (negative, body) = split_sign(text);
+    let b = body.as_bytes();
+    let head = span_leading_digits(b, |c| c.is_ascii_digit());
+    if head == 0 {
         return None;
     }
-    t.parse().ok()
+    let base60 = span_base60(&b[head..]);
+    let point = head + base60;
+    if b.get(point) != Some(&b'.') {
+        return None;
+    }
+    let frac_end = point + 1 + span_digits(&b[point + 1..], 10);
+
+    if base60 > 0 {
+        // As PyYAML builds it: each component a float, the last carrying
+        // the fraction.
+        return (frac_end == b.len()).then(|| parse_base60_float(text))?;
+    }
+    (frac_end + span_signed_exponent(&b[frac_end..]) == b.len())
+        .then(|| parse_float_digits(body).map(|v| if negative { -v } else { v }))?
 }
 
 #[cfg(test)]
@@ -858,23 +909,42 @@ mod tests {
 
     #[test]
     fn yaml11_bool_spellings() {
-        for s in ["yes", "Yes", "YES", "on", "y", "true"] {
+        for s in ["yes", "Yes", "YES", "on", "true"] {
             assert_eq!(y11(s), Resolved::Bool(true), "{s:?}");
         }
-        for s in ["no", "No", "off", "n", "false"] {
+        for s in ["no", "No", "off", "false"] {
             assert_eq!(y11(s), Resolved::Bool(false), "{s:?}");
         }
-        // What still separates the two: `y` and `n`.
-        assert_eq!(lib("y"), Resolved::String);
-        assert_eq!(y11("y"), Resolved::Bool(true));
+        // The YAML 1.1 type repository lists `y` and `n`, but PyYAML -- and
+        // so Python asdf -- reads them as strings.
+        for s in ["y", "Y", "n", "N"] {
+            assert_eq!(y11(s), Resolved::String, "{s:?}");
+        }
     }
 
     #[test]
     fn yaml11_underscores_and_sexagesimals() {
         assert_eq!(y11("1_000"), Resolved::Uint(1000, ValueType::Uint16));
-        assert_eq!(y11("0o17"), Resolved::Uint(15, ValueType::Uint8));
         // 190:20:30 == 190*3600 + 20*60 + 30
-        assert_eq!(y11("190:20:30"), Resolved::Uint(685230, ValueType::Uint32));
+        assert_eq!(y11("190:20:30"), Resolved::Uint(685_230, ValueType::Uint32));
+        // PyYAML has no `0o` or uppercase prefix, needs a digit before any
+        // `_`, and bounds a two-digit base-60 component at 59.
+        for s in ["0o17", "0X1F", "0B1", "_1", "08", "1:60", "0:30"] {
+            assert_eq!(y11(s), Resolved::String, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn yaml11_floats_need_a_point_and_a_signed_exponent() {
+        assert_eq!(y11("1.5e+3"), Resolved::Double(1500.0));
+        assert_eq!(y11(".5"), Resolved::Double(0.5));
+        assert_eq!(y11("1._"), Resolved::Double(1.0));
+        assert_eq!(y11("-1:30.5"), Resolved::Double(-90.5));
+        // libasdf reads all of these as floats; PyYAML does not.
+        for s in ["1e5", "1.5e3", "1e-08", "-.5", "+.5"] {
+            assert_eq!(y11(s), Resolved::String, "{s:?}");
+            assert!(matches!(lib(s), Resolved::Double(_)), "{s:?}");
+        }
     }
 
     /// An integer literal too large for any integer type is neither an

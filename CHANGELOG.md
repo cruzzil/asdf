@@ -47,6 +47,16 @@ Two version numbers matter here and they are not the same thing:
   `test-value`'s locale test, where the locale is missing -- so its pinned
   figures hold on every platform.
 
+### Fixed
+
+- **`Schema::Yaml11` now resolves exactly as PyYAML does**, which is what it
+  claimed and what reading Python-written files needs. It had disagreed on 60
+  of 255 spellings checked: it took `y` / `n` as booleans, `0o`, `0X` and `0B`
+  as prefixes, `_1` as an int, `08` as a float, `1:60` as base 60, and
+  `1e5` / `1.5e3` / `-.5` as floats, all of which PyYAML reads as strings. It
+  is now a port of PyYAML's own resolver expressions, and the differential
+  suite checks it against PyYAML spelling by spelling.
+
 ### Security
 
 - **An empty array could still be inlined into 2^62 empty sequences.** A
