@@ -19,9 +19,15 @@ build = "build.rs"
 # The idiomatic `asdf` crate's lib target has the same name, so cargo warns
 # that both uplift to `target/<profile>/libasdf.rlib`. That copy is a
 # convenience only -- a dependent links the hashed artifact under `deps/`,
-# which is per-crate -- so the collision affects nothing that is built.
+# which is per-crate -- so that collision affects nothing that is built.
 # Renaming either would change a published crate's name to silence a
 # warning about a file nothing reads.
+#
+# What `deps/` does *not* hash is a binary's or a C library's name. On
+# Windows each also writes a `.pdb` under it, so no binary in the workspace
+# may be called `asdf`: it and `asdf.dll` would both write `deps/asdf.pdb`,
+# and a parallel build would fail one link. That is why the CLI is
+# `asdftool`.
 name = "asdf"
 crate-type = ["cdylib", "staticlib", "rlib"]
 

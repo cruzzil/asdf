@@ -1,7 +1,8 @@
-//! The `asdf` command-line tool.
+//! The `asdftool` command-line tool.
 //!
-//! A companion to the library, mirroring libasdf's own tool: the same
-//! sub-commands, the same output. Its `info` rendering is checked byte for
+//! A companion to the library, mirroring libasdf's own `asdf` tool: the same
+//! sub-commands, the same output, under a name that does not collide with the
+//! C library's on Windows (see `Cargo.toml`). Its `info` rendering is checked byte for
 //! byte against upstream's committed expected-output fixtures.
 
 use std::io::Write;
@@ -12,7 +13,7 @@ use asdf_core::info::{InfoOptions, render};
 use asdf_core::reader::{ChecksumStatus, Reader};
 
 const USAGE: &str = "\
-Usage: asdf COMMAND [ARGS...]
+Usage: asdftool COMMAND [ARGS...]
 
 A tool for inspecting ASDF files.
 
@@ -22,11 +23,11 @@ Commands:
   events            Print the low-level parser events for a file
   verify-checksums  Verify binary block MD5 checksums
 
-Run `asdf COMMAND --help` for help on a sub-command.
+Run `asdftool COMMAND --help` for help on a sub-command.
 ";
 
 const INFO_USAGE: &str = "\
-Usage: asdf info [OPTIONS] FILENAME
+Usage: asdftool info [OPTIONS] FILENAME
 
 Print a human-readable rendering of an ASDF file's YAML tree, and optionally
 information about its binary blocks.
@@ -39,7 +40,7 @@ Options:
 ";
 
 const DD_USAGE: &str = "\
-Usage: asdf dd [OPTIONS] INPUT [OUTPUT|-]
+Usage: asdftool dd [OPTIONS] INPUT [OUTPUT|-]
 
 Dump the data of an ASDF binary block to a file, or to standard output.
 
@@ -52,7 +53,7 @@ Options:
 ";
 
 const EVENTS_USAGE: &str = "\
-Usage: asdf events [OPTIONS] FILENAME
+Usage: asdftool events [OPTIONS] FILENAME
 
 Print the low-level parser events for an ASDF file: the version headers, any
 comments, the block index, the tree's extent and the YAML events inside it,
@@ -66,7 +67,7 @@ Options:
 ";
 
 const VERIFY_USAGE: &str = "\
-Usage: asdf verify-checksums [OPTIONS] FILENAME
+Usage: asdftool verify-checksums [OPTIONS] FILENAME
 
 Verify the MD5 checksum of each binary block in the file.
 
@@ -96,7 +97,7 @@ fn main() -> ExitCode {
         "events" => cmd_events(rest),
         "verify-checksums" => cmd_verify(rest),
         other => {
-            eprintln!("asdf: unknown command {other:?}\n");
+            eprintln!("asdftool: unknown command {other:?}\n");
             eprint!("{USAGE}");
             return ExitCode::FAILURE;
         }
@@ -105,7 +106,7 @@ fn main() -> ExitCode {
     match result {
         Ok(code) => code,
         Err(message) => {
-            eprintln!("asdf: {message}");
+            eprintln!("asdftool: {message}");
             ExitCode::FAILURE
         }
     }
@@ -251,7 +252,7 @@ fn write_chunked(out: &mut impl Write, data: &[u8], chunk_size: usize) -> Result
     out.flush().map_err(|e| e.to_string())
 }
 
-/// `asdf events`: the low-level parser event stream, as upstream prints it.
+/// `asdftool events`: the low-level parser event stream, as upstream prints it.
 fn cmd_events(args: &[String]) -> Result<ExitCode, String> {
     let mut filename = None;
     let mut verbose = false;

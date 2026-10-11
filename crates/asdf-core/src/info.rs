@@ -188,7 +188,7 @@ struct TreeState {
     ///
     /// Aliases need not be cyclic to be explosive: ten levels of ten-way
     /// nesting is 10^10 nodes from a few hundred bytes, and the expansion
-    /// is what `asdf info` is *for*, so it cannot simply be refused.
+    /// is what `asdftool info` is *for*, so it cannot simply be refused.
     /// Legitimate files never come close to this; a bomb stops at it.
     budget: usize,
     /// How many more nodes may be visited.

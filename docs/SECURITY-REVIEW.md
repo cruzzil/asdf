@@ -8,7 +8,7 @@ fuzz targets in [`FUZZING.md`](FUZZING.md). Every finding below was
 ## Threat model
 
 An `.asdf` file is untrusted input. It arrives by download, from a shared
-filesystem, or attached to a ticket, and someone runs `asdf info` on it or
+filesystem, or attached to a ticket, and someone runs `asdftool info` on it or
 hands it to a library that reads it. The attacker controls every byte: the
 header, the YAML tree, every block header's size fields, and the compressed
 bytes.

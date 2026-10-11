@@ -9,10 +9,13 @@ repository.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "asdf"
+# Not `asdf`, which upstream's own tool is called: that name is the `libasdf-rs`
+# C library's too, and on Windows a binary and a C library of the same name
+# both write `deps/asdf.pdb` -- so a parallel build races, and one link fails.
+# It is also the asdf version manager's command. Python asdf's is `asdftool`.
+name = "asdftool"
 path = "src/main.rs"
-# The binary shares its name with the `asdf` library, so rustdoc would
-# write both to `doc/asdf/`. A `main.rs` has no public API to publish.
+# A `main.rs` has no public API to publish.
 doc = false
 
 [dependencies]

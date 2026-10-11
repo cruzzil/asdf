@@ -16,13 +16,10 @@ fn libasdf_dir() -> Option<PathBuf> {
     path.is_dir().then_some(path)
 }
 
-/// The `asdf` binary this crate builds.
-fn cli() -> Option<PathBuf> {
-    // The test binary lives at <target>/<profile>/deps/<name>-<hash>.
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?.parent()?;
-    let path = dir.join("asdf");
-    path.is_file().then_some(path)
+/// The `asdftool` binary this crate builds, which cargo builds before
+/// running these tests and names with the platform's executable suffix.
+fn cli() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_asdftool"))
 }
 
 /// The files upstream's `test-verify-checksums.sh` runs, all with
@@ -35,10 +32,7 @@ fn verify_checksums_output_matches_the_committed_goldens() {
         eprintln!("skipping: LIBASDF_DIR not found");
         return;
     };
-    let Some(cli) = cli() else {
-        eprintln!("skipping: the asdf binary is not built; run `cargo build` first");
-        return;
-    };
+    let cli = cli();
     let goldens = root.join("tests/fixtures/verify-checksums");
     if !goldens.is_dir() {
         eprintln!("skipping: no verify-checksums goldens found");
@@ -84,10 +78,7 @@ fn a_bad_checksum_sets_a_failing_exit_status() {
         eprintln!("skipping: LIBASDF_DIR not found");
         return;
     };
-    let Some(cli) = cli() else {
-        eprintln!("skipping: the asdf binary is not built");
-        return;
-    };
+    let cli = cli();
 
     for (name, expect_success) in [("255-2-blocks", true), ("255-invalid-checksum", false)] {
         let input = root.join("tests/fixtures").join(format!("{name}.asdf"));
