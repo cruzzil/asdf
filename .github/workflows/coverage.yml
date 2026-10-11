@@ -37,6 +37,9 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: asdf-format/libasdf
+          # Pinned to SYNC_COMMIT.md: the upstream suite's pass counts are only
+          # meaningful against the commit they were recorded at.
+          ref: 4be9e73f53b75f2fef276d92289101cc2739f311
           path: corpora/libasdf
           submodules: true
 
