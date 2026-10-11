@@ -14,6 +14,24 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-10-11
+
+`asdf-yaml` 0.2.2, `asdf-core` 0.2.5, `asdf-rs` 0.2.2 and `libasdf-rs` 0.2.3.
+`asdf-cli` is unchanged and asks for `^0.2.0`, so it picks the engine up
+without a release of its own.
+
+No public signature changed and nothing was removed, so this is a patch, as
+0.2.4 was. **But scalar resolution under the default schema did change**, and
+a caller that relied on the old answers will see different ones: `yes`, `no`,
+`on` and `off` are now booleans rather than strings, and `0b101`, `1_000` and
+`1:30` are now ints. That is libasdf 0.2.1's behaviour, which this release
+syncs to; see *Changed*. Floats are also written differently (`1.0e-08`,
+not `1e-08`), which every reader parses to the same value.
+
+`asdf-rs` and `libasdf-rs` use functions new in this `asdf-core`, so
+`[workspace.dependencies]` now asks for `asdf-core` 0.2.5 and `asdf-yaml`
+0.2.2.
+
 ### Changed
 
 - **Synced to libasdf `9927a3f` (0.2.1)**, up from `4be9e73` (0.2.0). No
@@ -520,7 +538,8 @@ is listed here so the first release notes are not written from scratch.
 - `asdf-core` reads a file whole rather than mapping it under `cfg(miri)`, so
   dependants can run Miri.
 
-[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/cruzzil/asdf/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/cruzzil/asdf/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/cruzzil/asdf/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/cruzzil/asdf/compare/v0.2.1...v0.2.2
