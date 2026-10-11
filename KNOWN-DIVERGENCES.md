@@ -31,6 +31,21 @@ any of them now reads the same in all three.
 Covered by `scalar::tests::floats`, `scalar::tests::radix_prefixes_follow_yaml11`
 and `scalar::tests::underscores_and_sexagesimals`.
 
+## The command-line tool is `asdftool`, not `asdf`
+
+Upstream builds its tool as `asdf`. Ours has the same sub-commands, options
+and output -- the `info`, `events` and `verify-checksums` goldens are
+upstream's own captures -- but is installed as `asdftool`.
+
+The C library has to be `asdf`, so that it builds as `libasdf.so` and
+`libasdf.a`, and on Windows a binary and a C library of the same name both
+write `deps/asdf.pdb`: a parallel build raced, and one link failed. Cargo
+hashes neither name, so the two cannot share one. `asdf` is also the asdf
+version manager's command, and Python asdf's tool is likewise `asdftool`.
+
+Covered by `asdf-cli`'s `verify_goldens`, which runs the binary by its
+cargo-provided path.
+
 ## Output formatting
 
 Byte-level parity with libasdf's emitted YAML is a nice-to-have, never a gate.

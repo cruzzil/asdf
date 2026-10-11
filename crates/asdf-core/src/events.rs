@@ -1,7 +1,7 @@
 //! The low-level event stream: what a file contains, in the order it appears.
 //!
 //! This is the engine behind libasdf's event-based parser and behind the
-//! `asdf events` command. Rather than building a tree, it reports what the
+//! `asdftool events` command. Rather than building a tree, it reports what the
 //! file holds: the version headers, any comments, the block index, the
 //! tree's extent, optionally the YAML events inside it, then each block,
 //! then the end.
@@ -37,7 +37,7 @@ pub enum Event {
     /// The YAML tree ends here.
     ///
     /// `text` carries the tree itself when [`EventOptions::buffer_tree`] was
-    /// asked for, which is what `asdf events --cap-tree` prints.
+    /// asked for, which is what `asdftool events --cap-tree` prints.
     TreeEnd { start: usize, end: usize, text: Option<String> },
     /// A binary block.
     Block(BlockLocation),

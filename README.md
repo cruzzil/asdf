@@ -6,7 +6,7 @@
 |---|---|---|---|
 | [`asdf-rs`](https://crates.io/crates/asdf-rs) | [![Crates.io](https://img.shields.io/crates/v/asdf-rs.svg)](https://crates.io/crates/asdf-rs) | [![Documentation](https://docs.rs/asdf-rs/badge.svg)](https://docs.rs/asdf-rs/) | the idiomatic Rust API |
 | [`libasdf-rs`](https://crates.io/crates/libasdf-rs) | [![Crates.io](https://img.shields.io/crates/v/libasdf-rs.svg)](https://crates.io/crates/libasdf-rs) | [![Documentation](https://docs.rs/libasdf-rs/badge.svg)](https://docs.rs/libasdf-rs/) | the C ABI |
-| [`asdf-cli`](https://crates.io/crates/asdf-cli) | [![Crates.io](https://img.shields.io/crates/v/asdf-cli.svg)](https://crates.io/crates/asdf-cli) | [![Documentation](https://docs.rs/asdf-cli/badge.svg)](https://docs.rs/asdf-cli/) | the `asdf` command |
+| [`asdf-cli`](https://crates.io/crates/asdf-cli) | [![Crates.io](https://img.shields.io/crates/v/asdf-cli.svg)](https://crates.io/crates/asdf-cli) | [![Documentation](https://docs.rs/asdf-cli/badge.svg)](https://docs.rs/asdf-cli/) | the `asdftool` command |
 | [`asdf-core`](https://crates.io/crates/asdf-core) | [![Crates.io](https://img.shields.io/crates/v/asdf-core.svg)](https://crates.io/crates/asdf-core) | [![Documentation](https://docs.rs/asdf-core/badge.svg)](https://docs.rs/asdf-core/) | the engine |
 | [`asdf-yaml`](https://crates.io/crates/asdf-yaml) | [![Crates.io](https://img.shields.io/crates/v/asdf-yaml.svg)](https://crates.io/crates/asdf-yaml) | [![Documentation](https://docs.rs/asdf-yaml/badge.svg)](https://docs.rs/asdf-yaml/) | the document model |
 
@@ -32,7 +32,7 @@ Telescope.
 | `asdf-yaml` | The ASDF YAML layer: document model, parser and emitter. |
 | `libasdf-rs` | The C ABI. Builds `libasdf.so`; every entry point is panic-guarded. |
 | `asdf-rs` | The idiomatic Rust API. Published as `asdf-rs`; the library is `asdf`, so you write `use asdf::...`. |
-| `asdf-cli` | The `asdf` command-line tool. |
+| `asdf-cli` | The `asdftool` command-line tool, libasdf's `asdf` under a name that does not collide with the C library's. |
 
 `libasdf-rs` and `asdf-rs` are both thin projections of `asdf-core`, so the two
 public faces cannot drift apart in semantics.
@@ -190,7 +190,7 @@ Feature-complete against upstream libasdf, and past it in a few places.
   extensions register into before `main`.
 - Both the read and the write path, including compression (zlib, bzip2, lz4),
   block indices, checksums and inline array storage.
-- The `asdf` command-line tool: `info`, `dd`, `events` and
+- The `asdftool` command-line tool: `info`, `dd`, `events` and
   `verify-checksums`, with upstream's options and output.
 - Past parity, in `asdf-core` and the idiomatic API rather than the C
   surface: external array sources (exploded form), the `core/complex` tag,

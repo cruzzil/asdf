@@ -14,6 +14,19 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+### Changed
+
+- **The command-line tool is now `asdftool`**, not `asdf` (`asdf-cli`). The
+  `libasdf-rs` C library is also `asdf`, and on Windows a binary and a C
+  library of the same name both write `deps/asdf.pdb`, so a parallel build
+  could fail one of the two links -- which it did in CI for 0.2.5. `asdf`
+  also collides with the asdf version manager on many `PATH`s. Python asdf's
+  tool has the same name. Sub-commands, options and output are unchanged;
+  scripts calling `asdf` need updating. Recorded in `KNOWN-DIVERGENCES.md`,
+  since upstream's tool is still `asdf`.
+- `asdf-cli`'s golden tests find the binary through cargo rather than by
+  guessing its path, which on Windows lacked the `.exe` and skipped them.
+
 ## [0.2.5] - 2026-10-11
 
 `asdf-yaml` 0.2.2, `asdf-core` 0.2.5, `asdf-rs` 0.2.2 and `libasdf-rs` 0.2.3.
