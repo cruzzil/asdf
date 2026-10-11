@@ -496,9 +496,10 @@ impl Reader {
                 }
             };
 
-            match decode_all(&nd, &shape, &data) {
-                Ok(elements) => inline_ndarray(&mut doc, id, &elements, &shape)?,
-                Err(e) => skipped.push(format!("{id:?}: {e}")),
+            if let Err(e) = decode_all(&nd, &shape, &data)
+                .and_then(|elements| inline_ndarray(&mut doc, id, &elements, &shape))
+            {
+                skipped.push(format!("{id:?}: {e}"));
             }
         }
         Ok(Some((doc, skipped)))
@@ -784,5 +785,28 @@ mod tests {
         let r = Reader::from_bytes(buf).unwrap();
         assert!(r.tree().unwrap().is_none());
         assert_eq!(&*r.block_data(0).unwrap(), b"data");
+    }
+
+    #[test]
+    fn an_empty_array_with_a_huge_leading_dimension_is_skipped_not_inlined() {
+        // Found by the `structured` fuzz target: a trailing zero makes the
+        // element count 0, which any block trivially holds, but inlining it
+        // would still mean building 2^62 empty sequences.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n");
+        buf.extend_from_slice(b"%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
+        buf.extend_from_slice(
+            b"data: !core/ndarray-1.1.0\n  source: 0\n  \
+              datatype: int8\n  byteorder: little\n  shape: [4611686018427387904, 0]\n",
+        );
+        buf.extend_from_slice(b"...\n");
+        let header =
+            BlockHeader { allocated_size: 4, used_size: 4, data_size: 4, ..Default::default() };
+        header.write(&mut buf);
+        buf.extend_from_slice(b"data");
+
+        let r = Reader::from_bytes(buf).unwrap();
+        let (_, skipped) = r.tree_inlined().unwrap().unwrap();
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
     }
 }
