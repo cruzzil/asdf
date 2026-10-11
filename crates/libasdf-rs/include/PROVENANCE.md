@@ -18,10 +18,10 @@ exist *only* in the headers:
 | | |
 |---|---|
 | Upstream | https://github.com/asdf-format/libasdf |
-| Commit | `4be9e73` |
-| Describe | `0.2.0` |
-| Package version | 0.2.0 |
-| Vendored on | 2026-09-16 |
+| Commit | `9927a3f` |
+| Describe | `0.2.1` |
+| Package version | 0.2.1 |
+| Vendored on | 2026-10-11 |
 | Licence | BSD-3-Clause — the upstream text is vendored alongside, as `LICENSE` |
 
 `asdf/config.h.in` is **not** vendored; `build.rs` generates `asdf/config.h` for the
@@ -29,7 +29,8 @@ target instead.
 
 Up to 0.1.0 it also generated an empty `sys/time.h` for MSVC, which has no such
 header, because `asdf/core/time.h` included it while needing only `struct timespec`.
-Upstream dropped that include in 0.2.0 ([gh-261]), so the shim is gone.
+Upstream dropped that include in 0.2.0 ([gh-261]), so the shim is gone. 0.2.1
+left the headers untouched, and no workaround went away with it.
 
 [gh-261]: https://github.com/asdf-format/libasdf/issues/261
 

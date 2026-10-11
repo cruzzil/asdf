@@ -303,21 +303,32 @@ pub(crate) fn time_serialize(doc: &mut Document, obj: &asdf_time_t) -> Option<No
     };
 
     let mut pairs = Vec::new();
-    let mut put = |doc: &mut Document, key: &str, text: String| {
+    let mut put = |doc: &mut Document, key: &str, text: String, style| {
         let k = doc.add_scalar(key);
-        let v = doc.add_scalar_styled(text, asdf_core::yaml::ScalarStyle::SingleQuoted);
+        let v = doc.add_scalar_styled(text, style);
         pairs.push((k, v));
     };
-    put(doc, "value", value);
+    // A numeric value (`jd`, `mjd`, `jyear`, ...) is written verbatim as a
+    // plain number, as libasdf does, so it keeps its full precision and
+    // reads back as a number; anything else is a string.
+    let style = if asdf_core::yaml::scalar::is_number(&value) {
+        asdf_core::yaml::ScalarStyle::Plain
+    } else {
+        asdf_core::yaml::string_style(&value)
+    };
+    put(doc, "value", value, style);
 
     // The schema permits only standard formats in `format`; an "other"
     // effective format goes in `base_format` with `format` left out, and its
     // standard wire form is re-inferred from the value on read.
     let name = effective.name()?.to_string();
-    put(doc, if effective.is_other() { "base_format" } else { "format" }, name);
+    let style = asdf_core::yaml::string_style(&name);
+    put(doc, if effective.is_other() { "base_format" } else { "format" }, name, style);
 
     if scale != TimeScale::Utc {
-        put(doc, "scale", scale.name().to_string());
+        let name = scale.name().to_string();
+        let style = asdf_core::yaml::string_style(&name);
+        put(doc, "scale", name, style);
     }
     if obj.location.longitude != 0.0 || obj.location.latitude != 0.0 || obj.location.height != 0.0 {
         let mut location = Vec::new();

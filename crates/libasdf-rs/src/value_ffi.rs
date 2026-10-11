@@ -23,7 +23,7 @@ use crate::file_ffi::file_document_mut;
 use alloc::ffi::CString;
 use core::ffi::{CStr, c_char, c_int};
 
-use asdf_core::yaml::{NodeData, NodeId, Resolved, ScalarStyle, Schema, resolve};
+use asdf_core::yaml::{NodeData, NodeId, Resolved, Schema, resolve};
 
 use crate::file_ffi::{AsdfFile, AsdfValue, value_document, value_file, value_node};
 use crate::panic::guard;
@@ -1129,9 +1129,7 @@ pub unsafe extern "C" fn asdf_value_of_double(file: *mut AsdfFile, value: f64) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asdf_value_of_float(file: *mut AsdfFile, value: f32) -> *mut AsdfValue {
     guard("asdf_value_of_float", core::ptr::null_mut(), || {
-        add_node(file, |doc| {
-            doc.add_scalar(asdf_core::core::elements::format_float(f64::from(value)))
-        })
+        add_node(file, |doc| doc.add_scalar(asdf_core::core::elements::format_float32(value)))
     })
 }
 
@@ -1190,10 +1188,7 @@ pub(crate) fn value_of_string0(file: *mut AsdfFile, value: *const c_char) -> *mu
     }
     let text = unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned();
     add_node(file, |doc| {
-        let style = match resolve(&text, ScalarStyle::Plain, Schema::Libasdf) {
-            Resolved::String => ScalarStyle::Plain,
-            _ => ScalarStyle::SingleQuoted,
-        };
+        let style = asdf_core::yaml::string_style(&text);
         doc.add_scalar_styled(text, style)
     })
 }
@@ -1227,10 +1222,7 @@ pub(crate) fn value_of_string(
     let bytes = unsafe { core::slice::from_raw_parts(value.cast::<u8>(), len) };
     let text = String::from_utf8_lossy(bytes).into_owned();
     add_node(file, |doc| {
-        let style = match resolve(&text, ScalarStyle::Plain, Schema::Libasdf) {
-            Resolved::String => ScalarStyle::Plain,
-            _ => ScalarStyle::SingleQuoted,
-        };
+        let style = asdf_core::yaml::string_style(&text);
         doc.add_scalar_styled(text, style)
     })
 }

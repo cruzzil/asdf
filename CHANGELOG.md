@@ -14,6 +14,50 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+### Changed
+
+- **Synced to libasdf `9927a3f` (0.2.1)**, up from `4be9e73` (0.2.0). No
+  interface changed -- the vendored headers are byte-identical and the
+  surface is still **379 declared exports** -- so this is an ABI event only
+  in name; what 0.2.1 changed is behaviour. Upstream's C suite now passes
+  **501 of 504**, against a suite that gained three tests; the three that do
+  not pass are the same `compare_files` checks as before.
+- **Scalars resolve under libasdf's YAML 1.1 grammar.** `Schema::Libasdf`
+  stopped emulating C's `strtoull` / `strtod` and now ports upstream's
+  resolver: `yes` / `no` / `on` / `off` are booleans; `0b` binary, `0x` hex
+  and leading-`0` octal, `_` separators and sexagesimals are numbers; a float
+  needs a `.` or an exponent; and `!!float` accepts a plain int. For ints and
+  booleans that is now exactly what PyYAML does, verified spelling by
+  spelling against it. The divergences it closed are gone from
+  `KNOWN-DIVERGENCES.md`, rewritten as the one difference that remains.
+- **Floats are written in the shortest form that round-trips, always with a
+  `.`**, as libasdf now writes them: `1.0e-08`, `100.0`, `1.0e+16`, and a
+  float32 `0.1` as `0.1` rather than `0.10000000149011612`.
+- **A string, or a mapping key, that would read back as another type is
+  quoted**, on libasdf's rules, which are broader than ours were: `y`, `n`,
+  `<<`, `0o17` and `2001-12-14` are quoted too, though libasdf itself reads
+  them as strings, because other YAML readers do not. The emitter also stops
+  writing every key plain, which had silently unquoted keys such as `'null'`.
+- **A numeric time `value` is written as a plain number**, keeping its full
+  precision, rather than as a quoted string.
+- **`libasdf_version` reports `0.2.1`.**
+- **CI pins libasdf to the sync commit.** It checked out upstream's moving
+  `main`, so upstream adding tests failed every job regardless of the change
+  under test. The upstream-suite gate also now counts a test munit skips --
+  `test-value`'s locale test, where the locale is missing -- so its pinned
+  figures hold on every platform.
+
+### Security
+
+- **An empty array could still be inlined into 2^62 empty sequences.** A
+  shape with a zero in it, such as `[2^62, 0]`, holds no elements, so it
+  passed both the block-length check and the element-count check -- and
+  `Reader::tree_inlined` then panicked on a capacity overflow, or with
+  `[77, 77, 77, 77, 77, 77, 0]` ran out of memory. The rows ahead of the
+  first zero are now bounded, and an array that cannot be inlined is reported
+  in `skipped` rather than failing the whole tree. Found by the `structured`
+  fuzz target.
+
 ## [0.2.4] - 2026-09-25
 
 `asdf-core` 0.2.4, `asdf-rs` 0.2.1 and `libasdf-rs` 0.2.2. `asdf-yaml` and

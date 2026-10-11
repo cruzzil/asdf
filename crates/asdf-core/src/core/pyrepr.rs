@@ -36,8 +36,13 @@ fn double_to_string(value: f64, force_sign: bool) -> String {
 
     // `{:e}` gives the shortest round-tripping digits with an explicit
     // exponent, which is exactly what CPython's shortest-repr produces.
-    let scientific = format!("{value:e}");
-    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((scientific.as_str(), "0"));
+    place_point(&format!("{value:e}"), plus)
+}
+
+/// Lay out the shortest digits of `{:e}` output the way CPython's `'r'`
+/// format does, prefixing `plus` to a non-negative value.
+fn place_point(scientific: &str, plus: &str) -> String {
+    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((scientific, "0"));
     let negative = mantissa.starts_with('-');
     let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
     let exponent: i32 = exponent.parse().unwrap_or(0);
@@ -93,6 +98,34 @@ pub fn repr_f64(value: f64) -> String {
     }
 }
 
+/// Format a float the way libasdf's `asdf_yaml_format_float` does.
+///
+/// Since libasdf 0.2.1 that is Python's `repr` -- the shortest text that
+/// round-trips -- made a valid YAML 1.1 float: the non-finite values use
+/// YAML's spellings, and a mantissa without a `.` gets one, so `1e-08` is
+/// written `1.0e-08` and `100` is written `100.0`. With `single`, the digits
+/// are the shortest that round-trip through an `f32`, so a float32 `0.1` is
+/// `0.1` rather than `0.10000000149011612`.
+pub fn yaml_float(value: f64, single: bool) -> String {
+    if value.is_nan() {
+        return ".nan".to_string();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() { "-.inf" } else { ".inf" }.to_string();
+    }
+
+    #[allow(clippy::cast_possible_truncation, reason = "narrowing to f32 is the point of single")]
+    let scientific = if single { format!("{:e}", value as f32) } else { format!("{value:e}") };
+    let mut out = place_point(&scientific, "");
+    if !out.contains('.') {
+        match out.find('e') {
+            Some(e) => out.insert_str(e, ".0"),
+            None => out.push_str(".0"),
+        }
+    }
+    out
+}
+
 /// Format a complex number as Python's `repr` does.
 ///
 /// A value whose real part is `+0.0` is written as the imaginary part alone
@@ -130,6 +163,41 @@ mod tests {
         assert_eq!(repr_f64(f64::INFINITY), "inf");
         assert_eq!(repr_f64(f64::NEG_INFINITY), "-inf");
         assert_eq!(repr_f64(f64::NAN), "nan");
+    }
+
+    /// Every expectation here is what libasdf 0.2.1's `asdf_yaml_format_float`
+    /// writes: `repr`, with a `.` always in the mantissa.
+    #[test]
+    fn yaml_floats_match_libasdf() {
+        for (value, text) in [
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (1.0, "1.0"),
+            (100.0, "100.0"),
+            (0.1, "0.1"),
+            (0.0001, "0.0001"),
+            (1.5e-4, "0.00015"),
+            (1e-5, "1.0e-05"),
+            (1e-8, "1.0e-08"),
+            (1e15, "1000000000000000.0"),
+            (1e16, "1.0e+16"),
+            (1.5e300, "1.5e+300"),
+            (f64::MAX, "1.7976931348623157e+308"),
+            (f64::INFINITY, ".inf"),
+            (f64::NEG_INFINITY, "-.inf"),
+            (f64::NAN, ".nan"),
+        ] {
+            assert_eq!(yaml_float(value, false), text, "{value:e}");
+        }
+        for (value, text) in [
+            (0.1f32, "0.1"),
+            (1.0f32 / 3.0, "0.33333334"),
+            (1e-8f32, "1.0e-08"),
+            (f32::MAX, "3.4028235e+38"),
+            (16_777_216.0f32, "16777216.0"),
+        ] {
+            assert_eq!(yaml_float(f64::from(value), true), text, "{value:e}");
+        }
     }
 
     /// Every expectation here is `repr(complex(re, im))` from CPython 3, and

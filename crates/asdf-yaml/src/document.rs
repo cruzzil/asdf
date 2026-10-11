@@ -199,7 +199,9 @@ impl Document {
                 Some(core::mem::replace(&mut entries[pos].value, value))
             }
             None => {
-                let key_id = self.add_scalar(key);
+                // Quoted where needed, so that a key such as `yes` or `1`
+                // reads back as the string it was set as.
+                let key_id = self.add_scalar_styled(key, crate::scalar::string_style(key));
                 let NodeData::Mapping { entries, .. } = &mut self.node_mut(target).data else {
                     return None;
                 };

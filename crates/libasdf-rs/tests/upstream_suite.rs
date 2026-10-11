@@ -37,7 +37,13 @@ struct Suite {
     /// Tests expected to pass today. Raise it as gaps close; a suite that
     /// passes *more* than this fails too, so the number stays honest.
     expect_pass: usize,
-    /// Total tests in the suite, as munit counts them.
+    /// Total tests in the suite, counting any munit skipped.
+    ///
+    /// A test that skips itself -- `test_float_locale_independent` does when
+    /// the machine lacks the locale it needs -- is left out of munit's own
+    /// total, so pinning that total would make the table platform-dependent.
+    /// A skipped test is counted towards `expect_pass` as well: it is not a
+    /// regression here, and the platforms that can run it still check it.
     total: usize,
     /// Also search libasdf's `src/` for includes.
     ///
@@ -61,11 +67,12 @@ const SUITES: &[Suite] = &[
     Suite { name: "test-time", expect_pass: 17, total: 17, needs_compat_headers: false },
     Suite { name: "test-core-extensions", expect_pass: 16, total: 16, needs_compat_headers: false },
     Suite { name: "test-ndarray", expect_pass: 257, total: 257, needs_compat_headers: true },
-    // The one test that cannot pass: `test_asdf_value_of_foo` compares an
-    // emitted file byte for byte against a fixture libasdf wrote, whose
-    // `asdf_library` names libasdf. Byte parity on YAML is a nice-to-have
-    // and never a gate; the binary layer is where bytes matter.
-    Suite { name: "test-value", expect_pass: 66, total: 68, needs_compat_headers: false },
+    // The two tests that cannot pass, `test_asdf_value_of_type` and
+    // `test_asdf_mapping_set_scalars`, compare an emitted file byte for byte
+    // against a fixture libasdf wrote, whose `asdf_library` names libasdf.
+    // Byte parity on YAML is a nice-to-have and never a gate; the binary
+    // layer is where bytes matter.
+    Suite { name: "test-value", expect_pass: 69, total: 71, needs_compat_headers: false },
     Suite { name: "test-block", expect_pass: 6, total: 6, needs_compat_headers: false },
     Suite { name: "test-extension", expect_pass: 12, total: 13, needs_compat_headers: false },
     Suite {
@@ -157,16 +164,21 @@ fn c_compiler() -> String {
     std::env::var("CC").unwrap_or_else(|_| "cc".to_string())
 }
 
-/// How many of a suite's tests munit reported as successful.
+/// How many of a suite's tests munit reported as successful, out of how
+/// many, and how many it skipped.
 ///
-/// The summary line is `N of M (P%) tests successful, ...`.
-fn parse_summary(output: &str) -> Option<(usize, usize)> {
-    let line = output.lines().rev().find(|l| l.contains(") tests successful"))?;
-    let mut words = line.split_whitespace();
+/// The summary line is `N of M (P%) tests successful, S (Q%) tests skipped.`,
+/// where `M` leaves out the `S` skipped tests and the `test` / `tests`
+/// plural follows the count.
+fn parse_summary(output: &str) -> Option<(usize, usize, usize)> {
+    let line = output.lines().rev().find(|l| l.contains(" successful, "))?;
+    let (ran, skipped) = line.split_once(", ")?;
+    let mut words = ran.split_whitespace();
     let passed: usize = words.next()?.parse().ok()?;
     words.next()?; // "of"
     let total: usize = words.next()?.parse().ok()?;
-    Some((passed, total))
+    let skipped: usize = skipped.split_whitespace().next()?.parse().ok()?;
+    Some((passed, total, skipped))
 }
 
 #[test]
@@ -320,7 +332,7 @@ fn upstream_c_test_suite_runs_against_this_library() {
             String::from_utf8_lossy(&run.stdout),
             String::from_utf8_lossy(&run.stderr)
         );
-        let Some((passed, total)) = parse_summary(&output) else {
+        let Some((passed, total, skipped)) = parse_summary(&output) else {
             failures.push(format!(
                 "{}: no munit summary in its output:\n{}",
                 suite.name,
@@ -328,6 +340,8 @@ fn upstream_c_test_suite_runs_against_this_library() {
             ));
             continue;
         };
+        // See `Suite::total`: a skip counts as neither a loss nor a gap.
+        let (passed, total) = (passed + skipped, total + skipped);
 
         results.push((suite.name, passed, total));
         if total != suite.total {

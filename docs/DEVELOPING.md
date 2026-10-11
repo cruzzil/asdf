@@ -69,7 +69,7 @@ own expectations. In rough order of how much each is worth:
 
 | Gate | What it proves |
 |---|---|
-| `-p libasdf-rs --test upstream_suite` | Upstream's own C tests, compiled against the vendored headers and linked against our `libasdf.so`. 498/501. |
+| `-p libasdf-rs --test upstream_suite` | Upstream's own C tests, compiled against the vendored headers and linked against our `libasdf.so`. 501/504. |
 | `-p asdf-core --test corpus` / `reference_pairs` | The ASDF Standard's 105 reference files read as the YAML they document. |
 | `-p libasdf-rs --test abi` | Exported symbols, struct layouts, enum discriminants, `_Generic` macros, pre-`main` extension registration — from real C programs. |
 | `-p asdf-core --test differential` | Round-trips against the Python implementation, both directions. |

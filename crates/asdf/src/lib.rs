@@ -79,9 +79,7 @@ use alloc::borrow::Cow;
 use std::path::Path;
 
 use asdf_core::core::elements::decode_all;
-use asdf_core::yaml::{
-    self, CompareOptions, Document, NodeData, NodeId, Resolved, ScalarStyle, Schema, Tag,
-};
+use asdf_core::yaml::{self, CompareOptions, Document, NodeData, NodeId, Resolved, Schema, Tag};
 use asdf_core::{PendingBlock, Reader, Writer};
 
 pub use asdf_core::ChecksumStatus;
@@ -909,11 +907,7 @@ impl AsdfBuilder {
 
     /// Set a string. It is quoted where needed so it reads back as a string.
     pub fn set_str(&mut self, path: &str, value: &str) -> Result<()> {
-        let style = match yaml::resolve(value, ScalarStyle::Plain, Schema::Libasdf) {
-            Resolved::String => ScalarStyle::Plain,
-            _ => ScalarStyle::SingleQuoted,
-        };
-        let node = self.document.add_scalar_styled(value, style);
+        let node = self.document.add_scalar_styled(value, yaml::string_style(value));
         self.insert(path, node)
     }
 

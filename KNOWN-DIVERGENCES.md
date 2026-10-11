@@ -13,29 +13,32 @@ an explicit `!!bool` tag. We reproduce this ordering.
 
 Covered by `scalar::tests::int_is_tried_before_bool`.
 
-## Scalar resolution: radix prefixes
+## Scalar resolution: a float may omit its `.`
 
-Because libasdf uses base 0, a bare leading zero means **octal** in C's sense
-(`010` is 8) and `0x` means hex. YAML 1.2's `0o` prefix is *not* recognised and
-falls through to a string. YAML 1.1's `0o`, `0b`, underscores and sexagesimals
-are recognised only under `Schema::Yaml11`.
+The ASDF Standard mandates `%YAML 1.1`. Since 0.2.1, libasdf resolves ints and
+booleans exactly as PyYAML's 1.1 resolver does -- `yes` / `no` / `on` / `off`,
+`0b`, `0x` and leading-zero octal, `_` separators and sexagesimals, but not
+`y` / `n` or YAML 1.2's `0o`. That closed what used to be this file's largest
+divergence, when libasdf resolved with C's `strtoull` at base 0.
 
-Covered by `scalar::tests::base0_radix_matches_c_not_yaml` and
-`scalar::tests::yaml11_underscores_and_sexagesimals`.
+One difference is deliberate on libasdf's part and we reproduce it: a float
+with an exponent need not have a `.`, so `1e-08` is a float to libasdf and to
+us, and a string to PyYAML. Versions of libasdf before 0.2.1 *wrote* floats
+that way, and reading them back as strings would break every file they wrote.
+libasdf, PyYAML and this library all *write* `1.0e-08`, so a file written by
+any of them now reads the same in all three.
 
-## YAML version
-
-The ASDF Standard mandates `%YAML 1.1`. libasdf, via libfyaml, effectively
-applies YAML 1.2 core-schema resolution regardless; Python asdf, via PyYAML,
-applies the genuine 1.1 resolver. The three already disagree on unquoted
-`yes` / `no` / `on` / `off`, sexagesimals, and leading-zero octals. We default
-to libasdf's behaviour and offer `Schema::Yaml11` for reading Python-written
-files.
+Covered by `scalar::tests::floats`, `scalar::tests::radix_prefixes_follow_yaml11`
+and `scalar::tests::underscores_and_sexagesimals`.
 
 ## Output formatting
 
 Byte-level parity with libasdf's emitted YAML is a nice-to-have, never a gate.
-Equality is judged at the YAML-value level. The binary block layer is exempt:
+Equality is judged at the YAML-value level. Scalars are nonetheless written as
+libasdf writes them -- floats in the shortest form that round-trips, with a
+`.` always present, and a string quoted exactly when libasdf would quote it --
+which `file_ffi::tests::scalars_are_written_as_libasdf_writes_them` pins
+against upstream's own fixture. The binary block layer is exempt:
 block headers, checksums, padding and index offsets are byte-exact by
 specification.
 

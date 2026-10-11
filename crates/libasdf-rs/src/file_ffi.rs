@@ -988,10 +988,7 @@ pub unsafe extern "C" fn asdf_set_string0(
         set_node(file, path, |doc| {
             // Plain style is fine for text that cannot be mistaken for
             // another type; anything else is quoted so it stays a string.
-            let style = match asdf_yaml::resolve(&text, ScalarStyle::Plain, Schema::Libasdf) {
-                Resolved::String => ScalarStyle::Plain,
-                _ => ScalarStyle::SingleQuoted,
-            };
+            let style = asdf_yaml::string_style(&text);
             doc.add_scalar_styled(text, style)
         })
     })
@@ -1049,9 +1046,7 @@ pub unsafe extern "C" fn asdf_set_float(
     value: f32,
 ) -> AsdfValueErr {
     guard("asdf_set_float", AsdfValueErr::Unknown, || {
-        set_node(file, path, |doc| {
-            doc.add_scalar(asdf_core::core::elements::format_float(f64::from(value)))
-        })
+        set_node(file, path, |doc| doc.add_scalar(asdf_core::core::elements::format_float32(value)))
     })
 }
 
@@ -1371,10 +1366,7 @@ pub unsafe extern "C" fn asdf_set_string(
         let bytes = unsafe { core::slice::from_raw_parts(str_.cast::<u8>(), len) };
         let text = String::from_utf8_lossy(bytes).into_owned();
         set_node(file, path, |doc| {
-            let style = match asdf_yaml::resolve(&text, ScalarStyle::Plain, Schema::Libasdf) {
-                Resolved::String => ScalarStyle::Plain,
-                _ => ScalarStyle::SingleQuoted,
-            };
+            let style = asdf_yaml::string_style(&text);
             doc.add_scalar_styled(text, style)
         })
     })
@@ -1895,6 +1887,94 @@ mod tests {
         );
         assert_eq!(unsafe { CStr::from_ptr(out) }.to_str().unwrap(), "42");
         unsafe { libc::free(buf) };
+    }
+
+    /// The lines libasdf 0.2.1 writes for the scalars its `test-file.c`
+    /// sets, taken from its `tests/fixtures/scalars-out.asdf`.
+    ///
+    /// `test-file.c` includes private headers, so the upstream-suite gate
+    /// cannot run it; this is that test's coverage here. Floats come out in
+    /// the shortest form that round-trips with a `.` always present, and a
+    /// string -- or a key -- that would read back as anything else is quoted.
+    #[test]
+    fn scalars_are_written_as_libasdf_writes_them() {
+        let f = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, core::ptr::null_mut()) };
+        let h = Handle(f);
+
+        let doubles = [
+            ("double_1e_8", 1e-8, "1.0e-08"),
+            ("double_2e_8", 2e-8, "2.0e-08"),
+            ("double_1_5e_8", 1.5e-8, "1.5e-08"),
+            ("double_0_1", 0.1, "0.1"),
+            ("double_1", 1.0, "1.0"),
+            ("double_100", 100.0, "100.0"),
+            ("double_neg_zero", -0.0, "-0.0"),
+            ("double_1e15", 1e15, "1000000000000000.0"),
+            ("double_1e16", 1e16, "1.0e+16"),
+            ("double_1e_4", 1e-4, "0.0001"),
+            ("double_1e_5", 1e-5, "1.0e-05"),
+            ("double_min", 5e-324, "5.0e-324"),
+            ("double_neg_inf", f64::NEG_INFINITY, "-.inf"),
+            ("double_nan", f64::NAN, ".nan"),
+            ("double", f64::MAX, "1.7976931348623157e+308"),
+        ];
+        let floats = [
+            ("float_0_1", 0.1f32, "0.1"),
+            ("float_1e_8", 1e-8, "1.0e-08"),
+            ("float_2_24", 16_777_216.0, "16777216.0"),
+            ("float", f32::MAX, "3.4028235e+38"),
+        ];
+        let strings = [
+            ("str_yes", "yes", "'yes'"),
+            ("str_Off", "Off", "'Off'"),
+            ("str_n", "n", "'n'"),
+            ("str_empty", "", "''"),
+            ("str_tilde", "~", "'~'"),
+            ("str_null", "null", "'null'"),
+            ("str_int", "123", "'123'"),
+            ("str_float_no_dot", "1e-08", "'1e-08'"),
+            ("str_yaml12_oct", "0o17", "'0o17'"),
+            ("str_base60", "1:30", "'1:30'"),
+            ("str_inf", ".inf", "'.inf'"),
+            ("str_timestamp", "2001-12-14", "'2001-12-14'"),
+            ("str_merge", "<<", "'<<'"),
+            ("str_version", "1.2.3", "1.2.3"),
+            ("str_no_way", "no way", "no way"),
+        ];
+
+        for (key, value, _) in doubles {
+            let k = cpath(key);
+            assert_eq!(unsafe { asdf_set_double(h.0, k.as_ptr(), value) }, AsdfValueErr::Ok);
+        }
+        for (key, value, _) in floats {
+            let k = cpath(key);
+            assert_eq!(unsafe { asdf_set_float(h.0, k.as_ptr(), value) }, AsdfValueErr::Ok);
+        }
+        for (key, value, _) in strings {
+            let k = cpath(key);
+            let v = CString::new(value).unwrap();
+            assert_eq!(unsafe { asdf_set_string0(h.0, k.as_ptr(), v.as_ptr()) }, AsdfValueErr::Ok);
+        }
+        let on = cpath("on");
+        assert_eq!(unsafe { asdf_set_int8(h.0, on.as_ptr(), 1) }, AsdfValueErr::Ok);
+
+        let mut buf: *mut c_void = core::ptr::null_mut();
+        let mut size: usize = 0;
+        assert_eq!(unsafe { asdf_write_to_mem(h.0, &mut buf, &mut size) }, 0);
+        let bytes = unsafe { core::slice::from_raw_parts(buf.cast::<u8>(), size) };
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        unsafe { libc::free(buf) };
+
+        let lines: Vec<&str> = text.lines().collect();
+        let expected = doubles
+            .iter()
+            .map(|(k, _, t)| format!("{k}: {t}"))
+            .chain(floats.iter().map(|(k, _, t)| format!("{k}: {t}")))
+            .chain(strings.iter().map(|(k, _, t)| format!("{k}: {t}")))
+            .chain(["'on': 1".to_string()]);
+        for line in expected {
+            assert!(lines.contains(&line.as_str()), "missing {line:?} in:\n{text}");
+        }
     }
 
     #[test]

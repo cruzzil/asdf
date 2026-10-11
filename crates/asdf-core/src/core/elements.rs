@@ -9,6 +9,7 @@ use asdf_yaml::{CollectionStyle, Document, Node, NodeData, NodeId, ScalarStyle};
 
 use crate::core::datatype::{ByteOrder, Datatype, ScalarType};
 use crate::core::ndarray::{Ndarray, Source};
+use crate::core::pyrepr::yaml_float;
 use crate::error::{Result, err};
 
 /// One decoded array element.
@@ -478,23 +479,15 @@ fn parse_inline_complex(text: &str) -> Result<(f64, f64)> {
 /// The tag Python asdf puts on every inline complex value.
 const COMPLEX_TAG: &str = "tag:stsci.edu:asdf/core/complex-1.0.0";
 
-/// Format a float the way libasdf's emitter does.
-///
-/// `%.17g` for doubles, with YAML's own spellings for the non-finite values.
+/// Format a double the way libasdf's emitter does; see [`yaml_float`].
 pub fn format_float(value: f64) -> String {
-    if value.is_nan() {
-        return ".nan".to_string();
-    }
-    if value.is_infinite() {
-        return if value.is_sign_negative() { "-.inf".into() } else { ".inf".into() };
-    }
-    // Shortest representation that round-trips, which is what Rust's
-    // formatter gives and what a reader will parse back identically.
-    let mut s = format!("{value}");
-    if !s.contains('.') && !s.contains('e') && !s.contains("inf") && !s.contains("nan") {
-        s.push_str(".0");
-    }
-    s
+    yaml_float(value, false)
+}
+
+/// Format a single-precision float the way libasdf's emitter does, with the
+/// shortest digits that round-trip through an `f32`.
+pub fn format_float32(value: f32) -> String {
+    yaml_float(f64::from(value), true)
 }
 
 /// Render one element as a tree node.
