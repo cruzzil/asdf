@@ -175,6 +175,17 @@ fn write_scalar(out: &mut String, text: &str, style: ScalarStyle) {
     }
 }
 
+/// Write a mapping key in its own style, so a key quoted to stay a string --
+/// `'null'`, `'yes'`, `'1'` -- is not written back plain.
+///
+/// Keys are quoted on the same rules as any scalar, so a plain key that would
+/// be misread structurally is still quoted.
+fn write_key(out: &mut String, doc: &Document, key: NodeId) {
+    let node = doc.resolved(key);
+    let style = node.scalar_style().unwrap_or(ScalarStyle::Plain);
+    write_scalar(out, node.as_str().unwrap_or_default(), style);
+}
+
 struct Emitter<'a> {
     doc: &'a Document,
     options: EmitOptions,
@@ -342,11 +353,8 @@ impl Emitter<'_> {
                         self.out.push('\n');
                     }
                     for entry in entries {
-                        let key =
-                            self.doc.resolved(entry.key).as_str().unwrap_or_default().to_string();
                         let _ = write!(self.out, "{pad}");
-                        // Keys are quoted on the same rules as any scalar.
-                        write_scalar(&mut self.out, &key, ScalarStyle::Plain);
+                        write_key(&mut self.out, self.doc, entry.key);
                         self.out.push(':');
                         self.emit_value(entry.value, indent + self.options.indent, true)?;
                     }
@@ -418,8 +426,7 @@ fn emit_root_body(emitter: &mut Emitter<'_>, root: NodeId) -> Result<(), EmitErr
     match data {
         NodeData::Mapping { entries, .. } if !entries.is_empty() => {
             for entry in entries {
-                let key = emitter.doc.resolved(entry.key).as_str().unwrap_or_default().to_string();
-                write_scalar(&mut emitter.out, &key, ScalarStyle::Plain);
+                write_key(&mut emitter.out, emitter.doc, entry.key);
                 emitter.out.push(':');
                 emitter.emit_value(entry.value, indent, true)?;
             }

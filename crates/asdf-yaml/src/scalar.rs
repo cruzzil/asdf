@@ -3,13 +3,13 @@
 //! YAML leaves scalar typing to the "schema" in force, and the three ASDF
 //! implementations do not agree on one:
 //!
-//! - **libasdf** (via libfyaml) resolves with C's `strtoull`/`strtoll`/`strtod`
-//!   at base 0. That gives it C-style octal (`010` is 8) and hex. Since 0.2.0
-//!   it also recognises YAML's `.inf` / `.nan` spellings, which it has always
-//!   emitted, and it no longer accepts the bare `inf` / `nan` / `infinity`
-//!   that `strtod` takes and YAML does not.
-//! - **Python asdf** (via PyYAML) applies the genuine YAML 1.1 resolver, where
-//!   `yes`/`no`/`on`/`off` are booleans and sexagesimals are numbers.
+//! - **libasdf** has, since 0.2.1, a YAML 1.1 grammar that resolves ints and
+//!   booleans exactly as PyYAML does -- `yes`/`no`/`on`/`off`, `0b`/`0x`/
+//!   leading-`0` octal, `_` separators and sexagesimals, but not `y`/`n` or
+//!   YAML 1.2's `0o` -- and differs on floats: it also accepts one without a
+//!   `.` when it has an exponent (`1e-08`), which earlier versions wrote.
+//! - **Python asdf** (via PyYAML) applies the genuine YAML 1.1 resolver, which
+//!   requires the `.` in a float and resolves timestamps.
 //! - **saphyr** implements YAML 1.2.
 //!
 //! [`Schema::Libasdf`] reproduces the first exactly, so that drop-in parity
@@ -103,8 +103,8 @@ impl ValueType {
 /// Which scalar-resolution rules to apply.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Schema {
-    /// Reproduce libasdf's C-`strtol`-based resolution exactly. The default,
-    /// because drop-in parity is the priority.
+    /// Reproduce libasdf's resolution exactly. The default, because drop-in
+    /// parity is the priority.
     #[default]
     Libasdf,
     /// The genuine YAML 1.1 resolver, as Python asdf applies via PyYAML.
@@ -129,7 +129,7 @@ pub enum Resolved {
     /// Distinct from a string: the text *is* a number, so reading it as one
     /// is an overflow rather than a type mismatch, but there is no integer
     /// type that holds it, so its reported type is `Unknown`. libasdf gets
-    /// here through `strtoull` setting `ERANGE`.
+    /// here through `ASDF_VALUE_ERR_OVERFLOW` from its int parser.
     IntOverflow,
     /// Anything else.
     String,
@@ -182,15 +182,16 @@ pub fn is_null(s: &str) -> bool {
 
 /// Parse a boolean the way libasdf does.
 ///
-/// Note `0` and `1` are accepted. Because libasdf tries integers *before*
-/// booleans, an untagged `1` resolves as an integer; these two spellings only
+/// These are YAML 1.1's spellings bar `y` and `n`, which neither libasdf nor
+/// PyYAML resolve, plus `0` and `1`. Because libasdf tries integers *before*
+/// booleans, an untagged `1` resolves as an integer; those two spellings only
 /// surface as booleans when the scalar carries an explicit `!!bool` tag.
 pub fn parse_bool_libasdf(s: &str) -> Option<bool> {
     match s {
         "0" => Some(false),
         "1" => Some(true),
-        "true" | "True" | "TRUE" => Some(true),
-        "false" | "False" | "FALSE" => Some(false),
+        "true" | "True" | "TRUE" | "yes" | "Yes" | "YES" | "on" | "On" | "ON" => Some(true),
+        "false" | "False" | "FALSE" | "no" | "No" | "NO" | "off" | "Off" | "OFF" => Some(false),
         _ => None,
     }
 }
@@ -208,76 +209,202 @@ pub fn parse_bool_yaml11(s: &str) -> Option<bool> {
     }
 }
 
-/// Emulate C `strtoull(s, &end, 0)` followed by libasdf's "must consume the
-/// whole string" check.
-///
-/// Base 0 means a `0x`/`0X` prefix selects hex and a bare leading `0` selects
-/// octal, which is C's convention rather than YAML's.
-fn strtoull_base0_full(s: &str) -> Option<Result<u64, Overflow>> {
-    let t = s.trim_start();
-    // libasdf explicitly rejects a leading '-' here rather than letting
-    // strtoull wrap it around.
-    let body = t.strip_prefix('+').unwrap_or(t);
-    if !body.starts_with(|c: char| c.is_ascii_digit()) {
-        return None;
-    }
-    let (digits, radix) = split_radix(body);
-    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
-        return None;
-    }
-    Some(u64::from_str_radix(digits, radix).map_err(|_| Overflow))
-}
-
-/// Emulate C `strtoll(s, &end, 0)` with the same whole-string requirement.
-fn strtoll_base0_full(s: &str) -> Option<Result<i64, Overflow>> {
-    let t = s.trim_start();
-    let (neg, body) = match t.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, t.strip_prefix('+').unwrap_or(t)),
-    };
-    if !body.starts_with(|c: char| c.is_ascii_digit()) {
-        return None;
-    }
-    let (digits, radix) = split_radix(body);
-    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
-        return None;
-    }
-    let signed = if neg { format!("-{digits}") } else { digits.to_string() };
-    Some(i64::from_str_radix(&signed, radix).map_err(|_| Overflow))
-}
-
-/// Split C's base-0 radix prefix off a digit string.
-fn split_radix(body: &str) -> (&str, u32) {
-    if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
-        (hex, 16)
-    } else if body.len() > 1 && body.starts_with('0') {
-        (&body[1..], 8)
-    } else {
-        (body, 10)
-    }
-}
-
 /// Marker for a value that did not fit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Overflow;
 
-/// Emulate C `strtod` followed by the whole-string check.
+/// Split an optional leading `-` or `+` off, reporting whether it was `-`.
+fn split_sign(s: &str) -> (bool, &str) {
+    match s.as_bytes().first() {
+        Some(b'-') => (true, &s[1..]),
+        Some(b'+') => (false, &s[1..]),
+        _ => (false, s),
+    }
+}
+
+/// The length of the run of `_` and base-`radix` digits at the start of `s`.
+fn span_digits(s: &[u8], radix: u32) -> usize {
+    s.iter().take_while(|&&b| b == b'_' || char::from(b).is_digit(radix)).count()
+}
+
+/// The length of the match for `(:[0-5]?[0-9])*` at the start of `s`.
 ///
-/// `strtod` accepts `inf`, `infinity` and `nan`, which YAML spells only as
-/// `.inf` and `.nan` and otherwise reads as strings. libasdf keeps them out
-/// by refusing to call `strtod` at all unless the first character after an
-/// optional sign is a digit or `.`; this reproduces that gate, including the
-/// detail that it looks at the raw first byte, so leading whitespace -- which
-/// `strtod` itself would skip -- is rejected too.
+/// A two-digit component must start `0`-`5`; anything that does ends the
+/// match early, and the caller then rejects the scalar for not being consumed.
+fn span_base60(s: &[u8]) -> usize {
+    let mut i = 0;
+    while i + 1 < s.len() && s[i] == b':' && s[i + 1].is_ascii_digit() {
+        if i + 2 < s.len() && s[i + 2].is_ascii_digit() {
+            if s[i + 1] > b'5' {
+                break;
+            }
+            i += 3;
+        } else {
+            i += 2;
+        }
+    }
+    i
+}
+
+/// Parse `_`-separated digits already known to be valid in `radix`.
 ///
-/// Rust's `f64::from_str` then rejects the hex-float form C admits, which
-/// costs nothing: integer resolution is tried first and takes `0x10`.
-fn strtod_full(s: &str) -> Option<f64> {
-    let body = s.strip_prefix(['+', '-']).unwrap_or(s);
-    if !body.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
+/// `None` when nothing is left once the separators are gone, so that `0x`
+/// and `0b_` are not ints.
+fn parse_digits(digits: &str, radix: u32) -> Option<Result<u64, Overflow>> {
+    let cleaned: String = digits.chars().filter(|&c| c != '_').collect();
+    if cleaned.is_empty() {
         return None;
     }
-    s.parse::<f64>().ok()
+    Some(u64::from_str_radix(&cleaned, radix).map_err(|_| Overflow))
+}
+
+/// libasdf's YAML 1.1 integer grammar, as a sign and a magnitude.
+///
+/// After an optional sign: `0b` binary, `0x` hex, or a leading `0` for octal
+/// (which keeps that `0` as a digit, so `0_` is 0); otherwise decimal,
+/// optionally followed by base-60 components (`190:20:30`). `_` separates
+/// digits anywhere after the first. Unlike PyYAML, YAML 1.2's `0o` and the
+/// uppercase `0X` / `0B` are not prefixes.
+fn parse_int_libasdf(text: &str) -> Option<Result<(bool, u64), Overflow>> {
+    let (negative, body) = split_sign(text);
+    let bytes = body.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+
+    if bytes[0] == b'0' && bytes.len() > 1 {
+        let (digits, radix) = match bytes[1] {
+            b'b' => (&body[2..], 2),
+            b'x' => (&body[2..], 16),
+            _ => (body, 8),
+        };
+        if span_digits(digits.as_bytes(), radix) != digits.len() {
+            return None;
+        }
+        return parse_digits(digits, radix).map(|r| r.map(|m| (negative, m)));
+    }
+
+    let head_len = span_digits(bytes, 10);
+    let (head, tail) = body.split_at(head_len);
+    if tail.is_empty() {
+        return parse_digits(head, 10).map(|r| r.map(|m| (negative, m)));
+    }
+    if span_base60(tail.as_bytes()) != tail.len() {
+        return None;
+    }
+
+    let mut magnitude = match parse_digits(head, 10)? {
+        Ok(m) => m,
+        Err(Overflow) => return Some(Err(Overflow)),
+    };
+    // `tail` is `:` followed by one- or two-digit components, all validated.
+    for component in tail[1..].split(':') {
+        let c: u64 = component.parse().ok()?;
+        match magnitude.checked_mul(60).and_then(|m| m.checked_add(c)) {
+            Some(m) => magnitude = m,
+            None => return Some(Err(Overflow)),
+        }
+    }
+    Some(Ok((negative, magnitude)))
+}
+
+/// Resolve an int the way libasdf does: non-negative values as the narrowest
+/// unsigned type, negative ones as the narrowest signed type.
+fn resolve_int_only(text: &str) -> Option<Resolved> {
+    match parse_int_libasdf(text)? {
+        Ok((false, m)) => Some(Resolved::Uint(m, narrow_uint(m))),
+        Ok((true, m)) => Some(match 0i64.checked_sub_unsigned(m) {
+            Some(v) => Resolved::Int(v, narrow_int(v)),
+            None => Resolved::IntOverflow,
+        }),
+        // The text is an integer literal that no integer type holds. It is
+        // not a string, and it is not a `uint64` either.
+        Err(Overflow) => Some(Resolved::IntOverflow),
+    }
+}
+
+/// The length of the match for `[0-9][0-9_]*` at the start of `s`.
+fn span_decimal_int(s: &[u8]) -> usize {
+    if s.first().is_some_and(u8::is_ascii_digit) { span_digits(s, 10) } else { 0 }
+}
+
+/// The length of the match for `[eE][-+]?[0-9]+` at the start of `s`.
+fn span_exponent(s: &[u8]) -> usize {
+    if !matches!(s.first(), Some(b'e' | b'E')) {
+        return 0;
+    }
+    let start = if matches!(s.get(1), Some(b'-' | b'+')) { 2 } else { 1 };
+    let digits = s[start.min(s.len())..].iter().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 { 0 } else { start + digits }
+}
+
+/// libasdf's decimal float grammar.
+///
+/// A mantissa of `[0-9][0-9_]*` with an optional `.[0-9_]*`, or
+/// `.[0-9][0-9_]*`, then an optional `[eE][-+]?[0-9]+`. Either the `.` or the
+/// exponent is required unless `allow_int`, which `!!float` sets. That is a
+/// little more lenient than YAML 1.1, which requires the `.` and a signed
+/// exponent: files written before libasdf 0.2.1 contain `1e-08`.
+fn is_decimal_float(text: &str, allow_int: bool) -> bool {
+    let (_, body) = split_sign(text);
+    let s = body.as_bytes();
+    let int_len = span_decimal_int(s);
+    let mut i = int_len;
+    let mut has_point = false;
+
+    if s.get(i) == Some(&b'.') {
+        has_point = true;
+        i += 1;
+        // `.5` is a float; `.` and `._` are not.
+        if int_len == 0 && span_decimal_int(&s[i..]) == 0 {
+            return false;
+        }
+        i += span_digits(&s[i..], 10);
+    } else if int_len == 0 {
+        return false;
+    }
+
+    let exp_len = span_exponent(&s[i..]);
+    i += exp_len;
+    i == s.len() && (has_point || exp_len > 0 || allow_int)
+}
+
+/// libasdf's base-60 float grammar: `[-+]?[0-9][0-9_]*(:[0-5]?[0-9])+\.[0-9_]*`.
+fn is_base60_float(text: &str) -> bool {
+    let (_, body) = split_sign(text);
+    let s = body.as_bytes();
+    let int_len = span_decimal_int(s);
+    if int_len == 0 {
+        return false;
+    }
+    let base60_len = span_base60(&s[int_len..]);
+    if base60_len == 0 {
+        return false;
+    }
+    let i = int_len + base60_len;
+    if s.get(i) != Some(&b'.') {
+        return false;
+    }
+    i + 1 + span_digits(&s[i + 1..], 10) == s.len()
+}
+
+/// Parse float text already validated by one of the grammars above.
+///
+/// A magnitude too large for a double comes out infinite, as `strtod` does;
+/// underflow gives the nearest subnormal or zero.
+fn parse_float_digits(s: &str) -> Option<f64> {
+    s.chars().filter(|&c| c != '_').collect::<String>().parse().ok()
+}
+
+/// Parse a base-60 float. As in PyYAML, each component is parsed as a float,
+/// so the last one carries the fraction.
+fn parse_base60_float(text: &str) -> Option<f64> {
+    let (negative, body) = split_sign(text);
+    let mut value = 0.0;
+    for component in body.split(':') {
+        value = value * 60.0 + parse_float_digits(component)?;
+    }
+    Some(if negative { -value } else { value })
 }
 
 /// YAML's non-finite float spellings, in the three cases the standard allows.
@@ -288,14 +415,75 @@ fn special_float(text: &str) -> Option<f64> {
     if let ".nan" | ".NaN" | ".NAN" = text {
         return Some(f64::NAN);
     }
-    let (negative, body) = match text.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, text.strip_prefix('+').unwrap_or(text)),
-    };
+    let (negative, body) = split_sign(text);
     match body {
         ".inf" | ".Inf" | ".INF" => Some(if negative { f64::NEG_INFINITY } else { f64::INFINITY }),
         _ => None,
     }
+}
+
+/// libasdf's float resolution: decimal, then the non-finite spellings, then
+/// base 60.
+fn parse_float_libasdf(text: &str, allow_int: bool) -> Option<f64> {
+    if is_decimal_float(text, allow_int) {
+        parse_float_digits(text)
+    } else if let Some(d) = special_float(text) {
+        Some(d)
+    } else if is_base60_float(text) {
+        parse_base60_float(text)
+    } else {
+        None
+    }
+}
+
+/// Would a plain scalar with this text resolve as an int or a float?
+///
+/// libasdf writes a numeric time `value` verbatim on this basis, so that it
+/// keeps its full precision.
+pub fn is_number(text: &str) -> bool {
+    !text.is_empty()
+        && (parse_int_libasdf(text).is_some() || parse_float_libasdf(text, false).is_some())
+}
+
+/// Would this string read back as something other than a string if it were
+/// written plain, and so need quoting?
+///
+/// This is libasdf's `asdf_yaml_string_is_ambiguous`, which errs on the side
+/// of quoting: besides its own resolution rules it covers what a YAML 1.2
+/// core-schema reader or PyYAML would take as a non-string -- `0o17`, `y` and
+/// `n`, timestamps, and the `<<` merge key.
+pub fn is_ambiguous_string(s: &str) -> bool {
+    if is_null(s) || (s.len() > 1 && parse_bool_libasdf(s).is_some()) {
+        return true;
+    }
+    if matches!(s, "<<" | "=" | "y" | "Y" | "n" | "N") {
+        return true;
+    }
+    // Every int, float and timestamp starts with a sign, a digit or a `.`.
+    if !s.starts_with(|c: char| c.is_ascii_digit() || matches!(c, '-' | '+' | '.')) {
+        return false;
+    }
+    if parse_int_libasdf(s).is_some() || parse_float_libasdf(s, true).is_some() {
+        return true;
+    }
+
+    // YAML 1.2's octal, `0o[0-7]+`.
+    let (_, body) = split_sign(s);
+    if let Some(octal) = body.strip_prefix("0o")
+        && !octal.is_empty()
+        && span_digits(octal.as_bytes(), 8) == octal.len()
+    {
+        return true;
+    }
+
+    // Every YAML 1.1 timestamp starts with a four-digit year and a `-`.
+    let b = s.as_bytes();
+    b.len() > 4 && span_digits(&b[..4], 10) == 4 && b[4] == b'-'
+}
+
+/// The style a string has to be written in to read back as a string.
+pub fn string_style(s: &str) -> ScalarStyle {
+    if is_ambiguous_string(s) { ScalarStyle::SingleQuoted } else { ScalarStyle::Plain }
 }
 
 /// Resolve a plain scalar's text under the given schema.
@@ -315,7 +503,7 @@ pub fn resolve(text: &str, style: ScalarStyle, schema: Schema) -> Resolved {
 /// Resolve with an explicit YAML common-schema tag (`!!int`, `!!bool`, ...).
 ///
 /// An explicit tag short-circuits inference, so `!!bool 1` is a boolean where
-/// a bare `1` would be an integer.
+/// a bare `1` would be an integer, and `!!float 5` is a float.
 pub fn resolve_tagged(text: &str, tag_suffix: &str, schema: Schema) -> Option<Resolved> {
     match tag_suffix {
         "null" => Some(if is_null(text) { Resolved::Null } else { Resolved::String }),
@@ -327,28 +515,9 @@ pub fn resolve_tagged(text: &str, tag_suffix: &str, schema: Schema) -> Option<Re
             Some(parsed.map_or(Resolved::String, Resolved::Bool))
         }
         "int" => Some(resolve_int_only(text).unwrap_or(Resolved::String)),
-        "float" => Some(
-            strtod_full(text)
-                .or_else(|| special_float(text))
-                .map_or(Resolved::String, Resolved::Double),
-        ),
+        "float" => Some(parse_float_libasdf(text, true).map_or(Resolved::String, Resolved::Double)),
         "str" => Some(Resolved::String),
         _ => None,
-    }
-}
-
-fn resolve_int_only(text: &str) -> Option<Resolved> {
-    match strtoull_base0_full(text) {
-        Some(Ok(v)) => return Some(Resolved::Uint(v, narrow_uint(v))),
-        // The text is an integer literal that no integer type holds. It is
-        // not a string, and it is not a `uint64` either.
-        Some(Err(Overflow)) => return Some(Resolved::IntOverflow),
-        None => {}
-    }
-    match strtoll_base0_full(text) {
-        Some(Ok(v)) => Some(Resolved::Int(v, narrow_int(v))),
-        Some(Err(Overflow)) => Some(Resolved::IntOverflow),
-        None => None,
     }
 }
 
@@ -363,7 +532,7 @@ fn resolve_libasdf(text: &str) -> Resolved {
     if let Some(b) = parse_bool_libasdf(text) {
         return Resolved::Bool(b);
     }
-    if let Some(d) = strtod_full(text).or_else(|| special_float(text)) {
+    if let Some(d) = parse_float_libasdf(text, false) {
         return Resolved::Double(d);
     }
     Resolved::String
@@ -455,7 +624,12 @@ fn resolve_float_yaml11(text: &str) -> Option<f64> {
         }
         return Some(sign * acc);
     }
-    strtod_full(&t)
+    // Rust's parser also takes `inf` and `nan`, which YAML reads as strings,
+    // so only hand it text that starts like a number.
+    if !rest.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
+        return None;
+    }
+    t.parse().ok()
 }
 
 #[cfg(test)]
@@ -494,13 +668,40 @@ mod tests {
     }
 
     #[test]
-    fn base0_radix_matches_c_not_yaml() {
-        // C semantics: a bare leading zero is octal, so `010` is 8.
+    fn radix_prefixes_follow_yaml11() {
+        // A bare leading zero is octal, so `010` is 8, and `0_` is still 0.
         assert_eq!(lib("010"), Resolved::Uint(8, ValueType::Uint8));
+        assert_eq!(lib("0_"), Resolved::Uint(0, ValueType::Uint8));
         assert_eq!(lib("0x10"), Resolved::Uint(16, ValueType::Uint8));
-        // YAML 1.2's `0o` form is not recognised by libasdf and falls through
-        // to a string.
-        assert_eq!(lib("0o10"), Resolved::String);
+        assert_eq!(lib("0xFF"), Resolved::Uint(255, ValueType::Uint8));
+        assert_eq!(lib("0b101"), Resolved::Uint(5, ValueType::Uint8));
+        assert_eq!(lib("-0x10"), Resolved::Int(-16, ValueType::Int8));
+        // YAML 1.2's `0o` and the uppercase prefixes are not prefixes to
+        // libasdf, and neither is a prefix with no digits after it.
+        for s in ["0o10", "0X10", "0B1", "0x", "0b_", "09"] {
+            assert_eq!(lib(s), Resolved::String, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn underscores_and_sexagesimals() {
+        assert_eq!(lib("1_000"), Resolved::Uint(1000, ValueType::Uint16));
+        assert_eq!(lib("0x_ff"), Resolved::Uint(255, ValueType::Uint8));
+        // 190:20:30 == 190*3600 + 20*60 + 30
+        assert_eq!(lib("190:20:30"), Resolved::Uint(685_230, ValueType::Uint32));
+        assert_eq!(lib("-1:30"), Resolved::Int(-90, ValueType::Int8));
+        assert_eq!(lib("1:7"), Resolved::Uint(67, ValueType::Uint8));
+        assert_eq!(lib("1:30.5"), Resolved::Double(90.5));
+        assert_eq!(lib("1_000.5"), Resolved::Double(1000.5));
+        // A two-digit component past 59, or a third digit, is not base 60.
+        for s in ["1:60", "1:123", "1:", ":30", "1::2"] {
+            assert_eq!(lib(s), Resolved::String, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn base60_overflow_is_an_overflow() {
+        assert_eq!(lib("18446744073709551615:0"), Resolved::IntOverflow);
     }
 
     #[test]
@@ -521,8 +722,17 @@ mod tests {
         for s in ["false", "False", "FALSE"] {
             assert_eq!(lib(s), Resolved::Bool(false), "{s:?}");
         }
-        // libasdf is case-sensitive about these three spellings only.
-        assert_eq!(lib("tRue"), Resolved::String);
+        for s in ["yes", "Yes", "YES", "on", "On", "ON"] {
+            assert_eq!(lib(s), Resolved::Bool(true), "{s:?}");
+        }
+        for s in ["no", "No", "NO", "off", "Off", "OFF"] {
+            assert_eq!(lib(s), Resolved::Bool(false), "{s:?}");
+        }
+        // Case matters, and YAML 1.1's `y` and `n` are not booleans to
+        // libasdf (or to PyYAML).
+        for s in ["tRue", "yES", "y", "n", "Y", "N"] {
+            assert_eq!(lib(s), Resolved::String, "{s:?}");
+        }
     }
 
     #[test]
@@ -531,6 +741,76 @@ mod tests {
         assert_eq!(lib("1e3"), Resolved::Double(1000.0));
         assert_eq!(lib(".5"), Resolved::Double(0.5));
         assert_eq!(lib("-2.25"), Resolved::Double(-2.25));
+        assert_eq!(lib("1."), Resolved::Double(1.0));
+        assert_eq!(lib("1.0e-08"), Resolved::Double(1.0e-8));
+        // Accepted for files written before libasdf 0.2.1, which left the
+        // `.` out: YAML 1.1 proper would make these strings.
+        assert_eq!(lib("1e-08"), Resolved::Double(1.0e-8));
+        assert_eq!(lib("1E+5"), Resolved::Double(1.0e5));
+        // A `.` or an exponent is required, and an exponent needs digits.
+        for s in [".", "._", "1e", "1e+", "e5", "1.5.5", "0x1p3", "1.5f"] {
+            assert_eq!(lib(s), Resolved::String, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn a_float_tag_accepts_an_int() {
+        assert_eq!(resolve_tagged("5", "float", Schema::Libasdf), Some(Resolved::Double(5.0)));
+        assert_eq!(resolve_tagged("1_0", "float", Schema::Libasdf), Some(Resolved::Double(10.0)));
+        // ...but only a decimal one.
+        assert_eq!(resolve_tagged("0x10", "float", Schema::Libasdf), Some(Resolved::String));
+    }
+
+    #[test]
+    fn ambiguous_strings_are_the_ones_any_reader_would_retype() {
+        for s in [
+            "",
+            "~",
+            "null",
+            "true",
+            "yes",
+            "Off",
+            "y",
+            "N",
+            "<<",
+            "=",
+            "0",
+            "123",
+            "-1",
+            "1_000",
+            "0x1f",
+            "1:30",
+            "1.5",
+            ".5",
+            "1e5",
+            ".inf",
+            "-.inf",
+            ".nan",
+            "0o17",
+            "+0o7",
+            "2001-12-14",
+            "2001-12-14t21:59:43.10-05:00",
+        ] {
+            assert!(is_ambiguous_string(s), "{s:?} should be quoted");
+            assert_eq!(string_style(s), ScalarStyle::SingleQuoted, "{s:?}");
+        }
+        for s in [
+            "hello", "inf", "nan", "-", "+", ".", "1.2.3", "0o", "0o8", "200-1", "yess", "core",
+            "1a",
+        ] {
+            assert!(!is_ambiguous_string(s), "{s:?} should stay plain");
+            assert_eq!(string_style(s), ScalarStyle::Plain, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn numbers_are_ints_and_floats_but_not_the_rest() {
+        for s in ["2451545.0", "59000", "1e5", "-1:30", ".inf", "99999999999999999999999"] {
+            assert!(is_number(s), "{s:?}");
+        }
+        for s in ["", "null", "true", "2000-01-01", "J2000.0", "inf"] {
+            assert!(!is_number(s), "{s:?}");
+        }
     }
 
     /// The non-finite spellings both schemas agree on, in all three cases.
@@ -584,9 +864,9 @@ mod tests {
         for s in ["no", "No", "off", "n", "false"] {
             assert_eq!(y11(s), Resolved::Bool(false), "{s:?}");
         }
-        // The divergence that matters for Python-written files.
-        assert_eq!(lib("yes"), Resolved::String);
-        assert_eq!(y11("yes"), Resolved::Bool(true));
+        // What still separates the two: `y` and `n`.
+        assert_eq!(lib("y"), Resolved::String);
+        assert_eq!(y11("y"), Resolved::Bool(true));
     }
 
     #[test]
@@ -600,7 +880,7 @@ mod tests {
     /// An integer literal too large for any integer type is neither an
     /// integer nor a string.
     ///
-    /// libasdf reaches this through `strtoull` setting `ERANGE`: the value's
+    /// libasdf reaches this through its int parser overflowing: the value's
     /// reported type stays `<unknown>`, every `asdf_value_is_*` is false,
     /// and every `asdf_value_as_*` reports an overflow rather than a type
     /// mismatch -- because the text *is* a number, just not one that fits.

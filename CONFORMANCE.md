@@ -2,14 +2,14 @@
 
 `libasdf-rs` is a drop-in replacement for a *specific* upstream libasdf. That
 target is pinned here so the ABI has a fixed definition rather than a moving
-one, since upstream is at `0.2.0` and still changing.
+one, since upstream is at `0.2.1` and still changing.
 
 | | |
 |---|---|
 | Upstream repository | https://github.com/asdf-format/libasdf |
-| Pinned commit | `4be9e73` |
-| Describe | `0.2.0` |
-| Package version | `0.2.0` |
+| Pinned commit | `9927a3f` |
+| Describe | `0.2.1` |
+| Package version | `0.2.1` |
 | Library interface version | `1:0:1` -- `SONAME` `libasdf.so.0` |
 | ASDF Standard | 1.6.0 (reading 1.0.0 through 1.6.0) |
 | ASDF file format | 1.0.0 |
@@ -17,6 +17,8 @@ one, since upstream is at `0.2.0` and still changing.
 Upstream's `SONAME` stayed at `libasdf.so.0` across 0.1.0 -> 0.2.0: three
 interfaces were added and none removed, so `current` and `age` rose together
 and `current - age` did not move. A caller built against 0.1.0 keeps working.
+0.2.1 changed no interface at all: its headers are identical to 0.2.0's, and
+what it changed is behaviour -- how scalars resolve and how they are written.
 
 Re-basing onto a newer upstream is deliberate work, not a routine update: it
 can change the ABI, and most of what it changes is not in the ABI at all. The
@@ -120,9 +122,11 @@ Three needed a nudge, and none of them stands a private API in:
 
 Every suite's pass count is pinned. A change that loses ground fails, and so
 does one that gains ground without updating the number, so the figure below
-cannot drift.
+cannot drift. A test munit skips -- `test-value`'s locale test does where the
+machine lacks the locale it needs -- counts as neither, so the figures hold on
+every platform.
 
-**498 of 501.**
+**501 of 504.**
 
 | Suite | | |
 |---|---|---|
@@ -133,7 +137,7 @@ cannot drift.
 | `test-time` | 17/17 | |
 | `test-core-extensions` | 16/16 | |
 | `test-ndarray` | 257/257 | the numeric conversion matrix, both byte orders deep |
-| `test-value` | 66/68 | the value API in full |
+| `test-value` | 69/71 | the value API in full, including YAML 1.1 scalar resolution and quoting |
 | `test-block` | 6/6 | the low-level block API, including verbatim compressed copies |
 | `test-extension` | 12/13 | |
 | `test-reference-files` | 113/113 | every tagged value in every reference file |
@@ -146,7 +150,7 @@ and there they are exact.
 
 ## Undefined behaviour
 
-`cargo +nightly miri test -p libasdf-rs --lib` runs the FFI layer's 202 unit
+`cargo +nightly miri test -p libasdf-rs --lib` runs the FFI layer's 203 unit
 tests under Miri. That crate holds every unsafe block in the workspace bar one
 (`asdf-core`'s memory map, which Miri cannot execute and which `Reader::open`
 sidesteps under `cfg(miri)`).

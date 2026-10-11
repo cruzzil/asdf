@@ -36,5 +36,5 @@ pub use emit::{EmitError, EmitOptions, emit, emit_with};
 pub use node::{CollectionStyle, Entry, Node, NodeData, NodeId, ScalarStyle, Span};
 pub use parse::{ParseError, YamlEvent, YamlEventKind, parse_document, scan_events};
 pub use path::{Component, Path, PathError};
-pub use scalar::{Resolved, Schema, ValueType, resolve, resolve_tagged};
+pub use scalar::{Resolved, Schema, ValueType, resolve, resolve_tagged, string_style};
 pub use tag::{ASDF_CORE_TAG_PREFIX, ASDF_STANDARD_TAG_PREFIX, Tag, TagHandle};

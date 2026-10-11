@@ -5,12 +5,12 @@ implementation is synchronised with.
 
 | | |
 |---|---|
-| **Commit** | `4be9e73` |
-| **Describe** | `0.2.0` |
-| **Subject** | bump version 0.1.0 -> 0.2.0 |
-| **Package version** | 0.2.0 |
+| **Commit** | `9927a3f` |
+| **Describe** | `0.2.1` |
+| **Subject** | bump version 0.2.0 -> 0.2.1 |
+| **Package version** | 0.2.1 |
 | **Library interface version** | `1:0:1` — `SONAME` `libasdf.so.0`, filename `libasdf.so.0.1.0` |
-| **Synced on** | 2026-09-16 |
+| **Synced on** | 2026-10-11 |
 
 ## What "synced" means here
 
@@ -38,5 +38,5 @@ Re-vendoring is a deliberate act: it can change the ABI. The full procedure is
 To see what has landed upstream since this point:
 
 ```console
-$ git -C /path/to/libasdf log --oneline 4be9e73..origin/main
+$ git -C /path/to/libasdf log --oneline 9927a3f..origin/main
 ```
