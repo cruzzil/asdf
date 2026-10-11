@@ -343,6 +343,14 @@ fn collect_inline(
 /// the tree, which is attacker-controlled and need not be short.
 const MAX_INLINE_DEPTH: usize = 64;
 
+/// The most empty sequences `inline_ndarray` will build for an array with no
+/// elements.
+///
+/// A non-empty array's nesting is bounded by its decoded elements, but a zero
+/// anywhere in the shape leaves the dimensions ahead of it unchecked by
+/// anything the block holds.
+const MAX_EMPTY_INLINE_ROWS: u64 = 1 << 20;
+
 /// Read one element: a scalar, or a record for a compound datatype.
 fn leaf_element(doc: &Document, node: NodeId, datatype: &Datatype) -> Result<Element> {
     if !datatype.fields.is_empty() {
@@ -571,6 +579,22 @@ pub fn inline_ndarray(
             "shape {shape:?} describes {expected} elements but {} were given",
             elements.len()
         ));
+    }
+
+    // Agreeing on the count is not enough when the count is zero: `[2^62, 0]`
+    // holds no elements, yet nesting it builds 2^62 empty sequences. For a
+    // non-empty array every prefix of the shape is bounded by the elements
+    // already decoded, so only the dimensions ahead of the first zero need a
+    // ceiling of their own.
+    if expected == 0 {
+        let rows =
+            shape.iter().take_while(|d| **d != 0).try_fold(1u64, |acc, d| acc.checked_mul(*d));
+        if rows.is_none_or(|rows| rows > MAX_EMPTY_INLINE_ROWS) {
+            return Err(err!(
+                OverLimit,
+                "shape {shape:?} is too large to inline as empty sequences"
+            ));
+        }
     }
 
     let data = nest(doc, elements, shape);
@@ -990,5 +1014,24 @@ mod tests {
         assert_eq!(doc.container_len(data), Some(4));
         // The datatype survives; it still describes the values.
         assert!(doc.mapping_get(nd_id, "datatype").is_some());
+    }
+
+    #[test]
+    fn empty_arrays_inline_unless_their_leading_dimensions_are_absurd() {
+        let mut doc =
+            parse_document("a:\n  source: 0\n  shape: [3, 0]\n  datatype: uint8\n").unwrap();
+        let root = doc.root().unwrap();
+        let nd_id = doc.mapping_get(root, "a").unwrap();
+
+        // A modest empty array still inlines as that many empty rows.
+        inline_ndarray(&mut doc, nd_id, &[], &[3, 0]).unwrap();
+        let data = doc.mapping_get(nd_id, "data").unwrap();
+        assert_eq!(doc.container_len(data), Some(3));
+        assert_eq!(doc.container_len(doc.sequence_get(data, 0).unwrap()), Some(0));
+
+        // Zero elements agree with any shape holding a zero, so the rows
+        // ahead of it are what must be refused.
+        assert!(inline_ndarray(&mut doc, nd_id, &[], &[1 << 62, 0]).is_err());
+        assert!(inline_ndarray(&mut doc, nd_id, &[], &[u64::MAX, 2, 0]).is_err());
     }
 }
