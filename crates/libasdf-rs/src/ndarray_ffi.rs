@@ -1656,6 +1656,8 @@ fn warn_if_inline_is_large(file: *mut crate::file_ffi::AsdfFile, elements: u64, 
     crate::error_ffi::log_to_file(
         file,
         crate::error_ffi::LogLevel::Warn,
+        file!(),
+        line!(),
         &format!(
             "inline ndarray has {elements} elements, exceeding the threshold of {threshold}; \
              consider using binary block storage instead"
@@ -1951,6 +1953,14 @@ pub(crate) fn ndarray_read_tile_ndim(
         if end > state.shape[axis] {
             return NdarrayErr::OutOfBounds;
         }
+    }
+
+    // The tile lies inside the shape, so what is left is whether the data
+    // covers the whole array. Upstream reports a block shorter than its
+    // shape needs as out of bounds, not as an invalid array.
+    let held = state.allocated.as_ref().or(state.data.as_ref()).map_or(0, |d| d.as_slice().len());
+    if (held as u64) < ndarray_nbytes(ndarray) {
+        return NdarrayErr::OutOfBounds;
     }
 
     let target = match scalar_from_abi(dst_t) {
@@ -2402,6 +2412,35 @@ mod tests {
                     array,
                     3,
                     1,
+                    2,
+                    2,
+                    core::ptr::null(),
+                    ScalarType::Int32 as ScalarTypeAbi,
+                    &mut dst,
+                )
+            },
+            NdarrayErr::OutOfBounds
+        );
+        unsafe { asdf_ndarray_destroy(array) };
+    }
+
+    /// A tile inside the shape is still refused when the data behind the
+    /// array is shorter than the shape needs, as upstream does since
+    /// libasdf `e1d3df8`.
+    #[test]
+    fn a_tile_over_short_data_is_out_of_bounds() {
+        let array = int32_grid();
+        // Only the first row's worth of bytes, though the shape is 3x4.
+        let bytes: Vec<u8> = (0i32..4).flat_map(i32::to_le_bytes).collect();
+        set_data(array, &bytes);
+        let mut buffer = [0i32; 4];
+        let mut dst = buffer.as_mut_ptr().cast::<c_void>();
+        assert_eq!(
+            unsafe {
+                asdf_ndarray_read_tile_2d(
+                    array,
+                    0,
+                    0,
                     2,
                     2,
                     core::ptr::null(),

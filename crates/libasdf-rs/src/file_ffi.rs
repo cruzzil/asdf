@@ -69,10 +69,8 @@ pub(crate) struct FileConfig {
     /// Element count above which an inline ndarray draws a warning. Zero
     /// selects the library default; `usize::MAX` suppresses it.
     pub inline_ndarray_warning_thresh: usize,
-    /// Where log output goes; null means `stderr`.
-    pub log_stream: *mut c_void,
-    /// The minimum severity to emit; `None` selects the default.
-    pub log_level: crate::error_ffi::LogLevel,
+    /// Where log output goes and what it carries, resolved at open.
+    pub log: crate::error_ffi::LogSettings,
 }
 
 /// An open ASDF file. Opaque to C.
@@ -120,8 +118,7 @@ pub(crate) unsafe fn read_config(config: *const asdf_config_t) -> FileConfig {
     FileConfig {
         array_storage: view.emitter.array_storage,
         inline_ndarray_warning_thresh: view.emitter.inline_ndarray_warning_thresh,
-        log_stream: view.log.stream,
-        log_level: view.log.level,
+        log: crate::error_ffi::LogSettings::resolve(Some(&view.log)),
     }
 }
 

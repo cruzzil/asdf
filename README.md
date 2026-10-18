@@ -152,8 +152,8 @@ wired into the test suite rather than reasoned about:
 
 - **libasdf's own C test suite** — the tests upstream wrote for its own
   implementation, compiled against the vendored headers and linked against
-  the built `libasdf.so`. **501 of 504 pass**, across eleven of its
-  twenty-one suites; the other ten reach into libasdf's private headers and
+  the built `libasdf.so`. **510 of 513 pass**, across twelve of its
+  twenty-two suites; the other ten reach into libasdf's private headers and
   cannot run against a different implementation by construction. This is the
   strongest evidence the project can produce, and every suite's pass count is
   pinned so it cannot drift.
