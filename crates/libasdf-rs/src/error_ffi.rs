@@ -866,6 +866,132 @@ mod tests {
     }
 
     #[test]
+    fn every_severity_has_upstreams_color() {
+        let expected = [
+            (LogLevel::Trace, "\x1b[94m"),
+            (LogLevel::Debug, "\x1b[36m"),
+            (LogLevel::Info, "\x1b[32m"),
+            (LogLevel::Warn, "\x1b[33m"),
+            (LogLevel::Error, "\x1b[31m"),
+            (LogLevel::Fatal, "\x1b[35m"),
+        ];
+        for (level, color) in expected {
+            let line = format_line(level, crate::types::log_field::LEVEL, true, "", 0, "");
+            assert!(line.contains(&format!("{color}{}", level.as_str())), "{level:?}: {line:?}");
+        }
+        // The two thresholds are never printed, so they carry no colour.
+        assert_eq!(LogLevel::Default.color(), "");
+        assert_eq!(LogLevel::None.color(), "");
+        assert_eq!(LogLevel::Default.as_str(), "DEFAULT");
+    }
+
+    /// Everything written so far to a `tmpfile()` stream.
+    fn read_back(stream: *mut libc::FILE) -> String {
+        let mut out = Vec::new();
+        let mut chunk = [0u8; 256];
+        unsafe { libc::rewind(stream) };
+        loop {
+            let n = unsafe { libc::fread(chunk.as_mut_ptr().cast(), 1, chunk.len(), stream) };
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&chunk[..n]);
+        }
+        String::from_utf8(out).unwrap()
+    }
+
+    /// Every path that logs against a file -- `asdf_file_log`, an error
+    /// recorded against the file or against one of its values, and a
+    /// message the library raises itself -- goes to the stream, level and
+    /// fields that file was opened with.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot run tmpfile")]
+    fn a_file_logs_to_its_configured_stream() {
+        use crate::file_ffi::{asdf_close, asdf_get_value, asdf_open_mem_ex, asdf_value_destroy};
+        use crate::types::log_field::{LEVEL, MSG};
+
+        let stream = unsafe { libc::tmpfile() };
+        assert!(!stream.is_null());
+        // SAFETY: every field of `asdf_config_t` is an integer, a pointer, a
+        // `bool` or an enum whose zero is a variant, so all-zero is valid and
+        // is what a C caller's `= {0}` gives.
+        let mut config: crate::types::asdf_config_t = unsafe { core::mem::zeroed() };
+        config.log.stream = stream.cast();
+        config.log.level = LogLevel::Info as c_int;
+        config.log.fields = LEVEL | MSG;
+        let file = unsafe { asdf_open_mem_ex(core::ptr::null(), 0, &mut config) };
+        assert!(!file.is_null());
+
+        unsafe {
+            asdf_shim_log_message(
+                file.cast(),
+                LogLevel::Debug as c_int,
+                c"a.c".as_ptr(),
+                1,
+                c"dropped".as_ptr(),
+            );
+            asdf_shim_log_message(
+                file.cast(),
+                LogLevel::Info as c_int,
+                c"a.c".as_ptr(),
+                2,
+                c"kept".as_ptr(),
+            );
+            asdf_shim_error_set(
+                file.cast(),
+                0,
+                ErrorCode::InvalidArgument as c_int,
+                core::ptr::null(),
+                3,
+                c"on the file".as_ptr(),
+            );
+        }
+        let root = unsafe { asdf_get_value(file, c"".as_ptr()) };
+        assert!(!root.is_null());
+        unsafe {
+            asdf_shim_error_set(
+                root.cast(),
+                1,
+                ErrorCode::ExtensionNotFound as c_int,
+                c"a.c".as_ptr(),
+                4,
+                c"on a value".as_ptr(),
+            );
+        }
+        log_to_file(file, LogLevel::Warn, file!(), line!(), "raised here");
+
+        assert_eq!(
+            read_back(stream),
+            "[INFO ] kept\n[ERROR] on the file\n[WARN ] on a value\n[WARN ] raised here\n"
+        );
+        unsafe {
+            asdf_value_destroy(root);
+            asdf_close(file);
+            libc::fclose(stream);
+        }
+    }
+
+    /// `asdf_file_log` on a null file reports that, the way upstream's
+    /// fallback does, rather than dereferencing it. The line goes to
+    /// `stderr`, so all this can check is that it returns.
+    #[test]
+    fn logging_without_a_file_falls_back_to_stderr() {
+        unsafe {
+            asdf_shim_log_message(
+                core::ptr::null(),
+                LogLevel::Error as c_int,
+                core::ptr::null(),
+                5,
+                c"unused".as_ptr(),
+            );
+        }
+        let fallback = LogSettings::fallback();
+        assert!(fallback.stream.is_null());
+        assert_eq!(fallback.fields, crate::types::log_field::ALL);
+        assert!(fallback.emits(LogLevel::Trace));
+    }
+
+    #[test]
     fn explicit_levels_and_fields_survive_resolution() {
         let config = crate::types::asdf_log_cfg_t {
             stream: core::ptr::null_mut(),
