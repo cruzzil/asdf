@@ -22,6 +22,7 @@
  * Everything else is implemented directly in Rust.
  */
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -57,6 +58,8 @@ static void shim_format_error(
     void *obj, int is_value, int code, const char *src_file, int lineno, va_list args) {
     const char *fmt = asdf_shim_error_format(code);
     char msg[ASDF_SHIM_MSG_MAX];
+    /* Logging the error must not clobber errno, as upstream's does not. */
+    int saved_errno = errno;
 
     if (fmt == NULL) {
         msg[0] = '\0';
@@ -66,6 +69,7 @@ static void shim_format_error(
     }
 
     asdf_shim_error_set(obj, is_value, code, src_file, lineno, msg);
+    errno = saved_errno;
 }
 
 ASDF_LOCAL void asdf_shim_file_error_common(
@@ -92,6 +96,8 @@ ASDF_LOCAL void asdf_shim_file_log_v(
     const char *fmt,
     ...) {
     char msg[ASDF_SHIM_MSG_MAX];
+    /* A caller may log before reporting errno, so logging must keep it. */
+    int saved_errno = errno;
     va_list args;
 
     va_start(args, fmt);
@@ -99,6 +105,7 @@ ASDF_LOCAL void asdf_shim_file_log_v(
     va_end(args);
 
     asdf_shim_log_message((const void *)file, (int)level, src_file, lineno, msg);
+    errno = saved_errno;
 }
 
 /* ---- _Float16 ------------------------------------------------------ */

@@ -7,8 +7,8 @@ one, since upstream is at `0.2.1` and still changing.
 | | |
 |---|---|
 | Upstream repository | https://github.com/asdf-format/libasdf |
-| Pinned commit | `9927a3f` |
-| Describe | `0.2.1` |
+| Pinned commit | `a76a152` |
+| Describe | `0.2.1-15-ga76a152` |
 | Package version | `0.2.1` |
 | Library interface version | `1:0:1` -- `SONAME` `libasdf.so.0` |
 | ASDF Standard | 1.6.0 (reading 1.0.0 through 1.6.0) |
@@ -19,6 +19,14 @@ interfaces were added and none removed, so `current` and `age` rose together
 and `current - age` did not move. A caller built against 0.1.0 keeps working.
 0.2.1 changed no interface at all: its headers are identical to 0.2.0's, and
 what it changed is behaviour -- how scalars resolve and how they are written.
+
+`a76a152`, fifteen commits past 0.2.1, **renumbered `asdf_log_level_t`**:
+`ASDF_LOG_NONE` moved from 0 to 7, above `ASDF_LOG_FATAL`, and the zero value
+is the new `ASDF_LOG_DEFAULT`. No symbol was added or removed, and upstream
+left `LIBASDF_VERSION_INFO` at `1:0:1`, but a caller compiled against the old
+header that set `level = ASDF_LOG_NONE` now passes `ASDF_LOG_DEFAULT`, and
+gets the default level rather than silence -- which is the bug the change
+fixes, since 0 had always meant "unset" in practice.
 
 Re-basing onto a newer upstream is deliberate work, not a routine update: it
 can change the ABI, and most of what it changes is not in the ABI at all. The
@@ -101,7 +109,7 @@ Without them the gate **skips**, which looks exactly like passing. Point it
 elsewhere with `LIBASDF_DIR`; when syncing, point it at a detached worktree of
 the new commit rather than at a checkout carrying local work.
 
-Eleven of upstream's twenty-one suites build against the public ABI. The
+Twelve of upstream's twenty-two suites build against the public ABI. The
 other ten include libasdf's private headers -- `event.h`, `parser.h`,
 `stream.h`, `compression/compression.h` -- to reach internals that are
 implementation detail rather than interface, so they cannot run against a
@@ -120,13 +128,20 @@ Three needed a nudge, and none of them stands a private API in:
   `asdf/block.h`, `asdf/emitter.h` and `asdf/file.h` is what it actually
   needs.
 
+Every suite is also built with `-D_GNU_SOURCE` and a stand-in `config.h`
+defining `PACKAGE_NAME`, as upstream's own `make check` provides, and runs
+with `ASDF_LOG_LEVEL` and `ASDF_LOG_COLOR` cleared, as upstream's does too.
+`test-log` needs all three: without `_GNU_SOURCE`, `ptsname` has no
+prototype, returns an `int`, and the truncated pointer fails its terminal
+test.
+
 Every suite's pass count is pinned. A change that loses ground fails, and so
 does one that gains ground without updating the number, so the figure below
 cannot drift. A test munit skips -- `test-value`'s locale test does where the
 machine lacks the locale it needs -- counts as neither, so the figures hold on
 every platform.
 
-**501 of 504.**
+**510 of 513.**
 
 | Suite | | |
 |---|---|---|
@@ -140,6 +155,7 @@ every platform.
 | `test-value` | 69/71 | the value API in full, including YAML 1.1 scalar resolution and quoting |
 | `test-block` | 6/6 | the low-level block API, including verbatim compressed copies |
 | `test-extension` | 12/13 | |
+| `test-log` | 9/9 | log levels and fields, `ASDF_LOG_COLOR`, colour on a real terminal |
 | `test-reference-files` | 113/113 | every tagged value in every reference file |
 
 The three that do not pass are all `compare_files` checks of emitted YAML
@@ -150,7 +166,7 @@ and there they are exact.
 
 ## Undefined behaviour
 
-`cargo +nightly miri test -p libasdf-rs --lib` runs the FFI layer's 203 unit
+`cargo +nightly miri test -p libasdf-rs --lib` runs the FFI layer's 209 unit
 tests under Miri. That crate holds every unsafe block in the workspace bar one
 (`asdf-core`'s memory map, which Miri cannot execute and which `Reader::open`
 sidesteps under `cfg(miri)`).

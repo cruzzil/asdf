@@ -75,6 +75,7 @@ const SUITES: &[Suite] = &[
     Suite { name: "test-value", expect_pass: 69, total: 71, needs_compat_headers: false },
     Suite { name: "test-block", expect_pass: 6, total: 6, needs_compat_headers: false },
     Suite { name: "test-extension", expect_pass: 12, total: 13, needs_compat_headers: false },
+    Suite { name: "test-log", expect_pass: 9, total: 9, needs_compat_headers: false },
     Suite {
         name: "test-reference-files",
         expect_pass: 113,
@@ -214,8 +215,9 @@ fn upstream_c_test_suite_runs_against_this_library() {
 
     // A stand-in for libasdf's build-time `config.h`. `util.c` reads only
     // `HAVE_STATGRAB` from it -- left undefined, which selects the portable
-    // path -- and `compat/numeric.h` reads `HAVE_FLOAT16`, which must match
-    // what our own build probed for.
+    // path -- `compat/numeric.h` reads `HAVE_FLOAT16`, which must match
+    // what our own build probed for, and `test-log.c` reads `PACKAGE_NAME`
+    // for the `(libasdf)` prefix a log line carries.
     // Two headers a suite reaches for without needing anything private.
     //
     // `test-value.c` carries a stray `#include <libfyaml.h>` and uses
@@ -243,7 +245,10 @@ fn upstream_c_test_suite_runs_against_this_library() {
     let float16 = if cfg!(asdf_have_float16) { "#define HAVE_FLOAT16 1\n" } else { "" };
     std::fs::write(
         build.join("config.h"),
-        format!("/* Stand-in for libasdf's build config; see upstream_suite.rs. */\n{float16}"),
+        format!(
+            "/* Stand-in for libasdf's build config; see upstream_suite.rs. */\n\
+             #define PACKAGE_NAME \"libasdf\"\n{float16}"
+        ),
     )
     .expect("write config.h");
 
@@ -261,6 +266,10 @@ fn upstream_c_test_suite_runs_against_this_library() {
         .push(format!("-DREFERENCE_FILES_DIR=\"{}\"", standard.join("reference_files").display()));
     cflags.push(format!("-DFIXTURES_DIR=\"{}\"", tests.join("fixtures").display()));
     cflags.push(format!("-DTEMP_DIR=\"{}\"", temp.display()));
+    // Upstream's `unit_test_base_cppflags` carry it too. Without it
+    // `test-log.c` sees no prototype for `ptsname`, which then returns an
+    // `int`, and the truncated pointer makes its terminal test fail.
+    cflags.push("-D_GNU_SOURCE".to_string());
 
     let compile = |source: &Path, object: &Path, extra: &[String]| -> Result<(), String> {
         let out = Command::new(c_compiler())
@@ -326,7 +335,15 @@ fn upstream_c_test_suite_runs_against_this_library() {
         }
 
         // munit forks per test, so one failing test does not stop the rest.
-        let run = Command::new(&binary).current_dir(&build).output().expect("run the suite");
+        // Upstream's `make check` clears libasdf's logging variables so a
+        // developer's settings cannot change outcomes; the tests that
+        // exercise them set them explicitly.
+        let run = Command::new(&binary)
+            .current_dir(&build)
+            .env_remove("ASDF_LOG_LEVEL")
+            .env_remove("ASDF_LOG_COLOR")
+            .output()
+            .expect("run the suite");
         let output = format!(
             "{}{}",
             String::from_utf8_lossy(&run.stdout),

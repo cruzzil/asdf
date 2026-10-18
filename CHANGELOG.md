@@ -14,6 +14,44 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+### Changed
+
+- **Synced to libasdf `a76a152`**, fifteen commits past `9927a3f` (0.2.1),
+  for upstream's logging fixes (libasdf#280) and compressed-read fixes
+  (libasdf#277). **An ABI event in substance**, though upstream left the
+  interface version at `1:0:1`: `asdf_log_level_t` was renumbered, so
+  `ASDF_LOG_NONE` is now 7, above `ASDF_LOG_FATAL`, and the zero value is the
+  new `ASDF_LOG_DEFAULT`. No symbol was added or removed; the surface is
+  still **379 declared exports**. Upstream's C suite passes **510 of 513**,
+  with its new `test-log` suite running here at 9/9.
+- **Logging now follows a file's `asdf_log_cfg_t` throughout, as upstream's
+  does.** `asdf_file_log` and the messages `ASDF_ERROR_COMMON` logs ignored
+  the configured stream, fields and level, and wrote a line format of their
+  own. They now write upstream's format (`[ERROR] (libasdf)src.c:12:
+  message`, each field present separated by one space), honour
+  `asdf_log_cfg_t.fields`, and flush after every message. `level =
+  ASDF_LOG_NONE` disables logging, and an explicit `ASDF_LOG_WARN` is no
+  longer mistaken for "unset", so it wins over `ASDF_LOG_LEVEL`.
+- **`ASDF_LOG_LEVEL` is read each time a file is opened**, not once per
+  process, so a caller can change it between opens.
+- **Log output is colourised only on a terminal.** The new `ASDF_LOG_COLOR`
+  environment variable forces it on (`1`) or off (`0`); an explicit
+  `asdf_log_cfg_t.no_color` takes precedence over both.
+- **Logging no longer changes `errno`**, and `asdf_file_log` with a level that
+  is not a real severity drops the message.
+- **A tile read over data shorter than the array's shape returns
+  `ASDF_NDARRAY_ERR_OUT_OF_BOUNDS`**, as upstream now does, rather than
+  `ASDF_NDARRAY_ERR_INVAL`.
+- **`libasdf_rs::LogLevel` gained `Default` and moved `None` to 7**, matching
+  the header, and `types::asdf_log_cfg_t::level` is now a `c_int`. It was a
+  `LogLevel`, so a C caller storing a value with no variant -- as
+  `ASDF_LOG_NONE + 1` now is, and any out-of-range value always was -- made
+  reading the config undefined behaviour. `default_log_level` is no longer
+  cached.
+- The upstream-suite gate compiles with `-D_GNU_SOURCE` and runs with
+  `ASDF_LOG_LEVEL` and `ASDF_LOG_COLOR` cleared, as upstream's `make check`
+  does.
+
 ## [0.2.6] - 2026-10-12
 
 `asdf-cli` 0.3.0, and nothing else: the libraries are unchanged from 0.2.5.

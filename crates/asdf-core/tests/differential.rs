@@ -10,11 +10,13 @@
 //!   YAML model, or element decoding.
 //!
 //! Python asdf is not a build dependency. The tests look for an interpreter
-//! that can import it and skip with a note when there is none. Point them at
-//! one with `ASDF_PYTHON=/path/to/python`, or create the default venv:
+//! that can import it and skip with a note when there is none. It needs the
+//! optional `lz4` package too, without which Python cannot read LZ4 blocks
+//! and `python_reads_our_compressed_blocks` fails. Point the tests at one
+//! with `ASDF_PYTHON=/path/to/python`, or create the default venv:
 //!
 //! ```console
-//! $ python3 -m venv /tmp/asdf-venv && /tmp/asdf-venv/bin/pip install asdf
+//! $ python3 -m venv /tmp/asdf-venv && /tmp/asdf-venv/bin/pip install asdf lz4
 //! ```
 
 use std::path::PathBuf;

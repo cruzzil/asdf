@@ -232,9 +232,12 @@ int main(void) {
     _Static_assert(ASDF_DATATYPE_INT8 == 1, "");
     _Static_assert(ASDF_DATATYPE_STRUCTURED == 17, "");
 
-    /* Log levels */
-    _Static_assert(ASDF_LOG_NONE == 0, "");
+    /* Log levels: zero is "use the default", and NONE sits above FATAL */
+    _Static_assert(ASDF_LOG_DEFAULT == 0, "");
+    _Static_assert(ASDF_LOG_TRACE == 1, "");
     _Static_assert(ASDF_LOG_FATAL == 6, "");
+    _Static_assert(ASDF_LOG_NONE == 7, "");
+    _Static_assert(ASDF_LOG_NUM_LEVELS == 7, "");
 
     /* Flag enums are bit positions, not sequences */
     _Static_assert(ASDF_PARSER_OPT_EMIT_YAML_EVENTS == 1, "");

@@ -64,14 +64,16 @@ const ERROR_LOG_LEVELS: &[LogLevel] = &[
 
 /// Severity levels, matching `asdf_log_level_t`.
 ///
-/// Zero is `None`, which is what a caller's zeroed `asdf_log_cfg_t` carries
-/// and what upstream reads as "unset, use the default".
+/// Zero is `Default`, which is what a caller's zeroed `asdf_log_cfg_t`
+/// carries and which selects the `ASDF_LOG_LEVEL` environment variable.
+/// `None` sits above every severity, so as a threshold it emits nothing.
+/// Neither is a severity a message can be logged at.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 #[repr(i32)]
 pub enum LogLevel {
-    /// Emit nothing, and what an unset configuration field holds.
+    /// Use the default threshold. What an unset configuration field holds.
     #[default]
-    None = 0,
+    Default = 0,
     /// Fine-grained tracing.
     Trace,
     /// Debugging messages.
@@ -84,10 +86,15 @@ pub enum LogLevel {
     Error,
     /// Unrecoverable errors.
     Fatal,
+    /// Emit nothing; a threshold only.
+    None,
 }
 
 impl LogLevel {
     /// Parse the `ASDF_LOG_LEVEL` environment variable's spelling.
+    ///
+    /// `DEFAULT` is deliberately not a spelling: upstream only matches the
+    /// names of real severities, plus `NONE`.
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_ascii_uppercase().as_str() {
             "NONE" => Some(LogLevel::None),
@@ -104,25 +111,45 @@ impl LogLevel {
     /// The name used in log output.
     pub fn as_str(self) -> &'static str {
         match self {
-            LogLevel::None => "NONE",
+            LogLevel::Default => "DEFAULT",
             LogLevel::Trace => "TRACE",
             LogLevel::Debug => "DEBUG",
             LogLevel::Info => "INFO",
             LogLevel::Warn => "WARN",
             LogLevel::Error => "ERROR",
             LogLevel::Fatal => "FATAL",
+            LogLevel::None => "NONE",
+        }
+    }
+
+    /// Whether a message can be logged at this level.
+    pub fn is_severity(self) -> bool {
+        (LogLevel::Trace..=LogLevel::Fatal).contains(&self)
+    }
+
+    /// The colour upstream gives this level's name.
+    fn color(self) -> &'static str {
+        match self {
+            LogLevel::Trace => "\x1b[94m",
+            LogLevel::Debug => "\x1b[36m",
+            LogLevel::Info => "\x1b[32m",
+            LogLevel::Warn => "\x1b[33m",
+            LogLevel::Error => "\x1b[31m",
+            LogLevel::Fatal => "\x1b[35m",
+            LogLevel::Default | LogLevel::None => "",
         }
     }
 
     fn from_i32(v: i32) -> Option<Self> {
         match v {
-            0 => Some(LogLevel::None),
+            0 => Some(LogLevel::Default),
             1 => Some(LogLevel::Trace),
             2 => Some(LogLevel::Debug),
             3 => Some(LogLevel::Info),
             4 => Some(LogLevel::Warn),
             5 => Some(LogLevel::Error),
             6 => Some(LogLevel::Fatal),
+            7 => Some(LogLevel::None),
             _ => None,
         }
     }
@@ -404,7 +431,18 @@ pub unsafe extern "C" fn asdf_shim_log_message(
     msg: *const c_char,
 ) {
     crate::panic::guard("asdf_shim_log_message", (), || {
+        // A level that is not a real severity is dropped, never looked up.
         let Some(level) = LogLevel::from_i32(level) else { return };
+        if file.is_null() {
+            let src = unsafe { crate::ffi::c_string_lossy(src_file) }.unwrap_or_else(|| "?".into());
+            LogSettings::fallback().log(
+                LogLevel::Fatal,
+                &src,
+                lineno,
+                "logging context not initialized",
+            );
+            return;
+        }
         let text = unsafe { crate::ffi::c_string_lossy(msg) }.unwrap_or_default();
         unsafe { emit_log(file.cast_mut(), 0, level, src_file, lineno, &text) };
     });
@@ -429,69 +467,233 @@ unsafe fn state_for(obj: *mut c_void, is_value: c_int) -> Option<&'static ErrorS
     crate::file_ffi::error_state(file)
 }
 
-/// Write a log line if it meets the active threshold.
+/// Log a message against a handle, honouring its file's log settings.
 ///
 /// # Safety
-/// See [`asdf_shim_log_message`].
+/// See [`asdf_shim_error_set`].
 unsafe fn emit_log(
-    _obj: *mut c_void,
-    _is_value: c_int,
+    obj: *mut c_void,
+    is_value: c_int,
     level: LogLevel,
     src_file: *const c_char,
     lineno: c_int,
     msg: &str,
 ) {
-    if level == LogLevel::None || level < default_log_level() {
-        return;
-    }
+    let file = if obj.is_null() {
+        None
+    } else if is_value != 0 {
+        crate::file_ffi::value_file(obj.cast::<crate::file_ffi::AsdfValue>())
+    } else {
+        Some(obj.cast::<crate::file_ffi::AsdfFile>())
+    };
+    let settings =
+        file.and_then(|f| crate::file_ffi::file_config(f)).map(|c| c.log).unwrap_or_default();
     // A null `src_file` is what the shim passes when it has no source
     // location to report, and upstream prints `?` for it.
     let src = unsafe { crate::ffi::c_string_lossy(src_file) }.unwrap_or_else(|| "?".into());
-    eprintln!("{} libasdf {}:{}: {}", level.as_str(), src, lineno, msg);
+    settings.log(level, &src, lineno, msg);
 }
 
-/// Emit a log line against a file, honouring its own log configuration.
+/// Log a message the library raises itself against a file.
 ///
-/// A file opened with an `asdf_config_t` may name its own stream and level,
-/// which is how a caller captures warnings; without one this falls back to
-/// the process-wide default.
-pub(crate) fn log_to_file(file: *mut crate::file_ffi::AsdfFile, level: LogLevel, msg: &str) {
-    let config = crate::file_ffi::file_config(file).unwrap_or_default();
-    let threshold =
-        if config.log_level == LogLevel::None { default_log_level() } else { config.log_level };
-    if level == LogLevel::None || level < threshold {
-        return;
-    }
-
-    let line = format!("{} libasdf: {msg}\n", level.as_str());
-    if config.log_stream.is_null() {
-        eprint!("{line}");
-        return;
-    }
-    // SAFETY: the caller's `asdf_config_t` named this stream and, by the C
-    // contract, keeps it open for the file's lifetime.
-    unsafe {
-        libc::fwrite(
-            line.as_ptr().cast::<c_void>(),
-            1,
-            line.len(),
-            config.log_stream.cast::<libc::FILE>(),
-        );
-        libc::fflush(config.log_stream.cast::<libc::FILE>());
-    }
+/// `src_file` and `lineno` are where in this library the message comes from,
+/// as `file!()` and `line!()` give them, standing where upstream's own
+/// `__FILE__` and `__LINE__` would.
+pub(crate) fn log_to_file(
+    file: *mut crate::file_ffi::AsdfFile,
+    level: LogLevel,
+    src_file: &str,
+    lineno: u32,
+    msg: &str,
+) {
+    let settings = crate::file_ffi::file_config(file).map(|c| c.log).unwrap_or_default();
+    settings.log(level, src_file, c_int::try_from(lineno).unwrap_or(c_int::MAX), msg);
 }
 
-/// The threshold used when a file carries no explicit configuration.
+/// The threshold an unset level selects: `ASDF_LOG_LEVEL`, else `WARN`.
 ///
-/// Taken from `ASDF_LOG_LEVEL`, defaulting to `WARN`, as upstream documents.
+/// Read afresh on every call, because upstream reads it each time a file is
+/// opened: a caller may change it between one open and the next.
 pub fn default_log_level() -> LogLevel {
-    static CACHED: std::sync::OnceLock<LogLevel> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("ASDF_LOG_LEVEL")
-            .ok()
-            .and_then(|v| LogLevel::from_name(&v))
-            .unwrap_or(LogLevel::Warn)
-    })
+    std::env::var("ASDF_LOG_LEVEL")
+        .ok()
+        .and_then(|v| LogLevel::from_name(&v))
+        .unwrap_or(LogLevel::Warn)
+}
+
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_DIM: &str = "\x1b[2m";
+const ANSI_DIM_GREY: &str = "\x1b[90m";
+
+/// A file's log settings, resolved once when it is opened.
+///
+/// Upstream folds its `asdf_log_cfg_t` into the file's context at open,
+/// reading `ASDF_LOG_LEVEL` and `ASDF_LOG_COLOR` and probing the stream for a
+/// terminal then, and never again. This is that resolved form.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LogSettings {
+    /// Where output goes; null means `stderr`.
+    stream: *mut c_void,
+    /// Messages below this are dropped.
+    ///
+    /// Kept as the raw `asdf_log_level_t` the caller passed, because upstream
+    /// compares it as an integer: anything above `ASDF_LOG_NONE` drops every
+    /// message too, and is not a value a [`LogLevel`] may hold.
+    threshold: c_int,
+    /// Which of the `ASDF_LOG_FIELD_*` parts each line carries; never zero.
+    fields: u64,
+    /// Whether to write ANSI colour codes.
+    color: bool,
+}
+
+impl Default for LogSettings {
+    /// The settings of a file opened without a configuration.
+    fn default() -> Self {
+        Self::resolve(None)
+    }
+}
+
+impl LogSettings {
+    /// Resolve a caller's log configuration, filling in every unset field.
+    pub(crate) fn resolve(config: Option<&crate::types::asdf_log_cfg_t>) -> Self {
+        let (stream, level, fields, no_color) = config
+            .map_or((core::ptr::null_mut(), 0, 0, false), |c| {
+                (c.stream, c.level, c.fields, c.no_color)
+            });
+        let threshold =
+            if level == LogLevel::Default as c_int { default_log_level() as c_int } else { level };
+        Self {
+            stream,
+            threshold,
+            fields: if fields == 0 { crate::types::log_field::ALL } else { fields },
+            color: use_color(stream, no_color),
+        }
+    }
+
+    /// What upstream logs with when there is no context to consult: every
+    /// field, to `stderr`, at any level.
+    fn fallback() -> Self {
+        Self {
+            stream: core::ptr::null_mut(),
+            threshold: LogLevel::Trace as c_int,
+            fields: crate::types::log_field::ALL,
+            color: use_color(core::ptr::null_mut(), false),
+        }
+    }
+
+    /// Whether a message at `level` is written: it must be a real severity
+    /// at or above the threshold.
+    fn emits(&self, level: LogLevel) -> bool {
+        level.is_severity() && self.threshold <= level as c_int
+    }
+
+    /// Write one message, if [`emits`](Self::emits) allows it.
+    pub(crate) fn log(&self, level: LogLevel, src_file: &str, lineno: c_int, msg: &str) {
+        if !self.emits(level) {
+            return;
+        }
+        let line = format_line(level, self.fields, self.color, src_file, lineno, msg);
+        if self.stream.is_null() {
+            use std::io::Write as _;
+            let _ = std::io::stderr().write_all(line.as_bytes());
+            return;
+        }
+        // SAFETY: the caller's `asdf_config_t` named this stream and, by the
+        // C contract, keeps it open for the file's lifetime. Upstream flushes
+        // after every message so none is lost or delayed in a buffer.
+        unsafe {
+            let stream = self.stream.cast::<libc::FILE>();
+            libc::fwrite(line.as_ptr().cast::<c_void>(), 1, line.len(), stream);
+            libc::fflush(stream);
+        }
+    }
+}
+
+/// Whether output to `stream` is colourised, as upstream decides it.
+///
+/// An explicit `no_color` wins outright, since the caller may be parsing the
+/// output. Then `ASDF_LOG_COLOR` forces it on (`1`) or off (`0`), ignoring
+/// any other value. Otherwise only a terminal gets colour; a file, a pipe or
+/// a stream with no descriptor at all would carry the escape codes verbatim.
+fn use_color(stream: *mut c_void, no_color: bool) -> bool {
+    if no_color {
+        return false;
+    }
+    match std::env::var("ASDF_LOG_COLOR").as_deref() {
+        Ok("1") => return true,
+        Ok("0") => return false,
+        _ => {}
+    }
+    let fd = if stream.is_null() {
+        2
+    } else {
+        // SAFETY: as in `LogSettings::log`, the stream is the caller's open
+        // `FILE *`.
+        unsafe { libc::fileno(stream.cast::<libc::FILE>()) }
+    };
+    // SAFETY: `isatty` accepts any descriptor, reporting a bad one as false.
+    fd >= 0 && unsafe { libc::isatty(fd) } == 1
+}
+
+/// Lay out one log line exactly as upstream's `asdf_log_impl` does.
+///
+/// Each field present is separated from the one before by a single space,
+/// and a line always ends in a newline, even when it carries no message.
+fn format_line(
+    level: LogLevel,
+    fields: u64,
+    color: bool,
+    src_file: &str,
+    lineno: c_int,
+    msg: &str,
+) -> String {
+    use crate::types::log_field;
+    use core::fmt::Write as _;
+
+    let mut line = String::new();
+    let mut sep = false;
+    if fields & log_field::LEVEL != 0 {
+        let name = level.as_str();
+        if color {
+            let _ = write!(
+                line,
+                "{ANSI_DIM}[{ANSI_RESET}{}{name}{ANSI_RESET}{ANSI_DIM}]{ANSI_RESET}",
+                level.color()
+            );
+        } else {
+            let _ = write!(line, "[{name:<5}]");
+        }
+        sep = true;
+    }
+    if fields & (log_field::PACKAGE | log_field::FILE | log_field::LINE) != 0 {
+        if sep {
+            line.push(' ');
+        }
+        if color {
+            line.push_str(ANSI_DIM_GREY);
+        }
+        if fields & log_field::PACKAGE != 0 {
+            line.push_str("(libasdf)");
+        }
+        if fields & log_field::FILE != 0 {
+            let _ = write!(line, "{src_file}:");
+        }
+        if fields & log_field::LINE != 0 {
+            let _ = write!(line, "{lineno}:");
+        }
+        if color {
+            line.push_str(ANSI_RESET);
+        }
+        sep = true;
+    }
+    if fields & log_field::MSG != 0 {
+        if sep {
+            line.push(' ');
+        }
+        line.push_str(msg);
+    }
+    line.push('\n');
+    line
 }
 
 #[cfg(test)]
@@ -596,5 +798,84 @@ mod tests {
         // The environment variable is documented as case-insensitive.
         assert_eq!(LogLevel::from_name("warn"), Some(LogLevel::Warn));
         assert_eq!(LogLevel::from_name("nonsense"), None);
+        // `DEFAULT` is the zero value, not something `ASDF_LOG_LEVEL` names.
+        assert_eq!(LogLevel::from_i32(0), Some(LogLevel::Default));
+        assert_eq!(LogLevel::from_name("DEFAULT"), None);
+        assert_eq!(LogLevel::from_i32(8), None);
+    }
+
+    #[test]
+    fn log_levels_match_the_header() {
+        // `ASDF_LOG_NONE` moved from 0 to above `ASDF_LOG_FATAL` in 0.2.1+.
+        assert_eq!(LogLevel::Default as i32, 0);
+        assert_eq!(LogLevel::Trace as i32, 1);
+        assert_eq!(LogLevel::Fatal as i32, 6);
+        assert_eq!(LogLevel::None as i32, 7);
+        assert!(!LogLevel::Default.is_severity());
+        assert!(!LogLevel::None.is_severity());
+        assert!(LogLevel::Trace.is_severity() && LogLevel::Fatal.is_severity());
+    }
+
+    #[test]
+    fn log_lines_separate_fields_with_one_space() {
+        // The cases upstream's `test-log.c` pins in `fields_format`.
+        use crate::types::log_field::*;
+        let cases = [
+            (ALL, "[ERROR] (libasdf)src.c:12: message\n"),
+            (LEVEL | MSG, "[ERROR] message\n"),
+            (FILE | LINE | MSG, "src.c:12: message\n"),
+            (MSG, "message\n"),
+            (LEVEL | FILE, "[ERROR] src.c:\n"),
+        ];
+        for (fields, expected) in cases {
+            let line = format_line(LogLevel::Error, fields, false, "src.c", 12, "message");
+            assert_eq!(line, expected, "fields {fields:#b}");
+        }
+        // Short names are padded to the width of the longest.
+        assert_eq!(format_line(LogLevel::Warn, LEVEL, false, "", 0, ""), "[WARN ]\n");
+    }
+
+    #[test]
+    fn colored_log_lines_match_upstream() {
+        let line = format_line(LogLevel::Warn, crate::types::log_field::ALL, true, "src.c", 3, "m");
+        assert_eq!(
+            line,
+            "\x1b[2m[\x1b[0m\x1b[33mWARN\x1b[0m\x1b[2m]\x1b[0m \
+             \x1b[90m(libasdf)src.c:3:\x1b[0m m\n"
+        );
+    }
+
+    #[test]
+    fn thresholds_compare_as_integers() {
+        let at = |threshold: c_int| LogSettings {
+            stream: core::ptr::null_mut(),
+            threshold,
+            fields: crate::types::log_field::ALL,
+            color: false,
+        };
+        let passes = |s: &LogSettings, level| s.emits(level);
+        // `NONE`, and anything a caller stores above it, drops even `FATAL`.
+        assert!(!passes(&at(LogLevel::None as c_int), LogLevel::Fatal));
+        assert!(!passes(&at(99), LogLevel::Fatal));
+        // An explicit `WARN` is a threshold like any other, not "unset".
+        assert!(passes(&at(LogLevel::Warn as c_int), LogLevel::Warn));
+        assert!(!passes(&at(LogLevel::Warn as c_int), LogLevel::Info));
+        // Levels that are not severities are never written.
+        assert!(!passes(&at(LogLevel::Trace as c_int), LogLevel::Default));
+        assert!(!passes(&at(LogLevel::Trace as c_int), LogLevel::None));
+    }
+
+    #[test]
+    fn explicit_levels_and_fields_survive_resolution() {
+        let config = crate::types::asdf_log_cfg_t {
+            stream: core::ptr::null_mut(),
+            level: LogLevel::None as c_int,
+            fields: 0,
+            no_color: true,
+        };
+        let settings = LogSettings::resolve(Some(&config));
+        assert_eq!(settings.threshold, LogLevel::None as c_int);
+        assert_eq!(settings.fields, crate::types::log_field::ALL);
+        assert!(!settings.color);
     }
 }

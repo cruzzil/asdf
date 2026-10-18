@@ -150,6 +150,8 @@ Every one of these, in the same commit as the code:
 | [`KNOWN-DIVERGENCES.md`](../KNOWN-DIVERGENCES.md) | Entries upstream has closed; entries the sync opened. |
 | [`CHANGELOG.md`](../CHANGELOG.md) | Under `Unreleased`. A sync is always called out as an ABI event. |
 | [`README.md`](../README.md) | It quotes the pass counts and the symbol count too. |
+| `.github/workflows/ci.yml`, `coverage.yml` | The full commit hash CI checks libasdf out at. A pin left behind runs the new pass counts against the old suite. |
+| [`docs/UPSTREAM-BUGS.md`](UPSTREAM-BUGS.md) | Whether each defect is still present at the new commit. |
 
 The counts in those files are not decoration — they are the figures the gates
 print, and a reader uses them to tell whether the document was written against
