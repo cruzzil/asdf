@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "asdf-yaml"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "saphyr-parser",
  "thiserror",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "libasdf-rs"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "asdf-core",
  "cc",
