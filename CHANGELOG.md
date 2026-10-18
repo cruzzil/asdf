@@ -14,6 +14,24 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-10-18
+
+`libasdf-rs` 0.3.0 and `asdf-yaml` 0.2.3. `asdf-core`, `asdf-rs` and
+`asdf-cli` are unchanged.
+
+`libasdf-rs` syncs to libasdf `a76a152`, past 0.2.1, for upstream's logging
+and compressed-read fixes. It is a **minor** bump because its Rust API
+breaks: `LogLevel` gained a variant and `None` changed value, both to match
+the renumbered `asdf_log_level_t`, and `asdf_log_cfg_t::level` is now a
+`c_int`. The C ABI adds and removes no symbol; what changed there is the
+value of `ASDF_LOG_NONE`, as upstream's headers now define it, and how
+logging behaves. See *Changed*.
+
+`asdf-yaml` 0.2.3 only moves to `saphyr-parser` 0.2.1, from 0.1, so the
+parser on crates.io is the one this release was tested with. Nothing in its
+API or behaviour changed. Dependants already accept it, so
+`[workspace.dependencies]` is unchanged.
+
 ### Changed
 
 - **Synced to libasdf `a76a152`**, fifteen commits past `9927a3f` (0.2.1),
@@ -51,6 +69,8 @@ Two version numbers matter here and they are not the same thing:
 - The upstream-suite gate compiles with `-D_GNU_SOURCE` and runs with
   `ASDF_LOG_LEVEL` and `ASDF_LOG_COLOR` cleared, as upstream's `make check`
   does.
+- `asdf-yaml` uses `saphyr-parser` 0.2.1, up from 0.1.0, and `libasdf-rs`
+  builds its C shim with `cc` 1.8.0, up from 1.6.0 (#26, #27, #28).
 
 ## [0.2.6] - 2026-10-12
 
@@ -597,7 +617,8 @@ is listed here so the first release notes are not written from scratch.
 - `asdf-core` reads a file whole rather than mapping it under `cfg(miri)`, so
   dependants can run Miri.
 
-[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/cruzzil/asdf/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/cruzzil/asdf/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/cruzzil/asdf/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/cruzzil/asdf/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/cruzzil/asdf/compare/v0.2.3...v0.2.4
