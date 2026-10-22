@@ -14,6 +14,65 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
+`libasdf-rs` syncs to libasdf `7a158d7`, past 0.2.2. Its Rust API breaks, so
+its next release is a **minor** bump: the `asdf_log_cfg_t`,
+`asdf_parser_cfg_t`, `asdf_emitter_cfg_t`, `asdf_decomp_cfg_t` and
+`asdf_config_t` mirrors gained fields and can no longer be built from a
+literal that lists only the old ones.
+
+### Changed
+
+- **Synced to libasdf `7a158d7`**, eighteen commits past 0.2.2. **An ABI
+  break, deliberately**: structured log handlers (libasdf#288) added
+  `handler` and `handler_userdata` to `asdf_log_cfg_t`, and a
+  `void *_reserved[4]` to the end of it and of `asdf_parser_cfg_t`,
+  `asdf_emitter_cfg_t`, `asdf_config_t` and its `decomp` options. All of them
+  grew, so a caller must be rebuilt against the new headers. Upstream moved
+  the interface version to `1:1:1`, revision only; `SONAME` is still
+  `libasdf.so.0`. `libasdf_version` reports 0.2.2. The surface is **380
+  declared exports**, and upstream's C suite passes **524 of 527**.
+- **`asdf info` marks an alias back to an ancestor `(cycle)`**, and collapses
+  containers reached again through aliases to `(...)` once 1024 nodes have
+  been repeated, as upstream now does (libasdf#282). It printed `(...)` for a
+  cycle and bounded nested aliases by output size alone. Both of upstream's
+  new captures match byte for byte, 19 of 19 in all.
+- **The Python asdf checksum workaround applies only to asdf before 5.3.0**,
+  the release that fixed it, rather than to every 5.x (libasdf#284). A
+  compressed block from asdf 5.3 or later whose stored bytes do not match is
+  now invalid.
+- **`asdf_ndarray_data` and `asdf_ndarray_data_raw` apply the array's
+  `offset`**, returning a pointer that far into the block and the size that
+  remains, or `NULL` if the offset is past its end. For an array in a
+  compressed block, `asdf_ndarray_data_raw` returns the stored compressed
+  bytes whole, as upstream's does, rather than the decompressed data.
+- **Reads honour `offset` and `strides` as the struct holds them at the
+  time**, so a caller that changes either after opening reads the new layout,
+  as upstream's tests do. An array whose elements reach past its data returns
+  `ASDF_NDARRAY_ERR_OUT_OF_BOUNDS` rather than `ERR_INVAL`, as does one whose
+  size does not fit in 64 bits (libasdf#281).
+- **Strides that only restate C order are no longer written**, and a strided
+  array written inline is written in C order without them (libasdf#286).
+
+### Added
+
+- **Custom log handlers.** `asdf_log_cfg_t.handler` receives every record at
+  or above the configured level as an `asdf_log_rec_t`, with
+  `handler_userdata`, in place of the standard output. The new export
+  `asdf_log_default_handler` is that standard output, for a handler that adds
+  to it rather than replacing it. A handler may log from inside itself, and
+  `errno` is preserved across it.
+- `asdf_core::core::ndarray::extent_fits` and `strides_are_contiguous`, the
+  engine's forms of upstream's extent and trivial-strides checks.
+
+### Fixed
+
+- **Log messages longer than 1023 bytes are delivered whole.** They were
+  truncated, as upstream's stack buffer no longer does.
+- **An array with negative strides read as out of range.** The engine checked
+  `offset` plus the elements' total size against the block, which a view
+  reading backwards from the end of its block exceeds; it now checks the
+  bytes the strides actually reach, as upstream does.
+
 ## [0.2.7] - 2026-10-18
 
 `libasdf-rs` 0.3.0 and `asdf-yaml` 0.2.3. `asdf-core`, `asdf-rs` and

@@ -744,7 +744,11 @@ mod tests {
     }
 
     fn parse(bytes: &[u8], flags: AsdfParserOptFlags) -> Parser {
-        let cfg = asdf_parser_cfg_t { flags, log: core::ptr::null_mut() };
+        let cfg = asdf_parser_cfg_t {
+            flags,
+            log: core::ptr::null_mut(),
+            _reserved: [core::ptr::null_mut(); 4],
+        };
         let parser = unsafe { asdf_parser_create(&cfg) };
         assert!(!parser.is_null());
         assert_eq!(
@@ -901,7 +905,11 @@ mod tests {
 
     #[test]
     fn a_bad_buffer_is_reported_not_fatal() {
-        let cfg = asdf_parser_cfg_t { flags: 0, log: core::ptr::null_mut() };
+        let cfg = asdf_parser_cfg_t {
+            flags: 0,
+            log: core::ptr::null_mut(),
+            _reserved: [core::ptr::null_mut(); 4],
+        };
         let parser = Parser(unsafe { asdf_parser_create(&cfg) });
         let junk = b"not an asdf file at all\n";
         assert_eq!(
@@ -929,7 +937,11 @@ mod tests {
 
     #[test]
     fn missing_input_files_are_reported() {
-        let cfg = asdf_parser_cfg_t { flags: 0, log: core::ptr::null_mut() };
+        let cfg = asdf_parser_cfg_t {
+            flags: 0,
+            log: core::ptr::null_mut(),
+            _reserved: [core::ptr::null_mut(); 4],
+        };
         let parser = Parser(unsafe { asdf_parser_create(&cfg) });
         let path = CString::new("/nonexistent/definitely-not-here.asdf").unwrap();
         assert_eq!(unsafe { asdf_parser_set_input_file(parser.0, path.as_ptr()) }, -1);

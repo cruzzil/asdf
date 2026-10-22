@@ -164,28 +164,6 @@ pub fn decode_all(nd: &Ndarray, shape: &[u64], bytes: &[u8]) -> Result<Vec<Eleme
 
     let count = crate::core::ndarray::element_count(shape)?;
 
-    // Refuse before allocating, not after. The shape is attacker-controlled
-    // and `count` here is a count of `Element`s, each several times wider
-    // than a stored element, so a shape the block cannot possibly hold turns
-    // straight into an allocation nothing justifies -- and an allocation
-    // that large aborts the process rather than unwinding, which no
-    // `catch_unwind` at the C boundary can intercept. A file that claims
-    // more elements than its own block has bytes for is simply wrong.
-    let needed = count
-        .checked_mul(item)
-        .and_then(|n| n.checked_add(nd.offset))
-        .ok_or_else(|| err!(OverLimit, "array's extent does not fit in 64 bits"))?;
-    if needed > bytes.len() as u64 {
-        return Err(err!(
-            UnexpectedEof,
-            "array of {count} elements needs {needed} bytes but the block holds {}",
-            bytes.len()
-        ));
-    }
-
-    let count = usize::try_from(count)
-        .map_err(|_| err!(OverLimit, "array has too many elements for this platform"))?;
-
     let strides = match &nd.strides {
         Some(s) if s.len() == shape.len() => s.clone(),
         Some(s) => {
@@ -199,6 +177,37 @@ pub fn decode_all(nd: &Ndarray, shape: &[u64], bytes: &[u8]) -> Result<Vec<Eleme
         None => Ndarray::c_strides(shape, item)
             .ok_or_else(|| err!(OverLimit, "shape {shape:?} is too large to stride"))?,
     };
+
+    // A file that claims elements past the end of its own block is simply
+    // wrong, so the whole extent is checked before anything is read.
+    if !crate::core::ndarray::extent_fits(shape, &strides, item, nd.offset, bytes.len() as u64) {
+        return Err(err!(
+            UnexpectedEof,
+            "array of {count} elements at offset {} reaches past its data: the block holds {} bytes",
+            nd.offset,
+            bytes.len()
+        ));
+    }
+
+    // Refuse before allocating, not after. The shape is attacker-controlled
+    // and each `Element` is several times wider than a stored element, and an
+    // allocation that large aborts the process rather than unwinding, which
+    // no `catch_unwind` at the C boundary can intercept. The extent check
+    // alone does not bound the count: a stride of zero repeats one element
+    // along a dimension, so a few bytes could claim any number of them. Any
+    // layout whose elements do not overlap holds no more elements than its
+    // block has room for, so this refuses only overlapping ones.
+    let fits = count.checked_mul(item).is_some_and(|n| n <= bytes.len() as u64);
+    if !fits {
+        return Err(err!(
+            OverLimit,
+            "array of {count} elements cannot fit: the block holds {} bytes",
+            bytes.len()
+        ));
+    }
+
+    let count = usize::try_from(count)
+        .map_err(|_| err!(OverLimit, "array has too many elements for this platform"))?;
 
     let base = usize::try_from(nd.offset)
         .map_err(|_| err!(InvalidArgument, "ndarray offset overflows this platform"))?;
@@ -813,6 +822,36 @@ mod tests {
         }
         let els = decode_all(&nd, &[3], &bytes).unwrap();
         assert_eq!(els, vec![Element::Int(1), Element::Int(-2), Element::Int(1000)]);
+    }
+
+    /// `arange(16, dtype='u1')[::-1]` as numpy writes it: the view starts at
+    /// the base's last byte and steps backwards, so `offset` plus the
+    /// elements' total size passes the block's end though every byte read is
+    /// inside it.
+    #[test]
+    fn negative_strides_read_backwards_from_the_offset() {
+        let nd = ndarray(
+            "a:\n  source: 0\n  shape: [16]\n  datatype: uint8\n  offset: 15\n  strides: [-1]\n",
+        );
+        let bytes: Vec<u8> = (0..16).collect();
+        let els = decode_all(&nd, &[16], &bytes).unwrap();
+        assert_eq!(els, (0..16).rev().map(Element::Uint).collect::<Vec<_>>());
+
+        // One element further back starts before the block.
+        let mut nd = nd;
+        nd.offset = 14;
+        let err = decode_all(&nd, &[16], &bytes).unwrap_err();
+        assert_eq!(err.code(), crate::ErrorCode::UnexpectedEof);
+    }
+
+    /// A stride of zero repeats one element, so the extent alone would let a
+    /// byte claim any number of them; that is refused before allocating.
+    #[test]
+    fn overlapping_strides_cannot_claim_more_elements_than_bytes() {
+        let nd =
+            ndarray("a:\n  source: 0\n  shape: [1000000]\n  datatype: uint8\n  strides: [0]\n");
+        let err = decode_all(&nd, &[1_000_000], &[7]).unwrap_err();
+        assert_eq!(err.code(), crate::ErrorCode::OverLimit);
     }
 
     #[test]

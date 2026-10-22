@@ -48,6 +48,12 @@ library tells you, for free, exactly which upstream changes have observable
 consequences here: every new failure is either a feature to implement or a
 behaviour that changed under us. Do it first, and keep the output.
 
+It may not get as far as running a test. When upstream's shared test helpers
+(`tests/util.c`) start using a type the old headers lack, the whole suite
+fails to compile -- as it did at `7a158d7`, whose log capture is built on the
+new `asdf_log_rec_t`. That is an answer too: the ABI moved. Re-vendor the
+headers (step 3), and take the baseline from the first run that compiles.
+
 ## 2. Read the log
 
 ```console

@@ -57,56 +57,40 @@ against upstream's own fixture. The binary block layer is exempt:
 block headers, checksums, padding and index offsets are byte-exact by
 specification.
 
-## The compression name field is padded, not over-read
-
-libasdf 0.2.0 replaced the `strncpy` that fills a block header's four-byte
-compression field with a `memcpy` of the full field width, to silence
-`-Wstringop-truncation` (upstream `09c1d52`). The two agree for every name the
-format actually uses -- `zlib` and `bzp2` fill the field, `lz4` is three
-characters plus its terminator -- but `memcpy` reads four bytes from the
-source whatever its length, so a shorter name reads past the end of the
-caller's string.
-
-`BlockHeader::set_compression` zero-fills the field and copies only the name,
-which produces byte-identical headers for every real name without reading
-memory it was not given. Byte parity is what matters in the block layer, and
-it holds.
-
-Covered by `block::header::tests::compression_names_pad_and_trim`.
-
-## Block checksums on compressed blocks
+## Block checksums on compressed blocks: no warning for the workaround
 
 **The specification** means the block's MD5 to cover the used data as stored,
-i.e. the compressed bytes for a compressed block.
+i.e. the compressed bytes for a compressed block. **Python asdf before 5.3.0**
+instead checksums the *uncompressed* data
+([asdf#2015](https://github.com/asdf-format/asdf/issues/2015)). Both
+implementations check the stored bytes first and, only if they do not match,
+the block is compressed and `asdf_library` names `asdf` before 5.3.0, the
+decompressed bytes.
 
-**Python asdf 5.x and earlier** instead checksum the *uncompressed* data
-([asdf#2015](https://github.com/asdf-format/asdf/issues/2015)). libasdf works
-around this by reading the file's `asdf_library` metadata and, when the writer
-is `asdf` at major version 5 or below, verifying against the decompressed
-bytes instead.
-
-**What we do.** The same workaround, with the same version test. It is not a
-theoretical concern: every one of the 17 compressed blocks across the ASDF
-Standard reference corpus and libasdf's fixtures is written by an affected
-version, so without the workaround all 17 would fail verification.
+That much is the same since libasdf#284. What differs is that upstream logs a
+warning when the fallback is what verified a block, naming the writer, and
+this library verifies it silently. Every compressed block in the ASDF
+Standard reference corpus and libasdf's fixtures was written by an affected
+version, so upstream warns on each of them.
 
 Covered by `reader::tests::the_python_checksum_bug_is_worked_around`, which
-pins both directions -- an affected writer verifies, an unaffected one does
-not -- and by `corpus::every_checksummed_block_verifies`.
+pins the version boundary in both directions, by
+`corpus::every_checksummed_block_verifies`, and by
+`differential::python_written_checksums_verify`, which reports which form the
+installed Python asdf actually used.
 
-**A correction to libasdf's version test.** libasdf treats any `asdf` at
-major version 5 or below as affected. Measured against a real install, that
-is too broad: **asdf 5.3.1 records the digest of the stored bytes, i.e.
-correctly.** Applying the workaround on the strength of the version alone
-would therefore mislabel a correct file, and libasdf logs a warning saying so.
+## Overlapping strides are refused
 
-We keep the same version test but use it only as a *gate on a fallback*: the
-stored bytes are checked first, and the decompressed bytes are tried only if
-that fails. A file from a corrected writer verifies on the first attempt and
-never reaches the workaround, so the too-broad version test costs nothing.
+Upstream reads any strides whose reach stays inside the block, including a
+stride of zero, which repeats one element along a dimension. This library
+also refuses an array that has more elements than its block has bytes for,
+before decoding any of it. Each decoded element is several times wider than a
+stored one and the shape comes from the file, so without that bound a
+one-byte block with `strides: [0]` could ask for an allocation large enough to
+abort the process. Arrays whose elements do not overlap -- every view numpy
+writes, including transposed, sliced and reversed ones -- are unaffected.
 
-Measured by `differential::python_written_checksums_verify`, which reports
-which form the installed Python asdf actually used rather than assuming.
+Covered by `core::elements::tests::overlapping_strides_cannot_claim_more_elements_than_bytes`.
 
 ## Six extra exported symbols: `asdf_shim_*`
 

@@ -273,8 +273,8 @@ impl Reader {
     /// # The Python asdf compatibility case
     ///
     /// For a *compressed* block, the specification means the checksum to
-    /// cover the bytes as stored. Python asdf 5.x and earlier instead
-    /// checksum the *uncompressed* data
+    /// cover the bytes as stored. Python asdf before 5.3.0 instead
+    /// checksums the *uncompressed* data
     /// ([asdf#2015](https://github.com/asdf-format/asdf/issues/2015)).
     /// libasdf works around this by consulting the file's `asdf_library`
     /// metadata, and so do we: see [`Reader::has_python_checksum_bug`]. A
@@ -311,9 +311,9 @@ impl Reader {
     /// checksums compressed blocks incorrectly.
     ///
     /// Matches libasdf's test: the `asdf_library` name is `asdf` and its
-    /// major version is 5 or below.
+    /// version is before 5.3.0, the release that fixed it.
     pub fn has_python_checksum_bug(&self) -> bool {
-        const BUGGY_THROUGH_MAJOR: u32 = 5;
+        const FIXED_IN: (u32, u32) = (5, 3);
 
         let Ok(Some(doc)) = self.tree() else { return false };
         let Some(root) = doc.root() else { return false };
@@ -330,7 +330,7 @@ impl Reader {
 
         doc.mapping_get(library, "version")
             .and_then(|id| doc.resolved(id).as_str().map(crate::Version::parse))
-            .is_some_and(|v| v.major <= BUGGY_THROUGH_MAJOR)
+            .is_some_and(|v| (v.major, v.minor) < FIXED_IN)
     }
 }
 
@@ -755,7 +755,12 @@ mod tests {
             "an affected writer's checksum should verify against the uncompressed data"
         );
 
-        // A writer past the fix: the same file is genuinely invalid.
+        // Writers past the fix, which landed in 5.3.0: the same file is
+        // genuinely invalid.
+        let r = Reader::from_bytes(make("5.2.9")).unwrap();
+        assert!(r.has_python_checksum_bug());
+        let r = Reader::from_bytes(make("5.3.0")).unwrap();
+        assert!(!r.has_python_checksum_bug());
         let r = Reader::from_bytes(make("6.0.0")).unwrap();
         assert!(!r.has_python_checksum_bug());
         assert_eq!(

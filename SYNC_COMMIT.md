@@ -5,12 +5,12 @@ implementation is synchronised with.
 
 | | |
 |---|---|
-| **Commit** | `a76a152` |
-| **Describe** | `0.2.1-15-ga76a152` |
-| **Subject** | Merge pull request #280 from embray/logging-fixes |
-| **Package version** | 0.2.1 |
-| **Library interface version** | `1:0:1` — `SONAME` `libasdf.so.0`, filename `libasdf.so.0.1.0` |
-| **Synced on** | 2026-10-18 |
+| **Commit** | `7a158d7` |
+| **Describe** | `0.2.2-18-g7a158d7` |
+| **Subject** | Merge pull request #281 from cruzzil/fix-ndarray-size-overflow |
+| **Package version** | 0.2.2 |
+| **Library interface version** | `1:1:1` — `SONAME` `libasdf.so.0`, filename `libasdf.so.0.1.1` |
+| **Synced on** | 2026-10-22 |
 
 ## What "synced" means here
 
@@ -38,5 +38,5 @@ Re-vendoring is a deliberate act: it can change the ABI. The full procedure is
 To see what has landed upstream since this point:
 
 ```console
-$ git -C /path/to/libasdf log --oneline a76a152..origin/main
+$ git -C /path/to/libasdf log --oneline 7a158d7..origin/main
 ```

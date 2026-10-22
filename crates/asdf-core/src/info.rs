@@ -6,6 +6,7 @@
 //! as tests.
 
 use core::fmt::Write as _;
+use std::collections::HashSet;
 
 use asdf_yaml::{Document, NodeData, NodeId};
 
@@ -181,9 +182,15 @@ struct TreeState {
     /// six words and perfectly well-formed -- and following it is infinite
     /// descent. Recursion is bounded by the stack, and overflowing the
     /// stack aborts the process; it does not unwind, so the C ABI's panic
-    /// guard cannot catch it either. A node already on the path is rendered
-    /// as the cycle it is and not entered again.
+    /// guard cannot catch it either. A node already on the path is marked
+    /// `(cycle)`, as upstream marks it, and not entered again.
     path: Vec<NodeId>,
+    /// Every container rendered so far. Meeting one again means an alias led
+    /// to it, and everything under it is a repeat.
+    visited: HashSet<NodeId>,
+    /// How many nodes have been rendered under repeats. Past
+    /// [`MAX_REPEATED_NODES`] a repeated container is collapsed to `(...)`.
+    repeated_nodes: usize,
     /// How much rendered output is still allowed.
     ///
     /// Aliases need not be cyclic to be explosive: ten levels of ten-way
@@ -200,6 +207,15 @@ struct TreeState {
     /// bytes pile up.
     visits: u64,
 }
+
+/// How many nodes are rendered again under containers reached a second time
+/// through an alias before further such containers are collapsed.
+///
+/// Upstream's `MAX_REPEATED_NODES`. Aliases need not be cyclic to be
+/// explosive: ten levels of ten-way nesting is 10^10 nodes from a few hundred
+/// bytes, and expanding aliases is what `info` is for, so they cannot simply
+/// be refused.
+const MAX_REPEATED_NODES: usize = 1024;
 
 /// The rendered size at which tree output is cut short.
 ///
@@ -244,6 +260,7 @@ enum NodeIndex<'a> {
     Index(usize),
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_node(
     out: &mut String,
     doc: &Document,
@@ -251,11 +268,12 @@ fn write_node(
     index: &NodeIndex<'_>,
     depth: usize,
     is_leaf: bool,
+    is_repeat: bool,
     state: &mut TreeState,
 ) {
     let resolved_id = doc.resolve(id);
 
-    if depth > TREE_MAX_DEPTH || state.path.contains(&resolved_id) {
+    if depth > TREE_MAX_DEPTH {
         write_indent(out, state, depth, is_leaf);
         let _ = match index {
             NodeIndex::Key(key) => writeln!(out, "{ANSI_BOLD}{key}{ANSI_RESET} (...)"),
@@ -286,6 +304,10 @@ fn write_node(
         }
     }
 
+    if is_repeat {
+        state.repeated_nodes += 1;
+    }
+
     let resolved = resolved_id;
     let node = doc.node(resolved);
 
@@ -294,6 +316,22 @@ fn write_node(
         out.push_str(&scalar_preview(node.as_str().unwrap_or("")));
         out.push('\n');
         return;
+    }
+
+    // A container's children are not shown when an alias leads back to one
+    // of its own ancestors, or when it is a repeat and repeats have already
+    // filled their allowance.
+    let is_repeat = is_repeat || state.visited.contains(&resolved);
+    if state.path.contains(&resolved) {
+        let _ = writeln!(out, " {ANSI_DIM}(cycle){ANSI_RESET}");
+        return;
+    }
+    if is_repeat && state.repeated_nodes >= MAX_REPEATED_NODES {
+        let _ = writeln!(out, " {ANSI_DIM}(...){ANSI_RESET}");
+        return;
+    }
+    if !is_repeat {
+        state.visited.insert(resolved);
     }
     out.push('\n');
 
@@ -313,7 +351,8 @@ fn write_node(
                     state.active[depth] = false;
                 }
                 let key = doc.resolved(entry.key).as_str().unwrap_or("<complex key>").to_string();
-                write_node(out, doc, entry.value, &NodeIndex::Key(&key), depth + 1, leaf, state);
+                let index = NodeIndex::Key(&key);
+                write_node(out, doc, entry.value, &index, depth + 1, leaf, is_repeat, state);
             }
         }
         NodeData::Sequence { items, .. } => {
@@ -324,7 +363,8 @@ fn write_node(
                 if leaf {
                     state.active[depth] = false;
                 }
-                write_node(out, doc, *item, &NodeIndex::Index(position), depth + 1, leaf, state);
+                let index = NodeIndex::Index(position);
+                write_node(out, doc, *item, &index, depth + 1, leaf, is_repeat, state);
             }
         }
         _ => {}
@@ -382,10 +422,12 @@ pub fn render(reader: &Reader, options: InfoOptions) -> crate::Result<String> {
         let mut state = TreeState {
             active: vec![false; 16],
             path: Vec::new(),
+            visited: HashSet::new(),
+            repeated_nodes: 0,
             budget: TREE_OUTPUT_BUDGET,
             visits: (doc.node_count() as u64).saturating_mul(TREE_VISITS_PER_NODE).max(4096),
         };
-        write_node(&mut out, &doc, root, &NodeIndex::Key("root"), 0, true, &mut state);
+        write_node(&mut out, &doc, root, &NodeIndex::Key("root"), 0, true, false, &mut state);
     }
 
     if options.print_blocks {

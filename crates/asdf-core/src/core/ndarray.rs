@@ -366,6 +366,65 @@ impl Ndarray {
     }
 }
 
+/// Whether every element of an array lies inside its data.
+///
+/// The array has `shape`, elements of `item_size` bytes `strides` bytes
+/// apart, and starts `offset` bytes into `len` bytes of data. A negative
+/// stride reaches back from that start, so the lowest byte reached must not
+/// precede the data and the highest must not pass its end. This is upstream's
+/// `asdf_ndarray_data_check_extent`, and it is checked for the whole array
+/// before any element is read: an array that does not fit is refused outright,
+/// not just at its out-of-range elements.
+///
+/// An empty array trivially fits.
+#[deny(clippy::arithmetic_side_effects)]
+pub fn extent_fits(shape: &[u64], strides: &[i64], item_size: u64, offset: u64, len: u64) -> bool {
+    if shape.contains(&0) {
+        return true;
+    }
+    let mut high = item_size;
+    let mut low = 0u64;
+    for (dim, stride) in shape.iter().zip(strides) {
+        // Nonzero, as checked above; a dimension of length 1 reaches nothing.
+        let last = dim.saturating_sub(1);
+        if last == 0 {
+            continue;
+        }
+        let Some(span) = last.checked_mul(stride.unsigned_abs()) else { return false };
+        let bound = if *stride < 0 { &mut low } else { &mut high };
+        let Some(next) = bound.checked_add(span) else { return false };
+        *bound = next;
+    }
+    low <= offset && len.checked_sub(offset).is_some_and(|rest| high <= rest)
+}
+
+/// Whether `strides` are just the C-contiguous strides of `shape`, and so
+/// say nothing a reader would not assume without them.
+///
+/// As in numpy, the stride of a dimension of length 1 is irrelevant, and an
+/// empty array is trivially contiguous. This is upstream's
+/// `asdf_ndarray_strides_trivial`, which decides whether strides are written.
+#[deny(clippy::arithmetic_side_effects)]
+pub fn strides_are_contiguous(shape: &[u64], strides: &[i64], item_size: u64) -> bool {
+    if shape.is_empty() || shape.contains(&0) {
+        return true;
+    }
+    let Ok(mut expected) = i64::try_from(item_size) else { return false };
+    if expected == 0 {
+        return false;
+    }
+    for (extent, stride) in shape.iter().zip(strides).rev() {
+        if *extent > 1 && *stride != expected {
+            return false;
+        }
+        let Some(next) = i64::try_from(*extent).ok().and_then(|e| expected.checked_mul(e)) else {
+            return false;
+        };
+        expected = next;
+    }
+    true
+}
+
 /// Parse the `source` key, which is either a block index or a URI.
 fn parse_source(doc: &Document, id: NodeId) -> Result<Source> {
     let node = doc.resolved(id);

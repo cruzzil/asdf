@@ -26,13 +26,15 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <asdf/core/ndarray.h>
 #include <asdf/error.h>
 #include <asdf/log.h>
 
-/* Formatted messages are truncated at this length, as libasdf's own are. */
+/* Formatted error messages are truncated at this length, as libasdf's own
+ * are. Log messages longer than this move to the heap and are not. */
 #define ASDF_SHIM_MSG_MAX 1024
 
 /* ---- Implemented in Rust ------------------------------------------- */
@@ -51,6 +53,18 @@ extern void asdf_shim_log_message(
 /* Reads a float16 element, returning its raw bit pattern. */
 extern uint16_t asdf_shim_ndarray_read_float16_bits_at(
     void *ndarray, const uint64_t *indices, int *err);
+
+/* ---- errno --------------------------------------------------------- */
+
+/* errno, for Rust to save and restore around a log handler; Rust has no
+ * portable access to it. */
+ASDF_LOCAL int asdf_shim_errno_get(void) {
+    return errno;
+}
+
+ASDF_LOCAL void asdf_shim_errno_set(int value) {
+    errno = value;
+}
 
 /* ---- Variadic entry points ----------------------------------------- */
 
@@ -95,16 +109,43 @@ ASDF_LOCAL void asdf_shim_file_log_v(
     int lineno,
     const char *fmt,
     ...) {
-    char msg[ASDF_SHIM_MSG_MAX];
+    char buf[ASDF_SHIM_MSG_MAX];
+    char *msg = buf;
     /* A caller may log before reporting errno, so logging must keep it. */
     int saved_errno = errno;
     va_list args;
+    int len;
+
+    if (fmt == NULL)
+        fmt = "";
 
     va_start(args, fmt);
-    vsnprintf(msg, sizeof(msg), fmt == NULL ? "" : fmt, args);
+    len = vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
 
+    if (len < 0) {
+        errno = saved_errno;
+        return;
+    }
+
+    /* Upstream delivers a message whole however long it is. On allocation
+     * failure the truncated one is logged rather than nothing. */
+    if ((size_t)len >= sizeof(buf)) {
+        char *heap = malloc((size_t)len + 1);
+
+        if (heap != NULL) {
+            va_start(args, fmt);
+            vsnprintf(heap, (size_t)len + 1, fmt, args);
+            va_end(args);
+            msg = heap;
+        }
+    }
+
     asdf_shim_log_message((const void *)file, (int)level, src_file, lineno, msg);
+
+    if (msg != buf)
+        free(msg);
+
     errno = saved_errno;
 }
 

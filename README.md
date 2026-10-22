@@ -114,7 +114,7 @@ includedir=${prefix}/include
 
 Name: libasdf
 Description: ASDF C library
-Version: 0.2.1
+Version: 0.2.2
 Libs: -L${libdir} -lasdf
 Cflags: -I${includedir}
 EOF
@@ -152,7 +152,7 @@ wired into the test suite rather than reasoned about:
 
 - **libasdf's own C test suite** — the tests upstream wrote for its own
   implementation, compiled against the vendored headers and linked against
-  the built `libasdf.so`. **510 of 513 pass**, across twelve of its
+  the built `libasdf.so`. **524 of 527 pass**, across twelve of its
   twenty-two suites; the other ten reach into libasdf's private headers and
   cannot run against a different implementation by construction. This is the
   strongest evidence the project can produce, and every suite's pass count is
@@ -161,14 +161,14 @@ wired into the test suite rather than reasoned about:
   YAML they should read as, across seven standard versions. Following the
   corpus README's procedure (inline every array, dereference aliases, compare
   at the value level), **all 105 match exactly**.
-- **libasdf's committed command-line captures** — 17 for `asdf info`, 4 for
+- **libasdf's committed command-line captures** — 19 for `asdf info`, 4 for
   `asdf events` and 3 for `asdf verify-checksums`, all reproduced byte for
   byte, ANSI styling included.
 - **A C ABI conformance harness** — real C programs compiled against the
   vendored headers and linked against the built library, covering the
   `_Generic` macros, struct layouts, enum discriminants, a third-party
   extension registering before `main`, and the exported symbol namespace.
-  Every symbol the headers declare is checked to exist: 379 of 379, read out
+  Every symbol the headers declare is checked to exist: 380 of 380, read out
   of the preprocessed headers rather than a list kept by hand.
 - **Differential tests against Python asdf** — files written here are read by
   the reference implementation and vice versa, across every compression
