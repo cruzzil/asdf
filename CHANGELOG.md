@@ -14,11 +14,18 @@ Two version numbers matter here and they are not the same thing:
 
 ## [Unreleased]
 
-`libasdf-rs` syncs to libasdf `7a158d7`, past 0.2.2. Its Rust API breaks, so
-its next release is a **minor** bump: the `asdf_log_cfg_t`,
-`asdf_parser_cfg_t`, `asdf_emitter_cfg_t`, `asdf_decomp_cfg_t` and
-`asdf_config_t` mirrors gained fields and can no longer be built from a
-literal that lists only the old ones.
+## [0.2.8] - 2026-10-22
+
+`libasdf-rs` 0.4.0 and `asdf-core` 0.2.6. `asdf-rs`, `asdf-cli` and
+`asdf-yaml` are unchanged.
+
+`libasdf-rs` syncs to libasdf `7a158d7`, past 0.2.2. It is a **minor** bump
+because its Rust API breaks: the `asdf_log_cfg_t`, `asdf_parser_cfg_t`,
+`asdf_emitter_cfg_t`, `asdf_decomp_cfg_t` and `asdf_config_t` mirrors gained
+fields and can no longer be built from a literal that lists only the old
+ones. Its C ABI breaks too, as upstream's did; see *Changed*. It needs
+`asdf-core` 0.2.6, whose API only gains functions, and whose behaviour
+changes are the `info`, checksum and strides items below.
 
 ### Changed
 
