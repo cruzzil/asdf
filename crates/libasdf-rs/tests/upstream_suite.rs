@@ -66,16 +66,16 @@ const SUITES: &[Suite] = &[
     Suite { name: "test-error", expect_pass: 3, total: 3, needs_compat_headers: false },
     Suite { name: "test-time", expect_pass: 17, total: 17, needs_compat_headers: false },
     Suite { name: "test-core-extensions", expect_pass: 16, total: 16, needs_compat_headers: false },
-    Suite { name: "test-ndarray", expect_pass: 257, total: 257, needs_compat_headers: true },
+    Suite { name: "test-ndarray", expect_pass: 265, total: 265, needs_compat_headers: true },
     // The two tests that cannot pass, `test_asdf_value_of_type` and
     // `test_asdf_mapping_set_scalars`, compare an emitted file byte for byte
     // against a fixture libasdf wrote, whose `asdf_library` names libasdf.
     // Byte parity on YAML is a nice-to-have and never a gate; the binary
     // layer is where bytes matter.
     Suite { name: "test-value", expect_pass: 69, total: 71, needs_compat_headers: false },
-    Suite { name: "test-block", expect_pass: 6, total: 6, needs_compat_headers: false },
+    Suite { name: "test-block", expect_pass: 7, total: 7, needs_compat_headers: false },
     Suite { name: "test-extension", expect_pass: 12, total: 13, needs_compat_headers: false },
-    Suite { name: "test-log", expect_pass: 9, total: 9, needs_compat_headers: false },
+    Suite { name: "test-log", expect_pass: 14, total: 14, needs_compat_headers: false },
     Suite {
         name: "test-reference-files",
         expect_pass: 113,

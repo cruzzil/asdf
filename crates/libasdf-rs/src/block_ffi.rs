@@ -127,6 +127,11 @@ fn block_ref<'a>(block: *mut AsdfBlock) -> Option<&'a mut AsdfBlock> {
     unsafe { crate::ffi::as_mut(block) }
 }
 
+/// Whether the bytes `asdf_block_data_raw` returns are still compressed.
+pub(crate) fn raw_is_compressed(block: *mut AsdfBlock) -> bool {
+    block_ref(block).is_some_and(|b| b.data_is_compressed)
+}
+
 /// Open a view of a block the file owns.
 ///
 /// # Safety

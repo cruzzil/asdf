@@ -496,7 +496,7 @@ mod aborts {
         let reader = Reader::from_bytes(f).expect("well formed");
         let rendered = asdf_core::info::render(&reader, asdf_core::info::InfoOptions::default())
             .expect("rendering a cyclic tree should succeed, not recurse");
-        assert!(rendered.contains("(...)"), "the cycle should be marked, not followed");
+        assert!(rendered.contains("(cycle)"), "the cycle should be marked, not followed");
     }
 
     /// Nested aliases must not expand without bound on the *array* path

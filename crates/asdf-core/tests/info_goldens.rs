@@ -48,6 +48,8 @@ const CASES: &[Case] = &[
     Case { golden: "anchor", input: "anchor.asdf", blocks: true },
     Case { golden: "exploded0000", input: "exploded0000.asdf", blocks: true },
     Case { golden: "roman_l2_wcs", input: "roman_l2_wcs.asdf", blocks: true },
+    Case { golden: "alias-cycle", input: "alias-cycle.asdf", blocks: true },
+    Case { golden: "alias-expansion", input: "alias-expansion.asdf", blocks: true },
 ];
 
 /// Find a golden's input.

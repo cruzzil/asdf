@@ -12,6 +12,7 @@ use crate::file_ffi::file_document_mut;
 use alloc::ffi::CString;
 use core::ffi::{CStr, c_char, c_int, c_void};
 
+use asdf_core::ErrorCode;
 use asdf_core::compression::Compression;
 use asdf_core::core::datatype::{Datatype, ScalarType};
 use asdf_core::core::elements::{Element, decode_all};
@@ -659,10 +660,32 @@ pub(crate) fn ndarray_data(ndarray: *mut asdf_ndarray_t, size: *mut usize) -> *c
             return core::ptr::null();
         }
     };
+    // The array starts `offset` bytes into its block, as upstream applies it
+    // since 0.2.2. Exactly at the end is an empty but valid pointer; beyond
+    // it there is no array data at all.
+    let offset = unsafe { crate::ffi::as_ref(ndarray.cast_const()) }.map_or(0, |v| v.offset);
+    let Some(rest) = usize::try_from(offset).ok().and_then(|o| bytes.get(o..)) else {
+        if !state.file.is_null() {
+            crate::error_ffi::log_to_file(
+                state.file,
+                crate::error_ffi::LogLevel::Error,
+                file!(),
+                line!(),
+                &format!(
+                    "ndarray offset {offset} is beyond the end of its block data ({} bytes)",
+                    bytes.len()
+                ),
+            );
+        }
+        if !size.is_null() {
+            unsafe { write_out(size, 0) };
+        }
+        return core::ptr::null();
+    };
     if !size.is_null() {
-        unsafe { write_out(size, bytes.len()) };
+        unsafe { write_out(size, rest.len()) };
     }
-    bytes.as_ptr().cast::<c_void>()
+    rest.as_ptr().cast::<c_void>()
 }
 
 /// The array's data as stored, without decompressing.
@@ -674,9 +697,21 @@ pub unsafe extern "C" fn asdf_ndarray_data_raw(
     ndarray: *mut asdf_ndarray_t,
     size: *mut usize,
 ) -> *const c_void {
-    // The engine decompresses on read, so the two coincide for arrays we
-    // hand out; a caller wanting the stored form uses the block API.
-    ndarray_data(ndarray, size)
+    guard("asdf_ndarray_data_raw", core::ptr::null(), || {
+        // An array read from a compressed block gets that block's stored
+        // bytes, whole: its offset is into the decompressed data, so it
+        // means nothing here. Everything else is what `asdf_ndarray_data`
+        // returns, offset and all.
+        let from_file = state_of(ndarray)
+            .is_some_and(|s| s.allocated.is_none() && s.block_index.is_some() && !s.file.is_null());
+        if from_file {
+            let block = unsafe { asdf_ndarray_block(ndarray) };
+            if crate::block_ffi::raw_is_compressed(block) {
+                return unsafe { crate::block_ffi::asdf_block_data_raw(block, size) };
+            }
+        }
+        ndarray_data(ndarray, size)
+    })
 }
 
 /// Set the compression used when the array is written.
@@ -852,9 +887,32 @@ fn is_finite_result(value: f64) -> bool {
 }
 
 /// Decode the array's elements, using the cached data.
-fn elements_of(state: &NdarrayState) -> Option<Vec<Element>> {
-    let data = state.allocated.as_ref().or(state.data.as_ref())?;
-    decode_all(&state.parsed, &state.shape, data).ok()
+fn elements_of(
+    ndarray: *mut asdf_ndarray_t,
+    state: &NdarrayState,
+) -> Result<Vec<Element>, NdarrayErr> {
+    let data = state.allocated.as_ref().or(state.data.as_ref()).ok_or(NdarrayErr::Inval)?;
+    decode_all(&live_layout(ndarray, state), &state.shape, data).map_err(|e| match e.code() {
+        // Upstream reports an array its data does not cover, or whose size
+        // does not fit in 64 bits, as out of bounds rather than invalid.
+        ErrorCode::UnexpectedEof | ErrorCode::OverLimit => NdarrayErr::OutOfBounds,
+        _ => NdarrayErr::Inval,
+    })
+}
+
+/// The array's layout as the caller's struct gives it now.
+///
+/// `offset` and `strides` are public fields, and upstream reads them afresh
+/// on every access, so a caller may change them after the array is opened.
+fn live_layout(ndarray: *mut asdf_ndarray_t, state: &NdarrayState) -> Ndarray {
+    let mut layout = state.parsed.clone();
+    let Some(view) = (unsafe { crate::ffi::as_ref(ndarray.cast_const()) }) else {
+        return layout;
+    };
+    layout.offset = view.offset;
+    layout.strides = (!view.strides.is_null() && !state.shape.is_empty())
+        .then(|| unsafe { core::slice::from_raw_parts(view.strides, state.shape.len()) }.to_vec());
+    layout
 }
 
 /// Read the whole array, converting to `dst_t`.
@@ -875,8 +933,9 @@ pub unsafe extern "C" fn asdf_ndarray_read_all(
         let Some(state) = state_of(ndarray) else {
             return NdarrayErr::Inval;
         };
-        let Some(elements) = elements_of(state) else {
-            return NdarrayErr::Inval;
+        let elements = match elements_of(ndarray, state) {
+            Ok(elements) => elements,
+            Err(err) => return err,
         };
 
         let target = match scalar_from_abi(dst_t) {
@@ -966,9 +1025,12 @@ macro_rules! read_at {
                     set(NdarrayErr::OutOfBounds);
                     return <$ty>::default();
                 };
-                let Some(elements) = elements_of(state) else {
-                    set(NdarrayErr::Inval);
-                    return <$ty>::default();
+                let elements = match elements_of(ndarray, state) {
+                    Ok(elements) => elements,
+                    Err(code) => {
+                        set(code);
+                        return <$ty>::default();
+                    }
                 };
                 let Some(element) = elements.get(flat) else {
                     set(NdarrayErr::OutOfBounds);
@@ -1620,15 +1682,17 @@ fn value_of_ndarray_inner(
 
         // `offset` and `strides` say where the elements sit inside the
         // block, so an array that has them is unreadable without them. Both
-        // are omitted at their defaults, as every other writer omits them.
+        // are omitted at their defaults, as every other writer omits them;
+        // for strides that includes ones that only restate C order.
         if array.offset != 0 {
             let key = doc.add_scalar("offset");
             let value = doc.add_scalar(array.offset.to_string());
             pairs.push((key, value));
         }
-        if !array.strides.is_null() && array.ndim > 0 {
-            let strides =
-                unsafe { core::slice::from_raw_parts(array.strides, array.ndim as usize) };
+        let strides = (!array.strides.is_null() && array.ndim > 0)
+            .then(|| unsafe { core::slice::from_raw_parts(array.strides, array.ndim as usize) })
+            .filter(|s| !asdf_core::core::ndarray::strides_are_contiguous(&shape, s, item_size));
+        if let Some(strides) = strides {
             let items: Vec<_> = strides.iter().map(|s| doc.add_scalar(s.to_string())).collect();
             let node = doc.add_sequence(items);
             if let NodeData::Sequence { style, .. } = &mut doc.node_mut(node).data {
@@ -1696,7 +1760,10 @@ fn inline_value_of_ndarray(
             _ => asdf_core::core::datatype::ByteOrder::native(),
         },
         offset: array.offset,
-        strides: None,
+        // Inline data is always written in C order, so a strided array is
+        // gathered through its strides here and written without them.
+        strides: (!array.strides.is_null() && !shape.is_empty())
+            .then(|| unsafe { core::slice::from_raw_parts(array.strides, shape.len()) }.to_vec()),
         mask: None,
     };
 
@@ -1871,8 +1938,9 @@ pub unsafe extern "C" fn asdf_ndarray_read_at(
         let Some(flat) = flat_index(&state.shape, idx) else {
             return NdarrayErr::OutOfBounds;
         };
-        let Some(elements) = elements_of(state) else {
-            return NdarrayErr::Inval;
+        let elements = match elements_of(ndarray, state) {
+            Ok(elements) => elements,
+            Err(err) => return err,
         };
         let Some(element) = elements.get(flat) else {
             return NdarrayErr::OutOfBounds;
@@ -1956,12 +2024,12 @@ pub(crate) fn ndarray_read_tile_ndim(
     }
 
     // The tile lies inside the shape, so what is left is whether the data
-    // covers the whole array. Upstream reports a block shorter than its
-    // shape needs as out of bounds, not as an invalid array.
-    let held = state.allocated.as_ref().or(state.data.as_ref()).map_or(0, |d| d.as_slice().len());
-    if (held as u64) < ndarray_nbytes(ndarray) {
-        return NdarrayErr::OutOfBounds;
-    }
+    // covers the whole array, which decoding it checks first. Upstream
+    // reports data that does not as out of bounds, not as an invalid array.
+    let elements = match elements_of(ndarray, state) {
+        Ok(elements) => elements,
+        Err(err) => return err,
+    };
 
     let target = match scalar_from_abi(dst_t) {
         ScalarType::Unknown => state.parsed.datatype.scalar,
@@ -1987,10 +2055,6 @@ pub(crate) fn ndarray_read_tile_ndim(
     if count == 0 {
         return deliver(&[], dst);
     }
-
-    let Some(elements) = elements_of(state) else {
-        return NdarrayErr::Inval;
-    };
 
     // The tile is contiguous along the last axis only, so copy it one
     // run at a time and step the outer indices by hand.

@@ -2,15 +2,15 @@
 
 `libasdf-rs` is a drop-in replacement for a *specific* upstream libasdf. That
 target is pinned here so the ABI has a fixed definition rather than a moving
-one, since upstream is at `0.2.1` and still changing.
+one, since upstream is at `0.2.2` and still changing.
 
 | | |
 |---|---|
 | Upstream repository | https://github.com/asdf-format/libasdf |
-| Pinned commit | `a76a152` |
-| Describe | `0.2.1-15-ga76a152` |
-| Package version | `0.2.1` |
-| Library interface version | `1:0:1` -- `SONAME` `libasdf.so.0` |
+| Pinned commit | `7a158d7` |
+| Describe | `0.2.2-18-g7a158d7` |
+| Package version | `0.2.2` |
+| Library interface version | `1:1:1` -- `SONAME` `libasdf.so.0` |
 | ASDF Standard | 1.6.0 (reading 1.0.0 through 1.6.0) |
 | ASDF file format | 1.0.0 |
 
@@ -28,19 +28,32 @@ header that set `level = ASDF_LOG_NONE` now passes `ASDF_LOG_DEFAULT`, and
 gets the default level rather than silence -- which is the bug the change
 fixes, since 0 had always meant "unset" in practice.
 
+`7a158d7`, past 0.2.2, **broke the ABI knowingly and said so**. Structured log
+handlers ([libasdf#288]) added `handler` and `handler_userdata` to
+`asdf_log_cfg_t`, and a `void *_reserved[4]` to the end of it and of
+`asdf_parser_cfg_t`, `asdf_emitter_cfg_t`, `asdf_config_t` and the latter's
+`decomp` options, so that later options need not move their size again. Every
+one of those structs grew, and `asdf_config_t` embeds three of them, so a
+caller built against 0.2.x's headers passes a struct this library now reads
+past the end of. Upstream moved only the revision, to `1:1:1`, on the stated
+grounds that no known software depends on the ABI yet; `SONAME` is still
+`libasdf.so.0`. Rebuild against the vendored headers.
+
+[libasdf#288]: https://github.com/asdf-format/libasdf/pull/288
+
 Re-basing onto a newer upstream is deliberate work, not a routine update: it
 can change the ABI, and most of what it changes is not in the ABI at all. The
 procedure is [`docs/UPSTREAM-SYNC.md`](docs/UPSTREAM-SYNC.md).
 
 ## The exported surface
 
-**379 distinct symbols**, every one of them declared `ASDF_EXPORT` in the
+**380 distinct symbols**, every one of them declared `ASDF_EXPORT` in the
 vendored headers. That figure is not maintained by hand: the
 `every_declared_export_is_defined` gate preprocesses each vendored header,
 reads the declarations out of the result, and fails if the shared library is
 missing any of them. Re-vendoring upstream's headers therefore moves the target
 by itself -- 0.2.0 raised it from 376 by adding `asdf_free`, `asdf_file_find`
-and `asdf_file_find_ex`.
+and `asdf_file_find_ex`, and `7a158d7` to 380 with `asdf_log_default_handler`.
 
 Of those, **77** come from `ASDF_DECLARE_EXTENSION`: eleven functions for each
 of the seven core extensions (`meta`, `datatype`, `ndarray`, `software`,
@@ -49,10 +62,10 @@ functions: `libasdf_version` and `libasdf_software`.
 
 The count assumes `ASDF_HAVE_FLOAT16`. Where the target's C compiler lacks
 `_Float16`, upstream's headers leave `asdf_ndarray_read_float16_at`
-undeclared and the surface is 375.
+undeclared and the surface is 376.
 
 The library additionally exports the six `asdf_shim_*` helpers that `shim.c`
-calls back into, for **387 exported symbols in total**; see
+calls back into, for **388 exported symbols in total**; see
 KNOWN-DIVERGENCES.md for why they cannot be hidden.
 
 Several API entry points are **not** symbols and exist only in the headers,
@@ -88,7 +101,7 @@ rendered output against upstream's committed fixtures byte for byte:
 
 | Gate | What it proves |
 |---|---|
-| `info_goldens` | `asdftool info` reproduces all 17 of upstream's `.info.txt` captures, ANSI styling included. |
+| `info_goldens` | `asdftool info` reproduces all 19 of upstream's `.info.txt` captures, ANSI styling included -- among them the `(cycle)` and `(...)` markers for aliases that loop or repeat without end. |
 | `event_goldens` | `asdftool events --verbose` reproduces all 4 of upstream's `.events.txt` captures. These pin the event *order*, which is not the file's own — the block index is reported before the tree — and the names libfyaml gives YAML events (`+MAP`, `=VAL`, `-SEQ`), which appear in no header. |
 | `verify_goldens` | `asdftool verify-checksums --verbose` reproduces all 3 of upstream's captures, one of which has a deliberately wrong digest — so the failure path is pinned as precisely as the success one. |
 
@@ -141,7 +154,7 @@ cannot drift. A test munit skips -- `test-value`'s locale test does where the
 machine lacks the locale it needs -- counts as neither, so the figures hold on
 every platform.
 
-**510 of 513.**
+**524 of 527.**
 
 | Suite | | |
 |---|---|---|
@@ -151,11 +164,11 @@ every platform.
 | `test-error` | 3/3 | |
 | `test-time` | 17/17 | |
 | `test-core-extensions` | 16/16 | |
-| `test-ndarray` | 257/257 | the numeric conversion matrix, both byte orders deep |
+| `test-ndarray` | 265/265 | the numeric conversion matrix, both byte orders deep; `offset`, and strides including negative ones |
 | `test-value` | 69/71 | the value API in full, including YAML 1.1 scalar resolution and quoting |
-| `test-block` | 6/6 | the low-level block API, including verbatim compressed copies |
+| `test-block` | 7/7 | the low-level block API, including verbatim compressed copies |
 | `test-extension` | 12/13 | |
-| `test-log` | 9/9 | log levels and fields, `ASDF_LOG_COLOR`, colour on a real terminal |
+| `test-log` | 14/14 | log levels and fields, `ASDF_LOG_COLOR`, colour on a real terminal, custom handlers and the default one called directly |
 | `test-reference-files` | 113/113 | every tagged value in every reference file |
 
 The three that do not pass are all `compare_files` checks of emitted YAML
@@ -166,7 +179,7 @@ and there they are exact.
 
 ## Undefined behaviour
 
-`cargo +nightly miri test -p libasdf-rs --lib` runs the FFI layer's 209 unit
+`cargo +nightly miri test -p libasdf-rs --lib` runs the FFI layer's 212 unit
 tests under Miri. That crate holds every unsafe block in the workspace bar one
 (`asdf-core`'s memory map, which Miri cannot execute and which `Reader::open`
 sidesteps under `cfg(miri)`).

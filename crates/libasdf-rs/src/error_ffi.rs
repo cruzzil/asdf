@@ -17,6 +17,8 @@ use std::sync::Mutex;
 
 use asdf_core::ErrorCode;
 
+use crate::types::{asdf_log_cfg_t, asdf_log_handler_t, asdf_log_rec_t};
+
 /// The per-code `printf` format strings, matching `src/error.c` upstream.
 ///
 /// The parameter counts are part of the documented contract for
@@ -490,8 +492,8 @@ unsafe fn emit_log(
         file.and_then(|f| crate::file_ffi::file_config(f)).map(|c| c.log).unwrap_or_default();
     // A null `src_file` is what the shim passes when it has no source
     // location to report, and upstream prints `?` for it.
-    let src = unsafe { crate::ffi::c_string_lossy(src_file) }.unwrap_or_else(|| "?".into());
-    settings.log(level, &src, lineno, msg);
+    let src_file = if src_file.is_null() { c"?".as_ptr() } else { src_file };
+    unsafe { settings.log_c(level, src_file, lineno, msg) };
 }
 
 /// Log a message the library raises itself against a file.
@@ -544,6 +546,11 @@ pub(crate) struct LogSettings {
     fields: u64,
     /// Whether to write ANSI colour codes.
     color: bool,
+    /// A caller's own handler, which takes each record in place of the
+    /// standard output; `None` for the default handler.
+    handler: Option<asdf_log_handler_t>,
+    /// What `handler` is passed alongside each record.
+    handler_userdata: *mut c_void,
 }
 
 impl Default for LogSettings {
@@ -560,6 +567,14 @@ impl LogSettings {
             .map_or((core::ptr::null_mut(), 0, 0, false), |c| {
                 (c.stream, c.level, c.fields, c.no_color)
             });
+        // Naming `asdf_log_default_handler` explicitly is the same as leaving
+        // it unset, and its userdata is then ignored, as upstream's is.
+        let handler = config
+            .and_then(|c| c.handler)
+            .filter(|h| !core::ptr::fn_addr_eq(*h, asdf_log_default_handler as asdf_log_handler_t));
+        let handler_userdata = config
+            .filter(|_| handler.is_some())
+            .map_or(core::ptr::null_mut(), |c| c.handler_userdata);
         let threshold =
             if level == LogLevel::Default as c_int { default_log_level() as c_int } else { level };
         Self {
@@ -567,6 +582,8 @@ impl LogSettings {
             threshold,
             fields: if fields == 0 { crate::types::log_field::ALL } else { fields },
             color: use_color(stream, no_color),
+            handler,
+            handler_userdata,
         }
     }
 
@@ -578,6 +595,8 @@ impl LogSettings {
             threshold: LogLevel::Trace as c_int,
             fields: crate::types::log_field::ALL,
             color: use_color(core::ptr::null_mut(), false),
+            handler: None,
+            handler_userdata: core::ptr::null_mut(),
         }
     }
 
@@ -592,21 +611,152 @@ impl LogSettings {
         if !self.emits(level) {
             return;
         }
-        let line = format_line(level, self.fields, self.color, src_file, lineno, msg);
-        if self.stream.is_null() {
-            use std::io::Write as _;
-            let _ = std::io::stderr().write_all(line.as_bytes());
+        if let Some(handler) = self.handler {
+            let src_file = c_string(src_file);
+            call_handler(handler, self.handler_userdata, level, src_file.as_ptr(), lineno, msg);
             return;
         }
-        // SAFETY: the caller's `asdf_config_t` named this stream and, by the
-        // C contract, keeps it open for the file's lifetime. Upstream flushes
-        // after every message so none is lost or delayed in a buffer.
-        unsafe {
-            let stream = self.stream.cast::<libc::FILE>();
-            libc::fwrite(line.as_ptr().cast::<c_void>(), 1, line.len(), stream);
-            libc::fflush(stream);
-        }
+        let line = format_line(level, self.fields, self.color, PACKAGE, src_file, lineno, msg);
+        write_line(self.stream, &line);
     }
+
+    /// [`log`](Self::log), for a message from C.
+    ///
+    /// A handler gets `src_file` itself rather than a copy. Upstream passes
+    /// the caller's own `__FILE__` through, which outlives the call, and a
+    /// handler that keeps the record's `file` relies on that.
+    ///
+    /// # Safety
+    /// `src_file` must be a valid NUL-terminated string.
+    pub(crate) unsafe fn log_c(
+        &self,
+        level: LogLevel,
+        src_file: *const c_char,
+        lineno: c_int,
+        msg: &str,
+    ) {
+        if !self.emits(level) {
+            return;
+        }
+        if let Some(handler) = self.handler {
+            call_handler(handler, self.handler_userdata, level, src_file, lineno, msg);
+            return;
+        }
+        let src = unsafe { crate::ffi::c_string_lossy(src_file) }.unwrap_or_default();
+        let line = format_line(level, self.fields, self.color, PACKAGE, &src, lineno, msg);
+        write_line(self.stream, &line);
+    }
+}
+
+/// The package every record names.
+const PACKAGE: &str = "libasdf";
+
+/// Write one formatted line to `stream`, or to `stderr` if it is null.
+///
+/// The line goes out in a single write, which the stream's own lock keeps
+/// whole against other threads, as upstream's `flockfile` does.
+fn write_line(stream: *mut c_void, line: &str) {
+    if stream.is_null() {
+        use std::io::Write as _;
+        let _ = std::io::stderr().write_all(line.as_bytes());
+        return;
+    }
+    // SAFETY: the caller named this stream and, by the C contract, keeps it
+    // open while it is in use. Upstream flushes after every message so none
+    // is lost or delayed in a buffer.
+    unsafe {
+        let stream = stream.cast::<libc::FILE>();
+        libc::fwrite(line.as_ptr().cast::<c_void>(), 1, line.len(), stream);
+        libc::fflush(stream);
+    }
+}
+
+unsafe extern "C" {
+    fn asdf_shim_errno_get() -> c_int;
+    fn asdf_shim_errno_set(value: c_int);
+}
+
+/// Run `f` and put `errno` back as it was, as upstream does around logging.
+fn preserving_errno<T>(f: impl FnOnce() -> T) -> T {
+    // SAFETY: both shim functions only read or write the calling thread's
+    // errno.
+    let saved = unsafe { asdf_shim_errno_get() };
+    let out = f();
+    unsafe { asdf_shim_errno_set(saved) };
+    out
+}
+
+/// Hand one record to a caller's handler.
+///
+/// The record and its strings live on this stack frame only, so a handler
+/// that logs again from inside itself gets a record of its own.
+fn call_handler(
+    handler: asdf_log_handler_t,
+    userdata: *mut c_void,
+    level: LogLevel,
+    src_file: *const c_char,
+    lineno: c_int,
+    msg: &str,
+) {
+    let msg = c_string(msg);
+    let rec = asdf_log_rec_t {
+        level: level as c_int,
+        package: c"libasdf".as_ptr(),
+        file: src_file,
+        lineno,
+        msg: msg.as_ptr(),
+    };
+    // SAFETY: the caller supplied this handler and its userdata for exactly
+    // this call; the record outlives it. A handler may change errno, and
+    // upstream promises it need not restore it.
+    preserving_errno(|| unsafe { handler(&raw const rec, userdata) });
+}
+
+/// A C string of `s`, with any interior NUL dropped rather than failing.
+fn c_string(s: &str) -> CString {
+    CString::new(s).unwrap_or_else(|_| CString::new(s.replace('\0', "")).unwrap_or_default())
+}
+
+/// The default log handler, `asdf_log_default_handler`.
+///
+/// Writes `rec` in the standard format, to the stream, with the fields and
+/// colour setting of the `asdf_log_cfg_t` in `userdata`, or of the defaults if
+/// that is null. No threshold applies: a caller calling it directly has
+/// already decided the message is wanted. A level that is not a real severity
+/// is ignored.
+///
+/// # Safety
+/// `rec` must be null or point to a valid record whose strings are null or
+/// NUL-terminated; `userdata` must be null or point to a valid
+/// `asdf_log_cfg_t` whose stream, if any, is open.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asdf_log_default_handler(
+    rec: *const asdf_log_rec_t,
+    userdata: *mut c_void,
+) {
+    crate::panic::guard("asdf_log_default_handler", (), || {
+        preserving_errno(|| {
+            let Some(rec) = (unsafe { crate::ffi::as_ref(rec) }) else { return };
+            let Some(level) = LogLevel::from_i32(rec.level).filter(|l| l.is_severity()) else {
+                return;
+            };
+            let cfg = unsafe { crate::ffi::as_ref(userdata.cast::<asdf_log_cfg_t>()) };
+            let (stream, fields, no_color) =
+                cfg.map_or((core::ptr::null_mut(), 0, false), |c| (c.stream, c.fields, c.no_color));
+            let fields = if fields == 0 { crate::types::log_field::ALL } else { fields };
+            let text = |p| unsafe { crate::ffi::c_string_lossy(p) }.unwrap_or_default();
+            let line = format_line(
+                level,
+                fields,
+                use_color(stream, no_color),
+                &text(rec.package),
+                &text(rec.file),
+                rec.lineno,
+                &text(rec.msg),
+            );
+            write_line(stream, &line);
+        });
+    });
 }
 
 /// Whether output to `stream` is colourised, as upstream decides it.
@@ -643,6 +793,7 @@ fn format_line(
     level: LogLevel,
     fields: u64,
     color: bool,
+    package: &str,
     src_file: &str,
     lineno: c_int,
     msg: &str,
@@ -673,7 +824,7 @@ fn format_line(
             line.push_str(ANSI_DIM_GREY);
         }
         if fields & log_field::PACKAGE != 0 {
-            line.push_str("(libasdf)");
+            let _ = write!(line, "({package})");
         }
         if fields & log_field::FILE != 0 {
             let _ = write!(line, "{src_file}:");
@@ -828,16 +979,28 @@ mod tests {
             (LEVEL | FILE, "[ERROR] src.c:\n"),
         ];
         for (fields, expected) in cases {
-            let line = format_line(LogLevel::Error, fields, false, "src.c", 12, "message");
+            let line =
+                format_line(LogLevel::Error, fields, false, super::PACKAGE, "src.c", 12, "message");
             assert_eq!(line, expected, "fields {fields:#b}");
         }
         // Short names are padded to the width of the longest.
-        assert_eq!(format_line(LogLevel::Warn, LEVEL, false, "", 0, ""), "[WARN ]\n");
+        assert_eq!(
+            format_line(LogLevel::Warn, LEVEL, false, super::PACKAGE, "", 0, ""),
+            "[WARN ]\n"
+        );
     }
 
     #[test]
     fn colored_log_lines_match_upstream() {
-        let line = format_line(LogLevel::Warn, crate::types::log_field::ALL, true, "src.c", 3, "m");
+        let line = format_line(
+            LogLevel::Warn,
+            crate::types::log_field::ALL,
+            true,
+            PACKAGE,
+            "src.c",
+            3,
+            "m",
+        );
         assert_eq!(
             line,
             "\x1b[2m[\x1b[0m\x1b[33mWARN\x1b[0m\x1b[2m]\x1b[0m \
@@ -852,6 +1015,8 @@ mod tests {
             threshold,
             fields: crate::types::log_field::ALL,
             color: false,
+            handler: None,
+            handler_userdata: core::ptr::null_mut(),
         };
         let passes = |s: &LogSettings, level| s.emits(level);
         // `NONE`, and anything a caller stores above it, drops even `FATAL`.
@@ -876,7 +1041,8 @@ mod tests {
             (LogLevel::Fatal, "\x1b[35m"),
         ];
         for (level, color) in expected {
-            let line = format_line(level, crate::types::log_field::LEVEL, true, "", 0, "");
+            let line =
+                format_line(level, crate::types::log_field::LEVEL, true, super::PACKAGE, "", 0, "");
             assert!(line.contains(&format!("{color}{}", level.as_str())), "{level:?}: {line:?}");
         }
         // The two thresholds are never printed, so they carry no colour.
@@ -998,6 +1164,9 @@ mod tests {
             level: LogLevel::None as c_int,
             fields: 0,
             no_color: true,
+            handler: None,
+            handler_userdata: core::ptr::null_mut(),
+            _reserved: [core::ptr::null_mut(); 4],
         };
         let settings = LogSettings::resolve(Some(&config));
         assert_eq!(settings.threshold, LogLevel::None as c_int);

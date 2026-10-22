@@ -18,10 +18,10 @@ exist *only* in the headers:
 | | |
 |---|---|
 | Upstream | https://github.com/asdf-format/libasdf |
-| Commit | `a76a152` |
-| Describe | `0.2.1-15-ga76a152` |
-| Package version | 0.2.1 |
-| Vendored on | 2026-10-18 |
+| Commit | `7a158d7` |
+| Describe | `0.2.2-18-g7a158d7` |
+| Package version | 0.2.2 |
+| Vendored on | 2026-10-22 |
 | Licence | BSD-3-Clause — the upstream text is vendored alongside, as `LICENSE` |
 
 `asdf/config.h.in` is **not** vendored; `build.rs` generates `asdf/config.h` for the
@@ -30,8 +30,9 @@ target instead.
 Up to 0.1.0 it also generated an empty `sys/time.h` for MSVC, which has no such
 header, because `asdf/core/time.h` included it while needing only `struct timespec`.
 Upstream dropped that include in 0.2.0 ([gh-261]), so the shim is gone. 0.2.1
-left the headers untouched, and `a76a152` changed only `asdf/log.h`; no
-workaround went away with either.
+left the headers untouched, `a76a152` changed only `asdf/log.h`, and `7a158d7`
+changed `asdf/log.h`, `asdf/parser.h`, `asdf/emitter.h`, `asdf/file.h` and
+`asdf/core/ndarray.h`; no workaround went away with any of them.
 
 [gh-261]: https://github.com/asdf-format/libasdf/issues/261
 
