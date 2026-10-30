@@ -26,7 +26,7 @@ authors = ["The libasdf-rs Developers"]
 asdf-core = { path = "crates/asdf-core", version = "0.2.6" }
 asdf-yaml = { path = "crates/asdf-yaml", version = "0.2.2" }
 
-saphyr-parser = "0.2.1"
+saphyr-parser = "0.3.2"
 thiserror = "2"
 half = "2"
 libc = "0.2"
